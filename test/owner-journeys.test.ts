@@ -234,10 +234,10 @@ test('Journeys C/D + audit: owner commands reach the live call and the timeline 
   }, 'commands applied to the live call');
   const commands = (await request(call.app).get(`/conversations/${call.conversationId}/runtime/commands`)).body as Array<Record<string, unknown>>;
   const byId = Object.fromEntries(commands.map((command) => [command.id, command]));
-  assert.equal(byId.cmd_takeover.type, 'takeover');
+  assert.equal(byId.cmd_takeover.type, 'take_over');
   assert.equal(byId.cmd_takeover.status, 'applied_live');
   assert.ok(byId.cmd_takeover.processedAt && byId.cmd_takeover.appliedLiveAt);
-  assert.equal(byId.cmd_style.type, 'set_override');
+  assert.equal(byId.cmd_style.type, 'adjust_interaction');
   assert.equal(byId.cmd_style.status, 'applied_live');
   assert.equal(byId.cmd_stale.status, 'rejected');
   assert.match(String(byId.cmd_stale.error), /stale/);

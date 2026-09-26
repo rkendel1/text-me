@@ -10,7 +10,7 @@ import type {
   ConversationRuntimeStore,
   RuntimeOverrideStore,
 } from '../runtime/store.js';
-import type { RuntimeCommand, RuntimeCommandStore } from '../runtime/commands.js';
+import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from '../runtime/commands.js';
 
 interface ConversationRuntimeRow {
   conversation_id: string;
@@ -337,7 +337,22 @@ interface RuntimeCommandRow {
   created_at: Date;
   processed_at: Date | null;
   applied_live_at: Date | null;
+  runtime_id: string | null;
 }
+
+const toCommand = (row: RuntimeCommandRow): RuntimeCommand => ({
+  id: row.id,
+  conversationId: row.conversation_id,
+  runtimeId: row.runtime_id ?? runtimeIdFor(row.conversation_id),
+  ownerId: row.owner_id,
+  type: row.type,
+  payload: row.payload,
+  status: row.status,
+  ...(row.error ? { error: row.error } : {}),
+  createdAt: row.created_at,
+  ...(row.processed_at ? { processedAt: row.processed_at } : {}),
+  ...(row.applied_live_at ? { appliedLiveAt: row.applied_live_at } : {}),
+});
 
 /** Auditable history of every owner command sent to a conversation's runtime. */
 export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
@@ -359,17 +374,18 @@ export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
       )
     `);
     await this.pool.query('CREATE INDEX IF NOT EXISTS idx_runtime_commands_conversation ON runtime_commands (conversation_id, created_at)');
+    await this.pool.query('ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS runtime_id TEXT');
   }
 
   async record(command: RuntimeCommand): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO runtime_commands (id, conversation_id, owner_id, type, payload, status, error, created_at, processed_at, applied_live_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO runtime_commands (id, conversation_id, owner_id, type, payload, status, error, created_at, processed_at, applied_live_at, runtime_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (id) DO NOTHING
       `,
       [command.id, command.conversationId, command.ownerId, command.type, command.payload, command.status,
-        command.error ?? null, command.createdAt, command.processedAt ?? null, command.appliedLiveAt ?? null],
+        command.error ?? null, command.createdAt, command.processedAt ?? null, command.appliedLiveAt ?? null, command.runtimeId],
     );
   }
 
@@ -392,17 +408,11 @@ export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
       'SELECT * FROM runtime_commands WHERE conversation_id = $1 ORDER BY created_at ASC, id ASC',
       [conversationId],
     );
-    return result.rows.map((row) => ({
-      id: row.id,
-      conversationId: row.conversation_id,
-      ownerId: row.owner_id,
-      type: row.type,
-      payload: row.payload,
-      status: row.status,
-      ...(row.error ? { error: row.error } : {}),
-      createdAt: row.created_at,
-      ...(row.processed_at ? { processedAt: row.processed_at } : {}),
-      ...(row.applied_live_at ? { appliedLiveAt: row.applied_live_at } : {}),
-    }));
+    return result.rows.map(toCommand);
+  }
+
+  async get(id: string): Promise<RuntimeCommand | null> {
+    const result = await this.pool.query<RuntimeCommandRow>('SELECT * FROM runtime_commands WHERE id = $1', [id]);
+    return result.rows[0] ? toCommand(result.rows[0]) : null;
   }
 }

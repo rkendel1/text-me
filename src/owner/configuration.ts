@@ -34,6 +34,8 @@ export interface OwnerMessageSettings {
   interruptOnlyWhenNeeded: boolean;
   includeSummary: boolean;
   includeSuggestedResponse: boolean;
+  /** Also notify about calls that don't need the owner (off: only when the assistant needs you). */
+  notifyOnActivity: boolean;
 }
 
 export interface OwnerConfiguration {
@@ -128,6 +130,7 @@ function defaultConfiguration(ownerId: string): OwnerConfiguration {
       interruptOnlyWhenNeeded: true,
       includeSummary: true,
       includeSuggestedResponse: true,
+      notifyOnActivity: false,
     },
     onboarding: { completed: false },
   };

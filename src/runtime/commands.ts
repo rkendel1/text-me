@@ -4,12 +4,11 @@ export type RuntimeCommandType =
   | 'stop'
   | 'pause'
   | 'resume'
-  | 'takeover'
+  | 'take_over'
   | 'return_to_assistant'
   | 'interrupt'
-  | 'set_override'
-  | 'clear_override'
-  | 'transition_to_sms'
+  | 'adjust_interaction'
+  | 'transition_to_text'
   | 'answer_owner_request'
   | 'owner_message';
 
@@ -22,6 +21,8 @@ export type RuntimeCommandStatus = 'accepted' | 'applied' | 'applied_live' | 'no
 export interface RuntimeCommand {
   id: string;
   conversationId: string;
+  /** The conversation's runtime; one runtime per conversation, versioned by revision. */
+  runtimeId: string;
   ownerId: string;
   type: RuntimeCommandType;
   payload: Record<string, unknown>;
@@ -36,7 +37,10 @@ export interface RuntimeCommandStore {
   record(command: RuntimeCommand): Promise<void>;
   update(id: string, patch: Pick<RuntimeCommand, 'status'> & Partial<Pick<RuntimeCommand, 'error' | 'processedAt' | 'appliedLiveAt'>>): Promise<void>;
   list(conversationId: string): Promise<RuntimeCommand[]>;
+  get(id: string): Promise<RuntimeCommand | null>;
 }
+
+export const runtimeIdFor = (conversationId: string) => `rt_${conversationId.replace(/^conv_/, '')}`;
 
 export class InMemoryRuntimeCommandStore implements RuntimeCommandStore {
   private readonly commands = new Map<string, RuntimeCommand>();
@@ -50,6 +54,10 @@ export class InMemoryRuntimeCommandStore implements RuntimeCommandStore {
     if (!command) return;
     const status = command.status === 'applied_live' && patch.status === 'applied' ? command.status : patch.status;
     this.commands.set(id, { ...command, ...structuredClone(patch), status });
+  }
+
+  async get(id: string): Promise<RuntimeCommand | null> {
+    return structuredClone(this.commands.get(id) ?? null);
   }
 
   async list(conversationId: string): Promise<RuntimeCommand[]> {

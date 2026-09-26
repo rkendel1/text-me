@@ -114,6 +114,12 @@ export class RealtimeVoiceService {
           await services.repository.appendEvent(conversationId, 'voice.completed', {
             source: 'realtime', outcome: 'failed', error: error instanceof Error ? error.message : 'unknown',
           }, new Date()).catch(() => undefined);
+          await services.conversations.raiseAttention(conversationId, {
+            type: 'error',
+            title: () => 'Your assistant needs attention',
+            body: 'A call couldn’t be answered. The caller was asked to text instead.',
+            dedupeKey: `error:voice:${conversationId}`,
+          });
           socket.close();
         });
       } else if (message.event === 'media' && message.media?.payload && message.media.track !== 'outbound') {

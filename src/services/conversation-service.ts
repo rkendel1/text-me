@@ -3,10 +3,14 @@ import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provider.js';
 import type { MessagingProvider } from '../messaging/provider.js';
-import type { OwnerChannel } from '../owner/channel.js';
+import type { OwnerAttentionService, RaiseAttentionInput } from '../attention/service.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 import { randomUUID } from 'node:crypto';
 import { openOwnerRequest, type OwnerRequest } from '../domain/owner-requests.js';
+
+function firstName(name: string): string {
+  return /^\+?\d/.test(name) ? name : name.split(' ')[0];
+}
 
 function callerDisplayName(conversation: Conversation): string {
   const named = [...conversation.events].reverse().find((event) =>
@@ -34,8 +38,35 @@ export class ConversationService {
     private readonly messaging?: MessagingProvider,
     private readonly ownerPhone = process.env.OWNER_PHONE_NUMBER,
     private readonly ownerId = process.env.OWNER_ID ?? 'owner',
-    private readonly ownerChannel?: OwnerChannel,
+    /** Where "the owner should know" goes; surfaces (phone, Mac, SMS) are the router's business. */
+    private readonly attention?: OwnerAttentionService,
   ) {}
+
+  async resolveAttention(conversationId: string, types: Parameters<OwnerAttentionService['resolve']>[2], reason: string): Promise<void> {
+    if (!this.attention) return;
+    const conversation = await this.repository.getById(conversationId);
+    await this.attention.resolve(conversation?.ownerId ?? this.ownerId, conversationId, types, reason).catch(() => undefined);
+  }
+
+  /** Raise owner attention for a conversation; never fails the conversation itself. */
+  async raiseAttention(conversationId: string, input: Omit<RaiseAttentionInput, 'ownerId' | 'conversationId' | 'title'> & {
+    title: (callerName: string) => string;
+  }): Promise<string | null> {
+    if (!this.attention) return null;
+    try {
+      const conversation = await this.requireConversation(conversationId);
+      const attention = await this.attention.raise({
+        ...input,
+        title: input.title(callerDisplayName(conversation)),
+        ownerId: conversation.ownerId ?? this.ownerId,
+        conversationId,
+      });
+      return attention.id;
+    } catch (error) {
+      console.error(`[attention ${conversationId}]`, error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
 
   async incomingCall(input: IncomingCall): Promise<Conversation> {
     const occurredAt = new Date();
@@ -105,7 +136,13 @@ export class ConversationService {
     await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
       `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
     const ownerMessage = `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`;
-    await this.notifyOwner(conversationId, ownerKey, ownerMessage);
+    await this.raiseAttention(conversationId, {
+      type: 'conversation_transferred',
+      title: (name) => `${firstName(name)} is now texting`,
+      body: `About ${summary}`.replace(/\.$/, ''),
+      dedupeKey: ownerKey,
+      metadata: { messageKey: ownerKey, messageBody: ownerMessage },
+    });
 
     await this.repository.appendEvent(conversationId, 'conversation.channel_transitioned', {
       from: 'voice',
@@ -164,8 +201,17 @@ export class ConversationService {
       requestId, question: input.question, suggestedReplies, source: input.source,
     }, new Date());
     const caller = callerDisplayName(conversation);
-    await this.notifyOwnerSafely(conversationId, `owner-request:${requestId}`,
-      `${caller} is waiting: ${input.question}${suggestedReplies.length ? ` (e.g. "${suggestedReplies[0]}")` : ''} — reply here.`);
+    await this.raiseAttention(conversationId, {
+      type: 'assistant_needs_owner',
+      title: (name) => `${firstName(name)} needs you`,
+      body: `“${input.question}”`,
+      dedupeKey: `owner-request:${requestId}`,
+      metadata: {
+        requestId, suggestedReplies, source: input.source,
+        messageKey: `owner-request:${requestId}`,
+        messageBody: `${caller} is waiting: ${input.question}${suggestedReplies.length ? ` (e.g. "${suggestedReplies[0]}")` : ''} — reply here.`,
+      },
+    });
     return requestId;
   }
 
@@ -193,41 +239,6 @@ export class ConversationService {
       .filter((candidate) => candidate.id !== conversationId && candidate.callerPhone === conversation.callerPhone)
       .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())
       .slice(0, limit);
-  }
-
-  /** Notify the owner without ever failing the caller's conversation. */
-  async notifyOwnerSafely(conversationId: string, key: string, body: string): Promise<void> {
-    try {
-      await this.notifyOwner(conversationId, key, body);
-    } catch (error) {
-      console.error(`[owner-notify ${conversationId}]`, error instanceof Error ? error.message : error);
-    }
-  }
-
-  /**
-   * Tell the owner the caller moved to text: Mac Messages first, then SMS. The
-   * caller has already been texted by now, so a missing owner channel must not
-   * block the transition; the failure is recorded and the conversation still
-   * appears in the owner's control app.
-   */
-  private async notifyOwner(conversationId: string, key: string, body: string): Promise<void> {
-    if (this.ownerChannel) {
-      try {
-        await this.sendOwnerMessage(conversationId, key, body);
-        return;
-      } catch {
-        // Recorded as owner.delivery.failed; fall back to SMS below.
-      }
-    }
-    if (!this.ownerPhone) {
-      if (!this.ownerChannel) throw new HttpError(409, 'Owner phone number is not configured');
-      return;
-    }
-    try {
-      await this.sendOnce(conversationId, key, this.ownerPhone, body);
-    } catch (error) {
-      if (!this.ownerChannel) throw error;
-    }
   }
 
   private voiceSummary(conversation: Conversation): string {
@@ -261,38 +272,6 @@ export class ConversationService {
       throw error;
     }
 
-  }
-
-  private async sendOwnerMessage(
-    conversationId: string,
-    messageId: string,
-    body: string,
-  ): Promise<void> {
-    const conversation = await this.requireConversation(conversationId);
-    const channel = this.ownerChannel;
-    if (!channel) throw new Error('Owner channel is not configured');
-    if (conversation.events.some((event) =>
-      event.type === 'owner.delivery.requested' && event.payload.messageId === messageId)) return;
-    await this.repository.appendEvent(conversationId, 'owner.message.created', {
-      messageId, body, source: channel.type,
-    }, new Date());
-    try {
-      const delivery = await channel.sendMessage({
-        ownerId: this.ownerId,
-        conversationId,
-        messageId,
-        body,
-      });
-      await this.repository.appendEvent(conversationId, 'owner.delivery.requested', {
-        messageId, deliveryId: delivery.deliveryId, source: channel.type,
-      }, new Date());
-    } catch (error) {
-      await this.repository.appendEvent(conversationId, 'owner.delivery.failed', {
-        messageId, source: channel.type,
-        error: error instanceof Error ? error.message : 'unknown',
-      }, new Date());
-      throw error;
-    }
   }
 
   async answerCall(

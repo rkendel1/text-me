@@ -38,7 +38,21 @@ import {
 } from './runtime/store.js';
 import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
-import type { RuntimeCommand, RuntimeCommandStore } from './runtime/commands.js';
+import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from './runtime/commands.js';
+import { OwnerAttentionService } from './attention/service.js';
+import { attentionUrl, createSurfaceDeviceId, type OwnerDeviceCapability } from './attention/model.js';
+import { NotificationRouter } from './attention/router.js';
+import { MacMessagesSurface, OwnerSmsSurface, VapidPushSender, WebPushSurface, type PushSender } from './attention/surfaces.js';
+import {
+  InMemoryAppSecretStore,
+  InMemoryNotificationDeliveryStore,
+  InMemoryOwnerAttentionStore,
+  InMemoryOwnerSurfaceDeviceStore,
+  type AppSecretStore,
+  type NotificationDeliveryStore,
+  type OwnerAttentionStore,
+  type OwnerSurfaceDeviceStore,
+} from './attention/stores.js';
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 import { buildInstructions } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
@@ -68,6 +82,11 @@ export interface AppOptions {
   runtimeControlService?: RuntimeControlService;
   runtimeEventBus?: RuntimeEventBus;
   runtimeCommandStore?: RuntimeCommandStore;
+  attentionStore?: OwnerAttentionStore;
+  notificationDeliveryStore?: NotificationDeliveryStore;
+  surfaceDeviceStore?: OwnerSurfaceDeviceStore;
+  appSecretStore?: AppSecretStore;
+  pushSender?: PushSender;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
@@ -94,6 +113,13 @@ function registerIncomingCallRoute(
       const conversation = await service.incomingCall(incomingCall);
       const providerResponse = provider.answerCall(conversation);
       await service.answerCall(conversation.id, incomingCall.payload);
+      // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
+      await service.raiseAttention(conversation.id, {
+        type: 'conversation_started',
+        title: (name) => `${name} is calling`,
+        body: 'Your assistant is answering',
+        dedupeKey: `started:${conversation.id}`,
+      });
       response
         .status(200)
         .type(providerResponse.contentType)
@@ -114,6 +140,15 @@ function registerStatusRoute(
     try {
       const statusUpdate = provider.parseStatusUpdate(request.body);
       const conversation = await service.updateCallStatus(statusUpdate);
+      if (statusUpdate.status === 'completed') {
+        await service.resolveAttention(conversation.id, ['conversation_started'], 'call ended');
+        await service.raiseAttention(conversation.id, {
+          type: 'conversation_completed',
+          title: (name) => `${name.split(' ')[0]}'s ${conversation.state === 'text_active' ? 'call' : 'conversation'} is complete`,
+          body: conversation.state === 'text_active' ? 'The conversation continues by text' : 'Handled by your assistant',
+          dedupeKey: `completed:${conversation.id}`,
+        });
+      }
       response.status(200).json(presentConversation(conversation));
     } catch (error) {
       next(error);
@@ -135,7 +170,10 @@ function presentRuntime(
   return {
     ...runtime,
     status,
+    runtimeId: runtimeIdFor(runtime.conversationId),
     mode: runtime.aiMode === 'owner_assist' ? 'ask_owner' : runtime.aiMode,
+    overriddenFields: runtime.overriddenFields ?? [],
+    temporarySettings: (runtime.overriddenFields ?? []).length > 0,
     revision: runtime.configurationRevision,
     startedAt: runtime.startedAt?.toISOString() ?? null,
     pausedAt: runtime.pausedAt?.toISOString() ?? null,
@@ -186,8 +224,25 @@ export function createApp(options: AppOptions): express.Express {
     standardHeaders: 'draft-8',
     legacyHeaders: false,
   });
+  // Owner attention: surfaces are optional add-ons; none of them is required for a conversation to work.
+  const attentionStore = options.attentionStore ?? new InMemoryOwnerAttentionStore();
+  const surfaceDevices = options.surfaceDeviceStore ?? new InMemoryOwnerSurfaceDeviceStore();
+  const pushSender = options.pushSender ?? new VapidPushSender(options.appSecretStore ?? new InMemoryAppSecretStore());
+  const attention = new OwnerAttentionService(
+    attentionStore,
+    options.notificationDeliveryStore ?? new InMemoryNotificationDeliveryStore(attentionStore),
+    new NotificationRouter({
+      push: new WebPushSurface(surfaceDevices, pushSender),
+      mac: options.ownerChannel ? new MacMessagesSurface(options.ownerChannel, options.repository) : undefined,
+      sms: new OwnerSmsSurface(messaging, options.ownerPhone),
+    }),
+    async (owner) => ({ notifyOnActivity: (await ownerConfiguration.get(owner)).messages.notifyOnActivity === true }),
+    (raised) => runtime.publishAttention(raised.conversationId, {
+      attentionId: raised.id, attentionType: raised.type, status: raised.status, priority: raised.priority,
+    }),
+  );
   const service = new ConversationService(
-    options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
+    options.repository, messaging, options.ownerPhone, ownerId, attention,
   );
   const engine = new ConversationEngine(
     options.repository,
@@ -575,6 +630,171 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // ---- Owner surfaces: push registration (web now; ios/macos later use the same records) ----
+  const presentSurfaceDevice = (device: Awaited<ReturnType<OwnerSurfaceDeviceStore['list']>>[number]) => ({
+    id: device.id, platform: device.platform, capabilities: device.capabilities, label: device.label ?? null,
+    status: device.status, createdAt: device.createdAt.toISOString(), lastSeenAt: device.lastSeenAt.toISOString(),
+  });
+
+  app.get('/owner/push/config', ownerAuth, async (_request, response, next) => {
+    try {
+      response.json({ publicKey: await pushSender.publicKey() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/owner/push/devices', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await surfaceDevices.list(runtimeOwner(request))).map(presentSurfaceDevice));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/push/devices', ownerAuth, async (request, response, next) => {
+    try {
+      const subscription = request.body?.subscription;
+      const endpoint = subscription?.endpoint;
+      if (typeof endpoint !== 'string' || !/^https:\/\//.test(endpoint) ||
+        typeof subscription?.keys?.p256dh !== 'string' || typeof subscription?.keys?.auth !== 'string') {
+        throw new HttpError(400, 'A valid push subscription is required');
+      }
+      // Capabilities are what we can actually do for a web push device; action buttons only where the browser shows them.
+      const capabilities: OwnerDeviceCapability[] = ['push', 'deep_link'];
+      if (request.body?.supportsActions === true) capabilities.push('interactive_notification');
+      const now = new Date();
+      const device = await surfaceDevices.upsert({
+        id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'web',
+        deviceToken: JSON.stringify({ endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } }),
+        capabilities, label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : undefined,
+        status: 'active', createdAt: now, lastSeenAt: now,
+      });
+      response.status(201).json(presentSurfaceDevice(device));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/owner/push/devices/:id', ownerAuth, async (request, response, next) => {
+    try {
+      const device = (await surfaceDevices.list(runtimeOwner(request))).find((candidate) => candidate.id === String(request.params.id));
+      if (!device) throw new HttpError(404, 'Device not found');
+      await surfaceDevices.setStatus(device.id, 'revoked');
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/push/test', ownerAuth, async (request, response, next) => {
+    try {
+      const devices = (await surfaceDevices.list(runtimeOwner(request))).filter((device) => device.status === 'active' && device.platform === 'web');
+      if (!devices.length) throw new HttpError(409, 'Turn on notifications on this device first');
+      const payload = JSON.stringify({ title: 'Notifications are on', body: 'You’ll hear from your assistant only when it needs you.', url: '/', tag: 'test' });
+      const results = await Promise.all(devices.map((device) => pushSender.send(JSON.parse(device.deviceToken), payload, { ttlSeconds: 60, urgency: 'normal' })
+        .then(() => 'sent', () => 'failed')));
+      response.json({ sent: results.filter((result) => result === 'sent').length, failed: results.filter((result) => result === 'failed').length });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // ---- Owner attention: what needs the owner, and one-tap actions from a notification ----
+  const presentAttention = (item: Awaited<ReturnType<OwnerAttentionService['list']>>[number]) => ({
+    id: item.id, conversationId: item.conversationId, type: item.type, priority: item.priority, title: item.title,
+    body: item.body, actions: item.actions, status: item.status, url: attentionUrl(item),
+    createdAt: item.createdAt.toISOString(), resolvedAt: item.resolvedAt?.toISOString() ?? null,
+  });
+
+  app.get('/owner/attention', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await attention.list(runtimeOwner(request), {
+        open: request.query.open === 'true',
+        conversationId: typeof request.query.conversationId === 'string' ? request.query.conversationId : undefined,
+        limit: 50,
+      })).map(presentAttention));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const requireAttention = async (request: Request) => {
+    const item = await attention.get(String(request.params.id), runtimeOwner(request));
+    if (!item) throw new HttpError(404, 'Not found');
+    return item;
+  };
+
+  app.post('/owner/attention/:id/opened', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      await attention.markOpened(item);
+      response.json(presentAttention((await attention.get(item.id, runtimeOwner(request)))!));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/attention/:id/dismiss', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      await attention.dismiss(item);
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Act on a notification. The conversation comes from the stored attention,
+   * never from the client, and the action runs as a durable runtime command.
+   */
+  app.post('/owner/attention/:id/actions', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      const action = request.body?.action;
+      const commandId = typeof request.body?.commandId === 'string' ? request.body.commandId : `attention:${item.id}:${action}`;
+      if (action === 'take_over') {
+        const snapshot = await runtime.takeOver(item.conversationId, item.ownerId, { commandId });
+        await attention.markActed(item, 'take_over', commandId);
+        response.json({ conversationId: item.conversationId, runtime: presentRuntime(snapshot) });
+        return;
+      }
+      if (action === 'reply') {
+        const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
+        if (!body || body.length > 2000) throw new HttpError(400, 'Reply must be between 1 and 2000 characters');
+        const conversation = await ownerReplies.reply({
+          conversationId: item.conversationId, ownerId: item.ownerId, body, idempotencyKey: commandId, source: 'web',
+        });
+        await attention.markActed(item, 'reply', commandId);
+        response.json({ conversationId: item.conversationId, conversation: presentConversation(conversation) });
+        return;
+      }
+      throw new HttpError(400, 'Unknown action');
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Owner-wide live stream: every change in any of the owner's conversations, including new attention.
+  app.get('/owner/events', ownerAuth, (request, response) => {
+    response.status(200);
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders?.();
+    response.write(`event: ready\ndata: {}\n\n`);
+    const unsubscribe = runtime.subscribeOwner(runtimeOwner(request), (event) => {
+      response.write(`event: ${event.type}\n`);
+      response.write(`data: ${JSON.stringify({ ...event, occurredAt: event.occurredAt.toISOString() })}\n\n`);
+    });
+    const keepAlive = setInterval(() => response.write(': ping\n\n'), 25_000);
+    request.on('close', () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  });
+
   app.get('/owner/configuration', ownerAuth, async (request, response) => {
     response.json(await ownerConfiguration.get((request as Request & { ownerId?: string }).ownerId!));
   });
@@ -744,34 +964,29 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // adjust_interaction: one command, one revision, this conversation only.
   app.patch('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
     try {
-      const patch = request.body as RuntimeConfigurationPatch & { expiresAt?: string };
-      const fields = Object.entries(patch).filter(([field]) =>
-        !['commandId', 'expectedRevision', 'expiresAt'].includes(field),
-      ) as [keyof RuntimeConfigurationPatch, unknown][];
-      if (fields.length === 0) throw new HttpError(400, 'At least one runtime field is required');
-      if (patch.expiresAt !== undefined &&
-        (typeof patch.expiresAt !== 'string' || !Number.isFinite(new Date(patch.expiresAt).getTime()))) {
+      const patch = { ...(request.body ?? {}) } as Record<string, unknown>;
+      const expiresAt = patch.expiresAt;
+      if (expiresAt !== undefined && (typeof expiresAt !== 'string' || !Number.isFinite(new Date(expiresAt).getTime()))) {
         throw new HttpError(400, 'expiresAt must be a valid date');
       }
-      let snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
-      const commandInput = runtimeInput(request);
-      for (const [index, [field, value]] of fields.entries()) {
-        snapshot = await runtime.setTemporaryOverride(
-          String(request.params.id),
-          runtimeOwner(request),
-          field as Parameters<RuntimeControlService['setTemporaryOverride']>[2],
-          value,
-          {
-            ...commandInput,
-            commandId: index === 0 ? commandInput.commandId : undefined,
-            expectedRevision: snapshot.configurationRevision,
-          },
-          typeof patch.expiresAt === 'string' ? new Date(patch.expiresAt) : undefined,
-        );
-      }
-      response.json(presentRuntime(snapshot));
+      for (const key of ['commandId', 'expectedRevision', 'expiresAt']) delete patch[key];
+      const conversationId = String(request.params.id);
+      const conversation = await service.getConversation(conversationId);
+      const snapshot = await runtime.adjust(conversationId, runtimeOwner(request), patch as Parameters<RuntimeControlService['adjust']>[2],
+        runtimeInput(request), typeof expiresAt === 'string' ? new Date(expiresAt) : undefined);
+      response.json(presentRuntime(snapshot, conversation ?? undefined));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Reset this conversation to the owner's defaults.
+  app.delete('/conversations/:id/runtime/overrides', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.resetOverrides(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
@@ -931,6 +1146,19 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/', (_request, response) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.sendFile('index.html', { root: publicDir });
+  });
+  // Deep link from a notification straight into one live conversation (the app loads it, no inbox step).
+  app.get('/conversations/:id/live', (_request, response) => {
+    response.setHeader('Cache-Control', 'no-cache');
+    response.sendFile('index.html', { root: publicDir });
+  });
+  app.get('/sw.js', (_request, response) => {
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Service-Worker-Allowed', '/');
+    response.type('application/javascript').sendFile('sw.js', { root: publicDir });
+  });
+  app.get(/^\/icon-(180|192|512)\.png$/, (request, response) => {
+    response.sendFile(request.path.slice(1), { root: publicDir });
   });
   app.get('/manifest.webmanifest', (_request, response) => {
     response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir });

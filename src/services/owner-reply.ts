@@ -35,6 +35,7 @@ export class OwnerReplyService {
     if (!conversation) throw new HttpError(404, 'Conversation not found');
     const requestId = this.conversations.openOwnerRequest(conversation)?.requestId;
     const messageId = `msg_${randomUUID()}`;
+    await this.conversations.resolveAttention(input.conversationId, ['assistant_needs_owner'], `owner replied via ${input.source}`);
 
     if (this.realtimeVoice && realtimeVoiceStatus(conversation).live) {
       const duplicate = conversation.events.some((event) =>

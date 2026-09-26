@@ -180,3 +180,50 @@ test('runtime commands persist in Postgres and never regress from applied_live',
   assert.equal(stored.status, 'applied_live');
   assert.ok(stored.processedAt && stored.appliedLiveAt);
 });
+
+test('owner attention, deliveries, surface devices and push keys persist in Neon', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { PostgresOwnerAttentionStore, PostgresNotificationDeliveryStore, PostgresOwnerSurfaceDeviceStore, PostgresAppSecretStore } =
+    await import('../src/attention/postgres.js');
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
+  t.after(() => pool.end());
+  const conversations = new PostgresConversationRepository(pool);
+  await conversations.initialize();
+  const attention = new PostgresOwnerAttentionStore(pool);
+  const deliveries = new PostgresNotificationDeliveryStore(pool);
+  const devices = new PostgresOwnerSurfaceDeviceStore(pool);
+  const secrets = new PostgresAppSecretStore(pool);
+  for (const store of [attention, deliveries, devices, secrets]) await store.initialize();
+  const owner = `owner-${Date.now()}`;
+  const { conversation } = await conversations.createIfAbsent({
+    provider: 'fake', providerCallId: `att-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: owner,
+  });
+  const now = new Date();
+  const base = {
+    ownerId: owner, conversationId: conversation.id, type: 'assistant_needs_owner' as const, priority: 'interrupt' as const,
+    title: 'Sam needs you', body: '“Friday?”', actions: ['reply' as const, 'take_over' as const], status: 'pending' as const,
+    dedupeKey: 'owner-request:req_1', metadata: { requestId: 'req_1' }, createdAt: now, updatedAt: now,
+  };
+  const first = await attention.create({ ...base, id: `att_${Date.now()}a` });
+  const duplicate = await attention.create({ ...base, id: `att_${Date.now()}b` });
+  assert.equal(duplicate.id, first.id, 'dedupe key makes raising idempotent');
+  await deliveries.record({ id: `ntf_${Date.now()}`, attentionId: first.id, ownerId: owner, surface: 'web_push', deviceId: 'dev_1', status: 'sent', providerId: '201', createdAt: now });
+  await attention.update(first.id, { status: 'acted', resolvedAt: new Date(), metadata: { action: 'take_over' } });
+  const stored = (await attention.get(first.id))!;
+  assert.equal(stored.status, 'acted');
+  assert.deepEqual(stored.metadata, { requestId: 'req_1', action: 'take_over' });
+  assert.deepEqual(stored.actions, ['reply', 'take_over']);
+  assert.equal((await attention.list(owner, { open: true })).length, 0);
+  assert.equal((await deliveries.listForConversation(conversation.id))[0].surface, 'web_push');
+
+  const token = JSON.stringify({ endpoint: `https://push.example/${owner}`, keys: { p256dh: 'k', auth: 'a' } });
+  const device = await devices.upsert({ id: `dev_${Date.now()}`, ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push'], status: 'active', createdAt: now, lastSeenAt: now });
+  const again = await devices.upsert({ id: 'dev_other', ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push', 'deep_link'], status: 'active', createdAt: now, lastSeenAt: new Date() });
+  assert.equal(again.id, device.id, 'same subscription = same device');
+  assert.deepEqual(again.capabilities, ['push', 'deep_link']);
+
+  const key = `vapid-${Date.now()}`;
+  const [a, b] = await Promise.all([secrets.getOrCreate(key, () => 'first'), secrets.getOrCreate(key, () => 'second')]);
+  assert.equal(a, b, 'concurrent cold starts agree on one key');
+});

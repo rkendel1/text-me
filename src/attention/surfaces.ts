@@ -1,0 +1,174 @@
+import webpush from 'web-push';
+
+import type { ConversationRepository } from '../repositories/conversation-repository.js';
+import type { MessagingProvider } from '../messaging/provider.js';
+import type { OwnerChannel } from '../owner/channel.js';
+import { attentionUrl, type NotificationDelivery, type OwnerAttention, type OwnerSurfaceKind } from './model.js';
+import type { AppSecretStore, OwnerSurfaceDeviceStore } from './stores.js';
+
+export type SurfaceResult = Pick<NotificationDelivery, 'status' | 'deviceId' | 'error' | 'providerId'>;
+
+/**
+ * A place the owner can be reached and act from. Conversations never know
+ * which surfaces exist; the router hands each one an OwnerAttention.
+ */
+export interface OwnerSurface {
+  readonly kind: OwnerSurfaceKind;
+  /** Set up and usable for this owner right now (a registered phone, a paired Mac…). */
+  available(ownerId: string): Promise<boolean>;
+  deliver(attention: OwnerAttention): Promise<SurfaceResult[]>;
+}
+
+// ---------------------------------------------------------------- Web Push
+
+export interface PushSubscriptionJSON {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+export interface PushSender {
+  publicKey(): Promise<string>;
+  send(subscription: PushSubscriptionJSON, payload: string, options: { ttlSeconds: number; urgency: 'high' | 'normal'; topic?: string }): Promise<{ statusCode: number }>;
+}
+
+/** Web Push with VAPID keys generated once and kept in Neon; env keys take precedence. */
+export class VapidPushSender implements PushSender {
+  private keys?: Promise<{ publicKey: string; privateKey: string }>;
+
+  constructor(
+    private readonly secrets: AppSecretStore,
+    private readonly options: { subject?: string; publicKey?: string; privateKey?: string } = {},
+  ) {}
+
+  private loadKeys() {
+    this.keys ??= (async () => {
+      if (this.options.publicKey && this.options.privateKey) {
+        return { publicKey: this.options.publicKey, privateKey: this.options.privateKey };
+      }
+      const stored = await this.secrets.getOrCreate('web_push_vapid', () => JSON.stringify(webpush.generateVAPIDKeys()));
+      return JSON.parse(stored) as { publicKey: string; privateKey: string };
+    })();
+    return this.keys;
+  }
+
+  async publicKey(): Promise<string> {
+    return (await this.loadKeys()).publicKey;
+  }
+
+  async send(subscription: PushSubscriptionJSON, payload: string, options: Parameters<PushSender['send']>[2]) {
+    const keys = await this.loadKeys();
+    const result = await webpush.sendNotification(subscription, payload, {
+      TTL: options.ttlSeconds,
+      urgency: options.urgency,
+      ...(options.topic ? { topic: options.topic } : {}),
+      vapidDetails: { subject: this.options.subject ?? 'mailto:owner@text-me.app', publicKey: keys.publicKey, privateKey: keys.privateKey },
+    });
+    return { statusCode: result.statusCode };
+  }
+}
+
+/** What a phone notification shows: short, human, and only opaque ids in the link. */
+export function pushPayload(attention: OwnerAttention): string {
+  const interactive = attention.actions.filter((action) => action !== 'open');
+  return JSON.stringify({
+    title: attention.title,
+    body: attention.body.length > 180 ? `${attention.body.slice(0, 177)}…` : attention.body,
+    tag: attention.id,
+    url: attentionUrl(attention),
+    actions: interactive.map((action) => ({ action, title: action === 'take_over' ? 'Take Over' : 'Reply' })),
+    renotify: attention.priority === 'interrupt',
+  });
+}
+
+export class WebPushSurface implements OwnerSurface {
+  readonly kind = 'web_push' as const;
+
+  constructor(private readonly devices: OwnerSurfaceDeviceStore, private readonly sender: PushSender) {}
+
+  private async targets(ownerId: string) {
+    return (await this.devices.list(ownerId)).filter((device) =>
+      device.status === 'active' && device.platform === 'web' && device.capabilities.includes('push'));
+  }
+
+  async available(ownerId: string): Promise<boolean> {
+    return (await this.targets(ownerId)).length > 0;
+  }
+
+  async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
+    const payload = pushPayload(attention);
+    return Promise.all((await this.targets(attention.ownerId)).map(async (device): Promise<SurfaceResult> => {
+      try {
+        const result = await this.sender.send(JSON.parse(device.deviceToken) as PushSubscriptionJSON, payload, {
+          ttlSeconds: attention.priority === 'interrupt' ? 600 : 3600,
+          urgency: attention.priority === 'interrupt' ? 'high' : 'normal',
+          topic: attention.id.slice(-32),
+        });
+        return { status: 'sent', deviceId: device.id, providerId: String(result.statusCode) };
+      } catch (error) {
+        const statusCode = (error as { statusCode?: number }).statusCode;
+        // The browser unsubscribed or the subscription expired: stop sending to it.
+        if (statusCode === 404 || statusCode === 410) await this.devices.setStatus(device.id, 'expired');
+        return { status: 'failed', deviceId: device.id, error: statusCode ? `push service ${statusCode}` : (error as Error).message };
+      }
+    }));
+  }
+}
+
+// ---------------------------------------------------------------- Mac Messages (optional)
+
+/** The Mac bridge as one more owner surface; replies come back through the same owner-reply path. */
+export class MacMessagesSurface implements OwnerSurface {
+  readonly kind = 'mac_messages' as const;
+
+  constructor(
+    private readonly channel: OwnerChannel & { isAvailable?(ownerId: string): Promise<boolean> },
+    private readonly repository: ConversationRepository,
+  ) {}
+
+  async available(ownerId: string): Promise<boolean> {
+    return this.channel.isAvailable ? this.channel.isAvailable(ownerId) : true;
+  }
+
+  async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
+    const messageId = String(attention.metadata.messageKey ?? attention.dedupeKey);
+    const body = String(attention.metadata.messageBody ?? `${attention.title}: ${attention.body} — reply here.`);
+    await this.repository.appendEvent(attention.conversationId, 'owner.message.created', {
+      messageId, body, source: 'macos_messages', attentionId: attention.id,
+    }, new Date());
+    try {
+      const delivery = await this.channel.sendMessage({ ownerId: attention.ownerId, conversationId: attention.conversationId, messageId, body });
+      await this.repository.appendEvent(attention.conversationId, 'owner.delivery.requested', {
+        messageId, deliveryId: delivery.deliveryId, source: 'macos_messages', attentionId: attention.id,
+      }, new Date());
+      return [{ status: 'sent', providerId: delivery.deliveryId }];
+    } catch (error) {
+      await this.repository.appendEvent(attention.conversationId, 'owner.delivery.failed', {
+        messageId, source: 'macos_messages', error: error instanceof Error ? error.message : 'unknown', attentionId: attention.id,
+      }, new Date());
+      return [{ status: 'failed', error: error instanceof Error ? error.message : 'unknown' }];
+    }
+  }
+}
+
+// ---------------------------------------------------------------- Owner SMS (fallback)
+
+/** Texts the owner's phone number: the fallback when no other surface can reach them. */
+export class OwnerSmsSurface implements OwnerSurface {
+  readonly kind = 'owner_sms' as const;
+
+  constructor(private readonly messaging: MessagingProvider | undefined, private readonly ownerPhone: string | undefined) {}
+
+  async available(): Promise<boolean> {
+    return Boolean(this.messaging && this.ownerPhone);
+  }
+
+  async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
+    try {
+      const body = String(attention.metadata.messageBody ?? `${attention.title}: ${attention.body} — reply here.`);
+      const result = await this.messaging!.sendMessage({ to: this.ownerPhone!, body, idempotencyKey: `attention:${attention.id}:sms` });
+      return [{ status: 'sent', providerId: result.providerMessageId }];
+    } catch (error) {
+      return [{ status: 'failed', error: error instanceof Error ? error.message : 'unknown' }];
+    }
+  }
+}

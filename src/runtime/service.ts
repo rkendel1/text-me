@@ -12,7 +12,7 @@ import type { OwnerConfigurationService } from '../owner/configuration.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { ConversationRuntimeController } from './controller.js';
 import { InMemoryRuntimeEventBus, type RuntimeEventBus } from './event-bus.js';
-import { InMemoryRuntimeCommandStore, type RuntimeCommand, type RuntimeCommandStore, type RuntimeCommandType } from './commands.js';
+import { InMemoryRuntimeCommandStore, runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore, type RuntimeCommandType } from './commands.js';
 import {
   ConversationRuntimeEventStore,
   ConversationRuntimeStore,
@@ -42,10 +42,10 @@ const COMMAND_TYPES: Partial<Record<Parameters<typeof createRuntimeEvent>[1], Ru
   'runtime.stopped': 'stop',
   'runtime.paused': 'pause',
   'runtime.resumed': 'resume',
-  'runtime.takeover': 'takeover',
+  'runtime.takeover': 'take_over',
   'runtime.returned_to_assistant': 'return_to_assistant',
   'runtime.interrupted': 'interrupt',
-  'runtime.sms_transition_requested': 'transition_to_sms',
+  'runtime.sms_transition_requested': 'transition_to_text',
 };
 
 type RuntimeEventListener = (event: ReturnType<typeof createRuntimeEvent>) => void;
@@ -67,6 +67,11 @@ export class RuntimeControlService {
     return this.commands.list(conversationId);
   }
 
+  /** Let every owner surface (live screens, other instances) see new attention immediately. */
+  async publishAttention(conversationId: string, payload: Record<string, unknown>): Promise<void> {
+    await this.persistEvent(conversationId, 'runtime.attention', payload, true);
+  }
+
   /** The live call acted on this command (called by the instance holding the call). */
   async markCommandAppliedLive(commandId: string): Promise<void> {
     await this.commands.update(commandId, { status: 'applied_live', appliedLiveAt: new Date() });
@@ -80,8 +85,92 @@ export class RuntimeControlService {
     payload: Record<string, unknown>,
   ): Promise<void> {
     await this.commands.record({
-      id: commandId, conversationId, ownerId, type, payload, status: 'accepted', createdAt: new Date(),
+      id: commandId, conversationId, runtimeId: runtimeIdFor(conversationId), ownerId, type, payload, status: 'accepted', createdAt: new Date(),
     });
+  }
+
+  /**
+   * Replay safety: a command id is executed once. Replaying an applied command
+   * returns the current runtime; replaying a rejected one returns its original error.
+   */
+  private async replayed(conversation: Conversation, commandId: string): Promise<ConversationRuntime | null> {
+    const command = await this.commands.get(commandId);
+    if (command && command.conversationId !== conversation.id) throw new HttpError(409, 'Command id already used');
+    if (command?.status === 'rejected') throw new HttpError(409, command.error ?? 'Command was rejected');
+    if (command || await this.eventStore.findByCommandId(conversation.id, commandId)) return this.ensureRuntime(conversation);
+    return null;
+  }
+
+  /**
+   * adjust_interaction: change how the assistant handles this one conversation.
+   * All fields are validated first and applied together as one revision; account
+   * defaults are never touched.
+   */
+  async adjust(
+    conversationId: string,
+    ownerId: string,
+    changes: Partial<Record<RuntimeOverrideField, unknown>>,
+    input: RuntimeCommandInput = {},
+    expiresAt?: Date,
+  ): Promise<ConversationRuntime> {
+    const commandId = input.commandId ?? randomUUID();
+    const conversation = await this.requireOwnedConversation(conversationId, ownerId);
+    const replay = await this.replayed(conversation, commandId);
+    if (replay) return replay;
+    const fields = Object.keys(changes) as RuntimeOverrideField[];
+    const runtime = await this.ensureRuntime(conversation);
+    await this.recordCommand(conversationId, ownerId, 'adjust_interaction', commandId, {
+      changes, expectedRevision: input.expectedRevision, ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
+    });
+    try {
+      if (!fields.length) throw new HttpError(400, 'At least one runtime field is required');
+      this.assertRevision(runtime, input.expectedRevision);
+      for (const field of fields) this.validateOverride(field, changes[field]);
+      if (expiresAt && !Number.isFinite(expiresAt.getTime())) throw new HttpError(400, 'expiresAt must be a valid date');
+    } catch (error) {
+      await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
+      throw error;
+    }
+    for (const field of fields) {
+      await this.overrides.save({ conversationId, field, value: changes[field], createdAt: new Date(), expiresAt });
+    }
+    const updated = this.bump(this.applyOverrides(runtime, await this.overrides.list(conversationId)), {}, true);
+    await this.store.save(updated);
+    await this.syncConversationState(conversation, updated.state);
+    await this.controller.update(conversationId, updated);
+    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
+    await this.persistEvent(conversationId, 'runtime.configuration_changed', {
+      commandId, fields, changes, revision: updated.configurationRevision,
+    }, true);
+    return updated;
+  }
+
+  /** Drop every conversation-scoped override and return to the owner's defaults. */
+  async resetOverrides(conversationId: string, ownerId: string, input: RuntimeCommandInput = {}): Promise<ConversationRuntime> {
+    const commandId = input.commandId ?? randomUUID();
+    const conversation = await this.requireOwnedConversation(conversationId, ownerId);
+    const replay = await this.replayed(conversation, commandId);
+    if (replay) return replay;
+    const runtime = await this.ensureRuntime(conversation);
+    await this.recordCommand(conversationId, ownerId, 'adjust_interaction', commandId, { reset: true, expectedRevision: input.expectedRevision });
+    try {
+      this.assertRevision(runtime, input.expectedRevision);
+    } catch (error) {
+      await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
+      throw error;
+    }
+    const cleared = (await this.overrides.list(conversationId)).map((override) => override.field);
+    await this.overrides.clearConversation(conversationId);
+    // Keep live call state (listening, speaking…) but take every setting from the defaults again.
+    const defaults = await this.ensureRuntime(conversation, true);
+    const updated = this.bump({ ...defaults, state: runtime.state, currentActivity: runtime.currentActivity, aiMode: runtime.aiMode === 'owner_only' && !cleared.includes('aiMode') ? runtime.aiMode : defaults.aiMode }, {}, true);
+    await this.store.save(updated);
+    await this.controller.update(conversationId, updated);
+    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
+    await this.persistEvent(conversationId, 'runtime.configuration_changed', {
+      commandId, reset: true, fields: cleared, revision: updated.configurationRevision,
+    }, true);
+    return updated;
   }
 
   async getRuntime(conversationId: string, ownerId: string): Promise<ConversationRuntime> {
@@ -102,6 +191,21 @@ export class RuntimeControlService {
 
   subscribe(conversationId: string, listener: RuntimeEventListener): () => void {
     return this.bus.subscribe(conversationId, listener as Parameters<RuntimeEventBus['subscribe']>[1]);
+  }
+
+  /** Live events for every conversation this owner can see. */
+  subscribeOwner(ownerId: string, listener: RuntimeEventListener): () => void {
+    const owners = new Map<string, Promise<boolean>>();
+    const visible = (conversationId: string) => {
+      if (!owners.has(conversationId)) {
+        owners.set(conversationId, this.repository.getById(conversationId)
+          .then((conversation) => Boolean(conversation && (!conversation.ownerId || conversation.ownerId === ownerId)), () => false));
+      }
+      return owners.get(conversationId)!;
+    };
+    return this.bus.subscribeAll((event) => {
+      void visible(event.conversationId).then((allowed) => { if (allowed) listener(event as Parameters<RuntimeEventListener>[0]); });
+    });
   }
 
   /** Ask the live call (on whichever instance holds it) to speak the owner's words to the caller. */
@@ -255,45 +359,7 @@ export class RuntimeControlService {
     input: RuntimeCommandInput = {},
     expiresAt?: Date,
   ): Promise<ConversationRuntime> {
-    const commandId = input.commandId ?? randomUUID();
-    const conversation = await this.requireOwnedConversation(conversationId, ownerId);
-    const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
-    if (existing) return this.ensureRuntime(conversation);
-    const runtime = await this.ensureRuntime(conversation);
-    await this.recordCommand(conversationId, ownerId, 'set_override', commandId, {
-      field, value, expectedRevision: input.expectedRevision, ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
-    });
-    try {
-      this.assertRevision(runtime, input.expectedRevision);
-      this.validateOverride(field, value);
-      if (expiresAt && !Number.isFinite(expiresAt.getTime())) {
-        throw new HttpError(400, 'expiresAt must be a valid date');
-      }
-    } catch (error) {
-      await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
-      throw error;
-    }
-    const override: RuntimeOverride = {
-      conversationId,
-      field,
-      value,
-      createdAt: new Date(),
-      expiresAt,
-    };
-    await this.overrides.save(override);
-    const next = this.applyOverrides(runtime, await this.overrides.list(conversationId));
-    const updated = this.bump(next, {}, true);
-    await this.store.save(updated);
-    await this.syncConversationState(conversation, updated.state);
-    await this.controller.update(conversationId, updated);
-    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
-    await this.persistEvent(conversationId, 'runtime.configuration_changed', {
-      commandId,
-      field,
-      value,
-      revision: updated.configurationRevision,
-    }, true);
-    return updated;
+    return this.adjust(conversationId, ownerId, { [field]: value }, input, expiresAt);
   }
 
   async clearTemporaryOverride(
@@ -307,7 +373,7 @@ export class RuntimeControlService {
     const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
-    await this.recordCommand(conversationId, ownerId, 'clear_override', commandId, { field, expectedRevision: input.expectedRevision });
+    await this.recordCommand(conversationId, ownerId, 'adjust_interaction', commandId, { clear: [field], expectedRevision: input.expectedRevision });
     try {
       this.assertRevision(runtime, input.expectedRevision);
       this.validateOverrideField(field);
@@ -463,8 +529,8 @@ export class RuntimeControlService {
   ): Promise<ConversationRuntime> {
     const commandId = input.commandId ?? randomUUID();
     const conversation = await this.requireOwnedConversation(conversationId, ownerId);
-    const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
-    if (existing) return this.ensureRuntime(conversation);
+    const replay = await this.replayed(conversation, commandId);
+    if (replay) return replay;
     const runtime = await this.ensureRuntime(conversation);
     const commandType = COMMAND_TYPES[eventType];
     if (commandType) await this.recordCommand(conversationId, ownerId, commandType, commandId, { expectedRevision: input.expectedRevision });
@@ -547,12 +613,11 @@ export class RuntimeControlService {
 
   private applyOverrides(runtime: ConversationRuntime, overrides: RuntimeOverride[]): ConversationRuntime {
     const now = Date.now();
-    return overrides
-      .filter((override) => !override.expiresAt || override.expiresAt.getTime() > now)
-      .reduce((current, override) => ({
-        ...current,
-        [override.field]: override.value,
-      }), runtime);
+    const active = overrides.filter((override) => !override.expiresAt || override.expiresAt.getTime() > now);
+    return active.reduce((current, override) => ({
+      ...current,
+      [override.field]: override.value,
+    }), { ...runtime, overriddenFields: active.map((override) => override.field) });
   }
 
   private validateOverrideField(field: RuntimeOverrideField): void {

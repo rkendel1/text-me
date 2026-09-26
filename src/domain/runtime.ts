@@ -59,6 +59,8 @@ export interface ConversationRuntime {
   currentActivity?: string;
   configurationRevision: number;
   appliedRevision: number;
+  /** Fields currently overridden for this conversation only (not persisted; derived on read). */
+  overriddenFields?: RuntimeOverrideField[];
   updatedAt: Date;
 }
 
@@ -104,6 +106,7 @@ export type ConversationRuntimeEventType =
   | 'runtime.voice_stopped'
   | 'runtime.owner_needed'
   | 'runtime.owner_speech'
+  | 'runtime.attention'
   | 'runtime.error';
 
 export interface ConversationRuntimeEvent {
