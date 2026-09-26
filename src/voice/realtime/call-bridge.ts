@@ -71,7 +71,7 @@ export class RealtimeCallBridge {
     } = {},
   ) {}
 
-  async start(streamSid: string): Promise<void> {
+  async start(streamSid: string, callSid?: string): Promise<void> {
     this.streamSid = streamSid;
     const conversation = await this.services.repository.getById(this.conversationId);
     if (!conversation) throw new Error(`Conversation not found: ${this.conversationId}`);
@@ -92,6 +92,7 @@ export class RealtimeCallBridge {
       source: 'realtime',
       model: this.connector.modelId,
       streamSid,
+      ...(callSid ? { callSid } : {}),
     }, new Date());
     if (!this.paused && runtime.aiMode !== 'owner_only') {
       await this.requestResponse(`Greet the caller now with: "${configuration.assistant.greeting}"`);
@@ -314,7 +315,7 @@ export class RealtimeCallBridge {
     const text = transcript.trim();
     if (!text) return;
     await this.services.repository.appendEvent(this.conversationId, 'ai.response', {
-      callbackId: itemId, speaker: 'assistant', text, sequence: this.sequence++, source: 'realtime',
+      callbackId: itemId, responseId, speaker: 'assistant', text, sequence: this.sequence++, source: 'realtime',
     }, new Date());
     await this.services.runtime.noteAiCompleted(this.conversationId, responseId, text);
   }

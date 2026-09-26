@@ -37,6 +37,7 @@ import {
 } from './runtime/store.js';
 import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
+import type { RuntimeCommand, RuntimeCommandStore } from './runtime/commands.js';
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 import { buildInstructions } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
@@ -65,6 +66,7 @@ export interface AppOptions {
   runtimeController?: ConversationRuntimeController;
   runtimeControlService?: RuntimeControlService;
   runtimeEventBus?: RuntimeEventBus;
+  runtimeCommandStore?: RuntimeCommandStore;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
@@ -119,8 +121,17 @@ function registerStatusRoute(
 }
 
 function presentRuntime(runtime: Awaited<ReturnType<RuntimeControlService['getRuntimeForConversation']>>) {
+  // The spec's owner-facing vocabulary; `state` keeps the fine-grained activity.
+  const status = runtime.state === 'stopped' ? 'ended'
+    : runtime.state === 'paused' ? 'paused'
+      : runtime.aiMode === 'owner_only' ? 'takeover'
+        : runtime.state === 'waiting_for_owner' ? 'owner_needed'
+          : runtime.state === 'text_active' ? 'text_active'
+            : runtime.state === 'idle' || runtime.state === 'starting' ? 'idle' : 'active';
   return {
     ...runtime,
+    status,
+    mode: runtime.aiMode === 'owner_assist' ? 'ask_owner' : runtime.aiMode,
     revision: runtime.configurationRevision,
     startedAt: runtime.startedAt?.toISOString() ?? null,
     pausedAt: runtime.pausedAt?.toISOString() ?? null,
@@ -158,6 +169,7 @@ export function createApp(options: AppOptions): express.Express {
     options.runtimeOverrideStore ?? new InMemoryRuntimeOverrideStore(),
     options.runtimeController ?? new InProcessConversationRuntimeController(),
     options.runtimeEventBus,
+    options.runtimeCommandStore,
   );
   const renderQrCode = options.qrCodeDataUrl ?? ((content: string) => toDataURL(content, {
     errorCorrectionLevel: 'M',
@@ -757,6 +769,69 @@ export function createApp(options: AppOptions): express.Express {
         String(request.params.field) as Parameters<RuntimeControlService['clearTemporaryOverride']>[2],
         runtimeInput(request),
       )));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const presentCommand = (command: RuntimeCommand) => ({
+    ...command,
+    createdAt: command.createdAt.toISOString(),
+    processedAt: command.processedAt?.toISOString() ?? null,
+    appliedLiveAt: command.appliedLiveAt?.toISOString() ?? null,
+  });
+
+  app.get('/conversations/:id/runtime/commands', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await runtime.listCommands(String(request.params.id), runtimeOwner(request))).map(presentCommand));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // One ordered timeline with every identifier, so a journey can be reconstructed
+  // end to end: caller turn -> transcript -> AI response -> command -> owner reply -> SMS.
+  app.get('/conversations/:id/audit', ownerAuth, async (request, response, next) => {
+    try {
+      const conversationId = String(request.params.id);
+      const conversation = await service.requireOwnedConversation(conversationId, runtimeOwner(request))
+        .catch(async (error) => {
+          if (options.ownerAuthToken) throw error;
+          const found = await service.getConversation(conversationId);
+          if (!found) throw error;
+          return found;
+        });
+      const [runtimeEvents, commands, snapshot] = await Promise.all([
+        runtime.listEvents(conversationId, runtimeOwner(request)),
+        runtime.listCommands(conversationId, runtimeOwner(request)),
+        runtime.getRuntimeForConversation(conversation),
+      ]);
+      const idKeys = ['callbackId', 'responseId', 'commandId', 'messageId', 'requestId', 'providerMessageId',
+        'idempotencyKey', 'deliveryId', 'externalId', 'streamSid', 'callSid', 'callId', 'revision'] as const;
+      const ids = (payload: Record<string, unknown>) => Object.fromEntries(idKeys
+        .filter((key) => payload[key] !== undefined && payload[key] !== null)
+        .map((key) => [key === 'callbackId' ? 'turnId' : key, payload[key]]));
+      const timeline = [
+        ...conversation.events.map((event) => ({
+          at: event.occurredAt, source: 'conversation', type: event.type, eventId: event.id, ids: ids(event.payload),
+          summary: typeof event.payload.text === 'string' ? event.payload.text
+            : typeof event.payload.summary === 'string' ? event.payload.summary
+              : typeof event.payload.question === 'string' ? event.payload.question : undefined,
+        })),
+        ...runtimeEvents.filter((event) => event.durable || event.type !== 'runtime.state_changed').map((event) => ({
+          at: event.occurredAt, source: 'runtime', type: event.type, eventId: event.id, ids: ids(event.payload),
+          summary: typeof event.payload.state === 'string' ? `state: ${event.payload.state}` : undefined,
+        })),
+      ].sort((left, right) => left.at.getTime() - right.at.getTime())
+        .map((entry) => ({ ...entry, at: entry.at.toISOString() }));
+      response.json({
+        conversationId,
+        provider: conversation.provider,
+        providerCallId: conversation.providerCallId,
+        runtime: { conversationId, revision: snapshot.configurationRevision, state: snapshot.state },
+        commands: commands.map(presentCommand),
+        timeline,
+      });
     } catch (error) {
       next(error);
     }

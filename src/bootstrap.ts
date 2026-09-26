@@ -12,6 +12,7 @@ import { PostgresConversationRepository } from './repositories/postgres-conversa
 import {
   PostgresConversationRuntimeEventStore,
   PostgresConversationRuntimeStore,
+  PostgresRuntimeCommandStore,
   PostgresRuntimeOverrideStore,
 } from './repositories/postgres-conversation-runtime-repository.js';
 import {
@@ -49,6 +50,7 @@ export function buildServer(
   const runtimeStore = new PostgresConversationRuntimeStore(pool);
   const runtimeEvents = new PostgresConversationRuntimeEventStore(pool);
   const runtimeOverrides = new PostgresRuntimeOverrideStore(pool);
+  const runtimeCommands = new PostgresRuntimeCommandStore(pool);
   const runtimeEventBus = new PostgresRuntimeEventBus(pool, config.databaseListenUrl);
 
   const ready = (async () => {
@@ -61,6 +63,7 @@ export function buildServer(
     await runtimeStore.initialize();
     await runtimeEvents.initialize();
     await runtimeOverrides.initialize();
+    await runtimeCommands.initialize();
   })();
   ready.catch((error) => console.error('Database initialization failed', error));
 
@@ -108,6 +111,7 @@ export function buildServer(
     runtimeEventStore: runtimeEvents,
     runtimeOverrideStore: runtimeOverrides,
     runtimeEventBus,
+    runtimeCommandStore: runtimeCommands,
     realtimeVoice,
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),

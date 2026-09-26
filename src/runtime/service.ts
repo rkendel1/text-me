@@ -12,6 +12,7 @@ import type { OwnerConfigurationService } from '../owner/configuration.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { ConversationRuntimeController } from './controller.js';
 import { InMemoryRuntimeEventBus, type RuntimeEventBus } from './event-bus.js';
+import { InMemoryRuntimeCommandStore, type RuntimeCommand, type RuntimeCommandStore, type RuntimeCommandType } from './commands.js';
 import {
   ConversationRuntimeEventStore,
   ConversationRuntimeStore,
@@ -36,6 +37,17 @@ export interface RuntimeConfigurationPatch {
   smsTransitionEnabled?: boolean;
 }
 
+const COMMAND_TYPES: Partial<Record<Parameters<typeof createRuntimeEvent>[1], RuntimeCommandType>> = {
+  'runtime.started': 'start',
+  'runtime.stopped': 'stop',
+  'runtime.paused': 'pause',
+  'runtime.resumed': 'resume',
+  'runtime.takeover': 'takeover',
+  'runtime.returned_to_assistant': 'return_to_assistant',
+  'runtime.interrupted': 'interrupt',
+  'runtime.sms_transition_requested': 'transition_to_sms',
+};
+
 type RuntimeEventListener = (event: ReturnType<typeof createRuntimeEvent>) => void;
 
 export class RuntimeControlService {
@@ -47,7 +59,30 @@ export class RuntimeControlService {
     private readonly overrides: RuntimeOverrideStore,
     private readonly controller: ConversationRuntimeController,
     private readonly bus: RuntimeEventBus = new InMemoryRuntimeEventBus(),
+    private readonly commands: RuntimeCommandStore = new InMemoryRuntimeCommandStore(),
   ) {}
+
+  async listCommands(conversationId: string, ownerId: string): Promise<RuntimeCommand[]> {
+    await this.requireOwnedConversation(conversationId, ownerId);
+    return this.commands.list(conversationId);
+  }
+
+  /** The live call acted on this command (called by the instance holding the call). */
+  async markCommandAppliedLive(commandId: string): Promise<void> {
+    await this.commands.update(commandId, { status: 'applied_live', appliedLiveAt: new Date() });
+  }
+
+  private async recordCommand(
+    conversationId: string,
+    ownerId: string,
+    type: RuntimeCommandType,
+    commandId: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    await this.commands.record({
+      id: commandId, conversationId, ownerId, type, payload, status: 'accepted', createdAt: new Date(),
+    });
+  }
 
   async getRuntime(conversationId: string, ownerId: string): Promise<ConversationRuntime> {
     const conversation = await this.requireOwnedConversation(conversationId, ownerId);
@@ -77,7 +112,12 @@ export class RuntimeControlService {
     meta: { messageId?: string; requestId?: string; commandId?: string } = {},
   ): Promise<void> {
     await this.requireOwnedConversation(conversationId, ownerId);
-    await this.persistEvent(conversationId, 'runtime.owner_speech', { text, ...meta, commandId: meta.commandId ?? randomUUID() }, true);
+    const commandId = meta.commandId ?? randomUUID();
+    await this.recordCommand(conversationId, ownerId, meta.requestId ? 'answer_owner_request' : 'owner_message', commandId, {
+      text, ...meta,
+    });
+    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
+    await this.persistEvent(conversationId, 'runtime.owner_speech', { text, ...meta, commandId }, true);
   }
 
   async listEvents(conversationId: string, ownerId: string) {
@@ -220,10 +260,18 @@ export class RuntimeControlService {
     const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
-    this.assertRevision(runtime, input.expectedRevision);
-    this.validateOverride(field, value);
-    if (expiresAt && !Number.isFinite(expiresAt.getTime())) {
-      throw new HttpError(400, 'expiresAt must be a valid date');
+    await this.recordCommand(conversationId, ownerId, 'set_override', commandId, {
+      field, value, expectedRevision: input.expectedRevision, ...(expiresAt ? { expiresAt: expiresAt.toISOString() } : {}),
+    });
+    try {
+      this.assertRevision(runtime, input.expectedRevision);
+      this.validateOverride(field, value);
+      if (expiresAt && !Number.isFinite(expiresAt.getTime())) {
+        throw new HttpError(400, 'expiresAt must be a valid date');
+      }
+    } catch (error) {
+      await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
+      throw error;
     }
     const override: RuntimeOverride = {
       conversationId,
@@ -238,6 +286,7 @@ export class RuntimeControlService {
     await this.store.save(updated);
     await this.syncConversationState(conversation, updated.state);
     await this.controller.update(conversationId, updated);
+    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
     await this.persistEvent(conversationId, 'runtime.configuration_changed', {
       commandId,
       field,
@@ -258,11 +307,18 @@ export class RuntimeControlService {
     const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
-    this.assertRevision(runtime, input.expectedRevision);
-    this.validateOverrideField(field);
+    await this.recordCommand(conversationId, ownerId, 'clear_override', commandId, { field, expectedRevision: input.expectedRevision });
+    try {
+      this.assertRevision(runtime, input.expectedRevision);
+      this.validateOverrideField(field);
+    } catch (error) {
+      await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
+      throw error;
+    }
     await this.overrides.delete(conversationId, field);
     const refreshed = await this.ensureRuntime(conversation, true);
     await this.controller.update(conversationId, refreshed);
+    await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
     await this.persistEvent(conversationId, 'runtime.configuration_changed', {
       commandId,
       field,
@@ -410,13 +466,24 @@ export class RuntimeControlService {
     const existing = await this.eventStore.findByCommandId(conversation.id, commandId);
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
-    this.assertRevision(runtime, input.expectedRevision);
+    const commandType = COMMAND_TYPES[eventType];
+    if (commandType) await this.recordCommand(conversationId, ownerId, commandType, commandId, { expectedRevision: input.expectedRevision });
+    try {
+      this.assertRevision(runtime, input.expectedRevision);
+    } catch (error) {
+      if (commandType) await this.commands.update(commandId, { status: 'rejected', error: error instanceof Error ? error.message : 'Rejected', processedAt: new Date() });
+      throw error;
+    }
     try {
       const result = await apply(runtime, conversation);
-      if (!result.changed) return result.runtime;
+      if (!result.changed) {
+        if (commandType) await this.commands.update(commandId, { status: 'noop', processedAt: new Date() });
+        return result.runtime;
+      }
       await this.supersedeOverrides(conversationId, runtime, result.runtime);
       await this.store.save(result.runtime);
       await this.syncConversationState(conversation, result.runtime.state);
+      if (commandType) await this.commands.update(commandId, { status: 'applied', processedAt: new Date() });
       await this.persistEvent(conversationId, eventType, {
         commandId,
         revision: result.runtime.configurationRevision,
@@ -425,6 +492,7 @@ export class RuntimeControlService {
       return result.runtime;
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'Runtime command failed';
+      if (commandType) await this.commands.update(commandId, { status: 'rejected', error: reason, processedAt: new Date() });
       await this.persistEvent(conversationId, 'runtime.command_failed', {
         commandId,
         failedCommand: eventType,

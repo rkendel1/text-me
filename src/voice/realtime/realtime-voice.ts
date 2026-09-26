@@ -12,7 +12,7 @@ export const MEDIA_STREAM_PATH = '/media-stream';
 interface TwilioStreamMessage {
   event?: string;
   streamSid?: string;
-  start?: { streamSid?: string; customParameters?: Record<string, string> };
+  start?: { streamSid?: string; callSid?: string; customParameters?: Record<string, string> };
   media?: { payload?: string; track?: string };
   mark?: { name?: string };
 }
@@ -96,6 +96,7 @@ export class RealtimeVoiceService {
         let unsubscribe = () => {};
         const starting = new RealtimeCallBridge(conversationId, this.connector, services, socket, {
           voice: this.options.voice,
+          onCommandApplied: (commandId) => services.runtime.markCommandAppliedLive(commandId),
           onClosed: (closed) => {
             unsubscribe();
             if (this.bridges.get(closed.conversationId) === closed) this.bridges.delete(closed.conversationId);
@@ -104,7 +105,7 @@ export class RealtimeVoiceService {
         bridge = starting;
         this.bridges.set(conversationId, starting);
         unsubscribe = services.runtime.subscribe(conversationId, (event) => starting.handleRuntimeEvent(event));
-        starting.start(streamSid).catch(async (error) => {
+        starting.start(streamSid, message.start?.callSid).catch(async (error) => {
           console.error(`[realtime ${conversationId}] could not start session`, error);
           // Detach first so the stream closing below isn't recorded as a normal hang-up.
           if (bridge === starting) bridge = undefined;

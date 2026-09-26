@@ -203,3 +203,47 @@ test('Journey F: after moving to text, caller texts are answered by the AI SDK t
   assert.equal(call.messaging.sentMessages.at(-1)!.to, '+15553334444');
   assert.equal(answer.body.ownerRequest, null);
 });
+
+test('Journeys C/D + audit: owner commands reach the live call and the timeline links every id', async (t) => {
+  const call = await liveCall();
+  t.after(call.close);
+  // A caller turn and an assistant response on the call.
+  call.connector.emit({ type: 'input-transcription-completed', itemId: 'turn_1', transcript: 'Can we move Friday?' });
+  call.connector.emit({ type: 'response-created', responseId: 'resp_1' });
+  call.connector.emit({ type: 'audio-transcript-done', responseId: 'resp_1', itemId: 'item_1', transcript: 'Let me check with Randy.' });
+  await call.voice.bridge(call.conversationId)!.settled();
+
+  const takeover = await request(call.app).post(`/conversations/${call.conversationId}/runtime/takeover`).send({ commandId: 'cmd_takeover' });
+  assert.equal(takeover.body.status, 'takeover');
+  assert.equal(takeover.body.mode, 'owner_only');
+  await request(call.app).patch(`/conversations/${call.conversationId}/runtime`).send({ commandId: 'cmd_style', verbosity: 'detailed' });
+  await request(call.app).post(`/conversations/${call.conversationId}/messages`).send({ body: 'Friday at 2 works.', idempotencyKey: 'owner-1' });
+  const stale = await request(call.app).post(`/conversations/${call.conversationId}/runtime/pause`).send({ commandId: 'cmd_stale', expectedRevision: 1 });
+  assert.equal(stale.status, 409);
+
+  await eventually(async () => {
+    const commands = (await request(call.app).get(`/conversations/${call.conversationId}/runtime/commands`)).body;
+    return commands.filter((command: { status: string }) => command.status === 'applied_live').length === 3;
+  }, 'commands applied to the live call');
+  const commands = (await request(call.app).get(`/conversations/${call.conversationId}/runtime/commands`)).body as Array<Record<string, unknown>>;
+  const byId = Object.fromEntries(commands.map((command) => [command.id, command]));
+  assert.equal(byId.cmd_takeover.type, 'takeover');
+  assert.equal(byId.cmd_takeover.status, 'applied_live');
+  assert.ok(byId.cmd_takeover.processedAt && byId.cmd_takeover.appliedLiveAt);
+  assert.equal(byId.cmd_style.type, 'set_override');
+  assert.equal(byId.cmd_style.status, 'applied_live');
+  assert.equal(byId.cmd_stale.status, 'rejected');
+  assert.match(String(byId.cmd_stale.error), /stale/);
+  const ownerMessage = commands.find((command) => command.type === 'owner_message')!;
+  assert.equal(ownerMessage.status, 'applied_live');
+
+  const audit = (await request(call.app).get(`/conversations/${call.conversationId}/audit`)).body;
+  const find = (type: string) => audit.timeline.find((entry: { type: string }) => entry.type === type);
+  assert.equal(find('speech.transcript').ids.turnId, 'turn_1');
+  assert.equal(find('ai.response').ids.responseId, 'resp_1');
+  assert.equal(find('voice.started').ids.streamSid, 'MZ1');
+  assert.equal(find('runtime.takeover').ids.commandId, 'cmd_takeover');
+  assert.match(find('owner.message').ids.messageId, /^msg_/);
+  assert.equal(find('runtime.owner_speech').ids.commandId, ownerMessage.id);
+  assert.equal(audit.providerCallId, 'journey');
+});

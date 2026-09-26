@@ -9,6 +9,8 @@ import { WebSocketServer } from 'ws';
 import { getConfig, resolvePublicBaseUrl } from '../src/config.js';
 import { createRuntimeEvent } from '../src/runtime/store.js';
 import { PostgresRuntimeEventBus } from '../src/runtime/event-bus.js';
+import { PostgresConversationRepository } from '../src/repositories/postgres-conversation-repository.js';
+import { PostgresRuntimeCommandStore } from '../src/repositories/postgres-conversation-runtime-repository.js';
 import { GatewayRealtimeConnector, type RealtimeServerEvent } from '../src/voice/realtime/connector.js';
 
 const baseEnv = {
@@ -156,4 +158,25 @@ test('runtime events published on one instance reach subscribers on another (Pos
   assert.match(received[1], /^runtime\.owner_speech:x{2000}…$/);
   assert.equal(received.length, 2);
   unsubscribe();
+});
+
+test('runtime commands persist in Postgres and never regress from applied_live', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
+  t.after(() => pool.end());
+  const conversations = new PostgresConversationRepository(pool);
+  await conversations.initialize();
+  const store = new PostgresRuntimeCommandStore(pool);
+  await store.initialize();
+  const { conversation } = await conversations.createIfAbsent({
+    provider: 'fake', providerCallId: `cmd-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: 'owner',
+  });
+  const id = `cmd_${Date.now()}`;
+  await store.record({ id, conversationId: conversation.id, ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
+  await store.update(id, { status: 'applied_live', appliedLiveAt: new Date() });
+  await store.update(id, { status: 'applied', processedAt: new Date() });
+  const [stored] = await store.list(conversation.id);
+  assert.equal(stored.status, 'applied_live');
+  assert.ok(stored.processedAt && stored.appliedLiveAt);
 });
