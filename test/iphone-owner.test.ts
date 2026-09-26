@@ -140,6 +140,13 @@ test('iPhone, no Mac: the assistant needs the owner -> attention -> push that de
   assert.ok(!JSON.stringify(pushed.payload).match(/gpt|twilio|runtime|turn/i), 'no implementation details in the notification');
   assert.equal(needs.status, 'delivered');
   assert.deepEqual((await owner.deliveries.list(needs.id)).map((delivery) => delivery.surface), ['web_push']);
+  // The audit timeline shows the owner was (and wasn't) interrupted, with attention and notification ids.
+  const audit = (await request(owner.app).get(`/conversations/${conversationId}/audit`)).body;
+  const sent = audit.timeline.find((entry: { type: string }) => entry.type === 'notification.sent');
+  assert.equal(sent.ids.attentionId, needs.id);
+  assert.equal(sent.ids.surface, 'web_push');
+  assert.match(sent.ids.notificationId, /^ntf_/);
+  assert.ok(audit.timeline.some((entry: { type: string; ids: { status?: string } }) => entry.type === 'attention.conversation_started'));
   // Push got through, so the owner is not also texted; and nothing touched a Mac.
   assert.ok(!owner.messaging.sentMessages.some((message) => message.to === '+15550009999'));
   const detail = (await request(owner.app).get(`/conversations/${conversationId}`)).body;

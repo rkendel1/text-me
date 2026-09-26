@@ -1057,10 +1057,12 @@ export function createApp(options: AppOptions): express.Express {
           if (!found) throw error;
           return found;
         });
-      const [runtimeEvents, commands, snapshot] = await Promise.all([
+      const [runtimeEvents, commands, snapshot, attentionItems, notifications] = await Promise.all([
         runtime.listEvents(conversationId, runtimeOwner(request)),
         runtime.listCommands(conversationId, runtimeOwner(request)),
         runtime.getRuntimeForConversation(conversation),
+        attention.list(conversation.ownerId ?? runtimeOwner(request), { conversationId }),
+        attention.deliveriesForConversation(conversationId),
       ]);
       const idKeys = ['callbackId', 'responseId', 'commandId', 'messageId', 'requestId', 'providerMessageId',
         'idempotencyKey', 'deliveryId', 'externalId', 'streamSid', 'callSid', 'callId', 'revision'] as const;
@@ -1077,6 +1079,17 @@ export function createApp(options: AppOptions): express.Express {
         ...runtimeEvents.filter((event) => event.durable || event.type !== 'runtime.state_changed').map((event) => ({
           at: event.occurredAt, source: 'runtime', type: event.type, eventId: event.id, ids: ids(event.payload),
           summary: typeof event.payload.state === 'string' ? `state: ${event.payload.state}` : undefined,
+        })),
+        ...attentionItems.map((item) => ({
+          at: item.createdAt, source: 'attention', type: `attention.${item.type}`, eventId: item.id,
+          ids: { attentionId: item.id, ...(item.metadata.requestId ? { requestId: item.metadata.requestId } : {}), status: item.status },
+          summary: item.title,
+        })),
+        ...notifications.map((delivery) => ({
+          at: delivery.createdAt, source: 'notification', type: `notification.${delivery.status}`, eventId: delivery.id,
+          ids: { notificationId: delivery.id, attentionId: delivery.attentionId, surface: delivery.surface,
+            ...(delivery.deviceId ? { deviceId: delivery.deviceId } : {}), ...(delivery.providerId ? { providerId: delivery.providerId } : {}) },
+          summary: delivery.error,
         })),
       ].sort((left, right) => left.at.getTime() - right.at.getTime())
         .map((entry) => ({ ...entry, at: entry.at.toISOString() }));

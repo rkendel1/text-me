@@ -227,3 +227,43 @@ test('owner attention, deliveries, surface devices and push keys persist in Neon
   const [a, b] = await Promise.all([secrets.getOrCreate(key, () => 'first'), secrets.getOrCreate(key, () => 'second')]);
   assert.equal(a, b, 'concurrent cold starts agree on one key');
 });
+
+test('production composition starts with no Mac at all, and a fresh instance recovers live state from Neon', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { buildServer } = await import('../src/bootstrap.js');
+  const request = (await import('supertest')).default;
+  // No Mac, no Photon, no Messages authorization, no AI Gateway key: just Neon + Twilio + owner token.
+  const env = {
+    DATABASE_URL: databaseUrl, TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'twilio-test', TWILIO_PHONE_NUMBER: '+15550000000',
+    OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'owner-test', PUBLIC_BASE_URL: 'http://localhost', REALTIME_VOICE: 'off',
+  };
+  assert.ok(!Object.keys(env).some((key) => /MAC|PHOTON|PAIRING/i.test(key)));
+  const first = buildServer(getConfig(env));
+  const second = buildServer(getConfig(env));
+  t.after(() => { first.server.close(); second.server.close(); });
+  await Promise.all([first.ready, second.ready]);
+  const auth = { Authorization: 'Bearer owner-test' };
+
+  assert.equal((await request(first.server).get('/')).status, 200);
+  assert.equal((await request(first.server).get('/conversations')).status, 401);
+  const conversation = await request(first.server).post('/webhooks/fake/voice').send({ callId: `nomac-${Date.now()}`, callerPhone: '+15553334444' });
+  assert.equal(conversation.status, 200);
+  const listed = (await request(first.server).get('/conversations').set(auth)).body;
+  const id = listed.find((item: { caller: string; status: string }) => item.caller === '+15553334444' && item.status === 'answered').id;
+  const takeover = await request(first.server).post(`/conversations/${id}/runtime/takeover`).set(auth).send({});
+  assert.equal(takeover.status, 200);
+  const adjusted = await request(first.server).patch(`/conversations/${id}/runtime`).set(auth).send({ verbosity: 'detailed' });
+  assert.equal(adjusted.status, 200);
+
+  // A different instance (or the same app after a reload/restart) sees exactly the same state.
+  const recovered = (await request(second.server).get(`/conversations/${id}`).set(auth)).body;
+  assert.equal(recovered.runtime.status, 'takeover');
+  assert.equal(recovered.runtime.verbosity, 'detailed');
+  assert.equal(recovered.runtime.temporarySettings, true);
+  const commands = (await request(second.server).get(`/conversations/${id}/runtime/commands`).set(auth)).body;
+  assert.deepEqual(commands.map((command: { type: string }) => command.type), ['take_over', 'adjust_interaction']);
+  const attention = (await request(second.server).get(`/owner/attention?conversationId=${id}`).set(auth)).body;
+  assert.equal(attention[0].type, 'conversation_started');
+  assert.equal((await request(second.server).get(`/conversations/${id}/live`)).status, 200);
+});
