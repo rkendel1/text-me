@@ -156,6 +156,13 @@ test('Journey E: turning transcription off stops the transcript; turning it back
   call.connector.emit({ type: 'input-transcription-completed', itemId: 'c2', transcript: 'Recorded again' });
   await call.voice.bridge(call.conversationId)!.settled();
   assert.deepEqual(await transcript(), ['Recorded again']);
+
+  // Voice off: the live session stops producing audio; on again restores it.
+  const current = (await request(call.app).get(`/conversations/${call.conversationId}/runtime`)).body;
+  await request(call.app).patch(`/conversations/${call.conversationId}/runtime`).send({ voiceEnabled: false, expectedRevision: current.revision });
+  await eventually(() => call.connector.of('session-update').at(-1)?.config.outputModalities?.join() === 'text', 'voice off');
+  await request(call.app).patch(`/conversations/${call.conversationId}/runtime`).send({ voiceEnabled: true });
+  await eventually(() => call.connector.of('session-update').at(-1)?.config.outputModalities?.join() === 'audio', 'voice on');
 });
 
 test('defaults come from settings; live adjustments apply only to that conversation', async (t) => {
