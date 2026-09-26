@@ -99,22 +99,21 @@ export class MacOSMessagesBridge {
     this.stopWatching = undefined;
   }
 
-  trackDelivery(deliveryId: string, body: string): void {
-    this.pendingDeliveries.set(deliveryId, body);
+  trackDelivery(deliveryId: string, providerRequestId: string): void {
+    this.pendingDeliveries.set(providerRequestId, deliveryId);
   }
 
   private async handle(message: ObservedMessagesMessage): Promise<void> {
     if (message.chatId === this.options.assistantChatId && message.direction === 'outgoing') {
-      const delivery = [...this.pendingDeliveries.entries()]
-        .find(([, body]) => body === message.body);
-      if (delivery && this.backend.confirmOwnerDelivery) {
+      const deliveryId = this.pendingDeliveries.get(message.externalId);
+      if (deliveryId && this.backend.confirmOwnerDelivery) {
         await this.backend.confirmOwnerDelivery({
           ownerId: this.options.ownerId,
           deviceId: this.options.deviceId,
-          deliveryId: delivery[0],
+          deliveryId,
           externalId: message.externalId,
         });
-        this.pendingDeliveries.delete(delivery[0]);
+        this.pendingDeliveries.delete(message.externalId);
       }
       return;
     }

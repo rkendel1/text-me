@@ -49,38 +49,93 @@ export type OwnerConfigurationPatch = {
   messages?: Partial<OwnerMessageSettings>;
 };
 
-export class OwnerConfigurationService {
+export interface OwnerConfigurationStore {
+  get(ownerId: string): Promise<OwnerConfiguration | null>;
+  create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void>;
+  update(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void>;
+  events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]>;
+}
+
+export class InMemoryOwnerConfigurationStore implements OwnerConfigurationStore {
   private readonly configurations = new Map<string, OwnerConfiguration>();
   private readonly audit = new Map<string, OwnerConfigurationAuditEvent[]>();
 
-  get(ownerId: string): OwnerConfiguration {
-    const existing = this.configurations.get(ownerId);
+  async get(ownerId: string): Promise<OwnerConfiguration | null> {
+    return structuredClone(this.configurations.get(ownerId) ?? null);
+  }
+
+  async create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
+    if (!this.configurations.has(configuration.ownerId)) {
+      this.configurations.set(configuration.ownerId, structuredClone(configuration));
+      this.record(event);
+    }
+  }
+
+  async update(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
+    this.configurations.set(configuration.ownerId, structuredClone(configuration));
+    this.record(event);
+  }
+
+  async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
+    return structuredClone(this.audit.get(ownerId) ?? []);
+  }
+
+  private record(event: OwnerConfigurationAuditEvent): void {
+    const events = this.audit.get(event.ownerId) ?? [];
+    events.push(structuredClone(event));
+    this.audit.set(event.ownerId, events);
+  }
+}
+
+function defaultConfiguration(ownerId: string): OwnerConfiguration {
+  return {
+    ownerId,
+    revision: 1,
+    assistant: {
+      assistantName: 'Assistant',
+      greeting: "Hi, this is Randy's assistant. How can I help?",
+      ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
+      tone: 'friendly',
+      responseStyle: 'concise',
+    },
+    calls: {
+      answerCalls: true,
+      collectCallerName: true,
+      collectReason: true,
+      offerSmsTransition: true,
+      requireSmsConsent: true,
+      voicemailFallback: false,
+    },
+    messages: {
+      webEnabled: true,
+      macosMessagesEnabled: true,
+      notifyOwner: true,
+      interruptOnlyWhenNeeded: true,
+      includeSummary: true,
+      includeSuggestedResponse: true,
+    },
+  };
+}
+
+export class OwnerConfigurationService {
+  constructor(private readonly store: OwnerConfigurationStore = new InMemoryOwnerConfigurationStore()) {}
+
+  async get(ownerId: string): Promise<OwnerConfiguration> {
+    const existing = await this.store.get(ownerId);
     if (existing) return structuredClone(existing);
-    const configuration: OwnerConfiguration = {
+    const configuration = defaultConfiguration(ownerId);
+    await this.store.create(configuration, {
+      type: 'configuration.created',
       ownerId,
-      revision: 1,
-      assistant: {
-        assistantName: 'Assistant',
-        greeting: "Hi, this is Randy's assistant. How can I help?",
-        ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
-        tone: 'friendly',
-        responseStyle: 'concise',
-      },
-      calls: {
-        answerCalls: true, collectCallerName: true, collectReason: true,
-        offerSmsTransition: true, requireSmsConsent: true, voicemailFallback: false,
-      },
-      messages: {
-        webEnabled: true, macosMessagesEnabled: true, notifyOwner: true,
-        interruptOnlyWhenNeeded: true, includeSummary: true, includeSuggestedResponse: true,
-      },
-    };
-    this.configurations.set(ownerId, configuration);
+      revision: configuration.revision,
+      source: 'system',
+      occurredAt: new Date(),
+    });
     return structuredClone(configuration);
   }
 
-  update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web'): OwnerConfiguration {
-    const current = this.get(ownerId);
+  async update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web'): Promise<OwnerConfiguration> {
+    const current = await this.get(ownerId);
     const next: OwnerConfiguration = {
       ...current,
       revision: current.revision + 1,
@@ -88,30 +143,25 @@ export class OwnerConfigurationService {
       calls: { ...current.calls, ...patch.calls },
       messages: { ...current.messages, ...patch.messages },
     };
-    this.configurations.set(ownerId, next);
-    const changed = patch.messages?.macosMessagesEnabled;
-    this.record({
-      type: changed === true ? 'owner.channel.enabled'
-        : changed === false ? 'owner.channel.disabled'
+    await this.store.update(next, {
+      type: patch.messages?.macosMessagesEnabled === true ? 'owner.channel.enabled'
+        : patch.messages?.macosMessagesEnabled === false ? 'owner.channel.disabled'
         : patch.assistant ? 'assistant.settings.updated'
           : patch.calls ? 'call.settings.updated' : 'message.settings.updated',
-      ownerId, revision: next.revision, source, occurredAt: new Date(),
+      ownerId,
+      revision: next.revision,
+      source,
+      occurredAt: new Date(),
     });
     return structuredClone(next);
   }
 
-  events(ownerId: string): OwnerConfigurationAuditEvent[] {
-    return structuredClone(this.audit.get(ownerId) ?? []);
+  async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
+    return this.store.events(ownerId);
   }
 
-  isChannelEnabled(ownerId: string, channel: 'web' | 'macos_messages'): boolean {
-    const configuration = this.get(ownerId);
+  async isChannelEnabled(ownerId: string, channel: 'web' | 'macos_messages'): Promise<boolean> {
+    const configuration = await this.get(ownerId);
     return channel === 'web' ? configuration.messages.webEnabled : configuration.messages.macosMessagesEnabled;
-  }
-
-  private record(event: OwnerConfigurationAuditEvent): void {
-    const events = this.audit.get(event.ownerId) ?? [];
-    events.push(event);
-    this.audit.set(event.ownerId, events);
   }
 }
