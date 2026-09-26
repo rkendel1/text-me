@@ -1,0 +1,1340 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Text Me</title>
+<meta name="description" content="Live control for your phone assistant.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Text Me">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#F2F2F7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #F2F2F7;
+  --bg-elevated: #FFFFFF;
+  --bg-tertiary: #F2F2F7;
+  --bar: rgba(249, 249, 249, 0.82);
+  --sidebar: rgba(236, 236, 241, 0.86);
+  --label: #000000;
+  --label-2: rgba(60, 60, 67, 0.6);
+  --label-3: rgba(60, 60, 67, 0.3);
+  --separator: rgba(60, 60, 67, 0.29);
+  --fill: rgba(120, 120, 128, 0.2);
+  --fill-2: rgba(120, 120, 128, 0.16);
+  --fill-3: rgba(118, 118, 128, 0.12);
+  --blue: #007AFF;
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  --yellow: #FFCC00;
+  --indigo: #5856D6;
+  --teal: #30B0C7;
+  --gray: #8E8E93;
+  --bubble-in: #E9E9EB;
+  --bubble-in-label: #000;
+  --selection: #007AFF;
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.12);
+  --sheet-shadow: 0 -8px 40px rgba(0, 0, 0, 0.18);
+  --island: #000;
+  --radius: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", system-ui, sans-serif;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #000000;
+    --bg-elevated: #1C1C1E;
+    --bg-tertiary: #2C2C2E;
+    --bar: rgba(22, 22, 24, 0.8);
+    --sidebar: rgba(28, 28, 30, 0.86);
+    --label: #FFFFFF;
+    --label-2: rgba(235, 235, 245, 0.6);
+    --label-3: rgba(235, 235, 245, 0.3);
+    --separator: rgba(84, 84, 88, 0.65);
+    --fill: rgba(120, 120, 128, 0.36);
+    --fill-2: rgba(120, 120, 128, 0.32);
+    --fill-3: rgba(118, 118, 128, 0.24);
+    --blue: #0A84FF;
+    --green: #30D158;
+    --red: #FF453A;
+    --orange: #FF9F0A;
+    --yellow: #FFD60A;
+    --indigo: #5E5CE6;
+    --teal: #40C8E0;
+    --bubble-in: #26252A;
+    --bubble-in-label: #fff;
+    --island: #1C1C1E;
+  }
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--label);
+  font: 17px/1.29 var(--font); letter-spacing: -0.41px;
+  -webkit-font-smoothing: antialiased; overflow: hidden; overscroll-behavior: none;
+}
+button, input, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+svg { display: block; }
+[hidden] { display: none !important; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ---------- App shell ---------- */
+.app { position: fixed; inset: 0; display: flex; }
+.sidebar { display: none; }
+.tabs { flex: 1; position: relative; min-width: 0; }
+.tab { position: absolute; inset: 0; display: none; }
+.tab.active { display: block; }
+
+.page { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
+.scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.scroll.with-tabbar { padding-bottom: calc(83px + var(--safe-bottom)); }
+
+/* ---------- Navigation bar ---------- */
+.navbar {
+  position: relative; z-index: 5; flex: none;
+  padding-top: var(--safe-top); min-height: calc(44px + var(--safe-top));
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  background: transparent; transition: background .2s, box-shadow .2s;
+}
+.navbar.scrolled, .navbar.solid {
+  background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 0.5px 0 var(--separator);
+}
+.navbar .nav-title { font-weight: 600; font-size: 17px; text-align: center; opacity: 0; transition: opacity .2s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
+.navbar.scrolled .nav-title, .navbar.solid .nav-title { opacity: 1; }
+.nav-left, .nav-right { display: flex; align-items: center; gap: 4px; padding: 0 8px; min-width: 0; }
+.nav-right { justify-content: flex-end; }
+.nav-btn { color: var(--blue); display: inline-flex; align-items: center; gap: 2px; height: 44px; padding: 0 8px; font-size: 17px; border-radius: 8px; }
+.nav-btn:active { opacity: .4; }
+.nav-btn svg { width: 22px; height: 22px; }
+.nav-btn.back svg { width: 13px; height: 21px; margin-right: 4px; }
+.nav-btn.icon { width: 44px; justify-content: center; padding: 0; }
+.large-title { font-size: 34px; line-height: 41px; font-weight: 700; letter-spacing: .37px; padding: 0 20px 8px; margin: 0; }
+.nav-sub { font-size: 12px; font-weight: 400; color: var(--label-2); text-align: center; margin-top: -2px; }
+
+/* ---------- Search + segmented ---------- */
+.search { margin: 0 16px 12px; position: relative; }
+.search input {
+  width: 100%; height: 36px; border: 0; border-radius: 10px; background: var(--fill-3);
+  padding: 0 12px 0 32px; font-size: 17px; outline: none;
+}
+.search input::placeholder { color: var(--label-2); }
+.search svg { position: absolute; left: 9px; top: 10px; width: 16px; height: 16px; color: var(--label-2); }
+.segmented {
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; position: relative;
+  background: var(--fill-3); border-radius: 9px; padding: 2px; margin: 0 16px 16px; height: 32px;
+}
+.segmented button {
+  position: relative; z-index: 1; font-size: 13px; font-weight: 500; border-radius: 7px; letter-spacing: -.08px;
+  transition: color .2s; white-space: nowrap;
+}
+.segmented button.on { background: var(--bg-elevated); box-shadow: 0 3px 8px rgba(0,0,0,.12), 0 3px 1px rgba(0,0,0,.04); font-weight: 600; }
+@media (prefers-color-scheme: dark) { .segmented button.on { background: #636366; } }
+.segmented.inline { margin: 0; }
+
+/* ---------- Grouped lists ---------- */
+.group-header { font-size: 13px; line-height: 18px; text-transform: uppercase; color: var(--label-2); padding: 0 20px 7px 36px; margin-top: 22px; letter-spacing: -.08px; }
+.group-footer { font-size: 13px; line-height: 18px; color: var(--label-2); padding: 7px 36px 0; letter-spacing: -.08px; }
+.group { background: var(--bg-elevated); border-radius: var(--radius); margin: 0 16px; overflow: hidden; }
+.row {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; min-height: 44px;
+  padding: 0 16px; position: relative; background: var(--bg-elevated);
+}
+.row + .row::before, .row + .row-wrap::before, .row-wrap + .row::before {
+  content: ''; position: absolute; top: 0; right: 0; left: var(--inset, 16px); height: .5px; background: var(--separator);
+}
+button.row:active, .row.tappable:active { background: var(--fill-3); }
+.row .row-body { flex: 1; min-width: 0; padding: 11px 0; }
+.row .row-title { font-size: 17px; }
+.row .row-sub { font-size: 15px; color: var(--label-2); margin-top: 1px; }
+.row .row-value { color: var(--label-2); font-size: 17px; white-space: nowrap; }
+.row .chev { width: 8px; height: 13px; color: var(--label-3); flex: none; }
+.row.destructive { color: var(--red); justify-content: center; }
+.row.action { color: var(--blue); }
+.tile { width: 29px; height: 29px; border-radius: 7px; display: grid; place-items: center; color: #fff; flex: none; }
+.tile svg { width: 18px; height: 18px; }
+.row input[type=text], .row input[type=password] { flex: 1; border: 0; outline: 0; background: transparent; text-align: right; color: var(--label-2); min-width: 0; padding: 11px 0; }
+.row input:focus { color: var(--label); }
+.row-stack { display: block; padding: 11px 16px; }
+.row-stack textarea { width: 100%; border: 0; outline: 0; background: transparent; resize: none; min-height: 66px; font-size: 17px; line-height: 22px; }
+.row-stack .row-title { font-size: 13px; color: var(--label-2); margin-bottom: 4px; }
+
+/* iOS switch */
+.switch { position: relative; width: 51px; height: 31px; flex: none; }
+.switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch .track { position: absolute; inset: 0; border-radius: 16px; background: var(--fill); transition: background .25s; }
+.switch .knob {
+  position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff;
+  box-shadow: 0 3px 8px rgba(0,0,0,.15), 0 3px 1px rgba(0,0,0,.06); transition: transform .25s cubic-bezier(.3,.7,.4,1.2), width .15s;
+}
+.switch input:checked ~ .track { background: var(--green); }
+.switch input:checked ~ .knob { transform: translateX(20px); }
+.switch input:active ~ .knob { width: 31px; }
+.switch input:checked:active ~ .knob { transform: translateX(16px); }
+.switch input:disabled ~ * { opacity: .5; }
+
+/* ---------- Conversation list ---------- */
+.convo { --inset: 76px; padding-left: 12px; align-items: stretch; gap: 10px; }
+.convo .unread-dot { width: 10px; flex: none; display: flex; align-items: center; }
+.convo .unread-dot i { width: 10px; height: 10px; border-radius: 50%; background: var(--blue); display: block; }
+.avatar {
+  width: 44px; height: 44px; border-radius: 50%; flex: none; align-self: center; display: grid; place-items: center;
+  background: linear-gradient(180deg, #A5ABB9, #858994); color: #fff; font-weight: 600; font-size: 18px; letter-spacing: 0;
+}
+.avatar svg { width: 24px; height: 24px; }
+.avatar.lg { width: 76px; height: 76px; font-size: 32px; }
+.avatar.lg svg { width: 40px; height: 40px; }
+.convo .row-body { padding: 10px 0 11px; }
+.convo-top { display: flex; align-items: baseline; gap: 8px; }
+.convo-top .name { flex: 1; font-weight: 600; font-size: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-top .time { font-size: 15px; color: var(--label-2); display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.convo-top .time .chev { width: 7px; height: 12px; }
+.convo .preview { font-size: 15px; color: var(--label-2); line-height: 20px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 1px; }
+.status-line { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; margin-top: 3px; letter-spacing: -.08px; }
+.status-line .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.status-line .dot.pulse { animation: pulse 1.6s ease-in-out infinite; }
+.convo.selected, .convo.selected:active { background: var(--selection); color: #fff; }
+.convo.selected .preview, .convo.selected .time, .convo.selected .status-line { color: rgba(255,255,255,.85) !important; }
+.convo.selected .unread-dot i { background: #fff; }
+.convo.selected::before, .convo.selected + .convo::before { display: none; }
+@keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.8); } }
+
+.empty-state { text-align: center; padding: 72px 32px; color: var(--label-2); }
+.empty-state svg { width: 56px; height: 56px; margin: 0 auto 14px; color: var(--label-3); }
+.empty-state h3 { margin: 0 0 6px; font-size: 22px; font-weight: 700; color: var(--label); letter-spacing: .35px; }
+.empty-state p { margin: 0; font-size: 15px; line-height: 20px; }
+
+/* ---------- Detail ---------- */
+.detail-page { z-index: 2; }
+.detail-head { flex: none; padding: 4px 16px 12px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.island {
+  width: 100%; max-width: 560px; background: var(--island); color: #fff; border-radius: 26px; padding: 12px 14px 12px 16px;
+  display: flex; align-items: center; gap: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+.island .wave { display: flex; align-items: center; gap: 3px; height: 26px; width: 34px; justify-content: center; flex: none; color: var(--island-color, var(--green)); }
+.island .wave i { width: 3.5px; border-radius: 2px; background: currentColor; height: 6px; transition: height .2s; }
+.island.animate .wave i { animation: wave 1s ease-in-out infinite; }
+.island.animate .wave i:nth-child(2) { animation-delay: -.8s; }
+.island.animate .wave i:nth-child(3) { animation-delay: -.6s; }
+.island.animate .wave i:nth-child(4) { animation-delay: -.4s; }
+.island.animate .wave i:nth-child(5) { animation-delay: -.2s; }
+@keyframes wave { 0%, 100% { height: 5px; } 50% { height: 24px; } }
+.island .island-text { flex: 1; min-width: 0; }
+.island .island-title { font-weight: 600; font-size: 15px; display: flex; gap: 8px; align-items: baseline; }
+.island .island-title .timer { color: var(--island-color, var(--green)); font-variant-numeric: tabular-nums; font-weight: 600; }
+.island .island-sub { font-size: 13px; color: rgba(235,235,245,.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.island .pill { font-size: 12px; font-weight: 700; padding: 5px 10px; border-radius: 999px; background: color-mix(in srgb, var(--island-color, var(--green)) 22%, transparent); color: var(--island-color, var(--green)); white-space: nowrap; }
+
+.quick { display: flex; justify-content: center; gap: 22px; width: 100%; max-width: 560px; }
+.qa { display: flex; flex-direction: column; align-items: center; gap: 6px; width: 68px; font-size: 12px; color: var(--label); letter-spacing: 0; }
+.qa .circle { width: 56px; height: 56px; border-radius: 50%; background: var(--fill-3); display: grid; place-items: center; color: var(--label); transition: transform .12s, background .2s; }
+.qa .circle svg { width: 24px; height: 24px; }
+.qa:active .circle { transform: scale(.92); background: var(--fill); }
+.qa.on .circle { background: var(--label); color: var(--bg-elevated); }
+.qa.red .circle { background: var(--red); color: #fff; }
+.qa.blue .circle { background: var(--blue); color: #fff; }
+.qa:disabled { opacity: .35; pointer-events: none; }
+
+.transcript { flex: 1; overflow-y: auto; padding: 8px 12px 16px; display: flex; flex-direction: column; gap: 2px; overscroll-behavior: contain; }
+.stamp { text-align: center; font-size: 11px; color: var(--label-2); margin: 14px 0 6px; font-weight: 500; letter-spacing: .06px; }
+.stamp b { font-weight: 600; }
+.sys { text-align: center; font-size: 12px; color: var(--label-2); margin: 10px 0; display: flex; align-items: center; justify-content: center; gap: 5px; }
+.sys svg { width: 13px; height: 13px; }
+.who { font-size: 11px; color: var(--label-2); margin: 8px 14px 2px; letter-spacing: .06px; }
+.who.right { text-align: right; }
+.bubble {
+  max-width: min(75%, 520px); padding: 7px 12px 8px; border-radius: 18px; font-size: 17px; line-height: 22px;
+  word-wrap: break-word; white-space: pre-wrap; position: relative;
+}
+.bubble.in { align-self: flex-start; background: var(--bubble-in); color: var(--bubble-in-label); }
+.bubble.out { align-self: flex-end; background: var(--blue); color: #fff; }
+.bubble.owner { background: var(--indigo); }
+.bubble.in.tail { border-bottom-left-radius: 5px; }
+.bubble.out.tail { border-bottom-right-radius: 5px; }
+.bubble .via { display: inline-flex; align-items: center; gap: 3px; opacity: .7; font-size: 11px; margin-left: 6px; vertical-align: 1px; }
+.bubble .via svg { width: 10px; height: 10px; }
+.attention { align-self: center; display: flex; gap: 10px; align-items: flex-start; max-width: min(88%, 520px); margin: 10px 0; padding: 10px 14px 11px 10px; border-radius: 14px; background: color-mix(in srgb, var(--orange) 14%, var(--bg-elevated)); font-size: 15px; line-height: 20px; }
+.attention b { display: block; font-size: 13px; color: var(--orange); font-weight: 600; margin-bottom: 1px; }
+.attention .tile { width: 26px; height: 26px; border-radius: 13px; }
+.attention .tile svg { width: 15px; height: 15px; }
+.receipt { align-self: flex-end; font-size: 11px; color: var(--label-2); margin: 2px 6px 4px; font-weight: 500; }
+.receipt.fail { color: var(--red); }
+.typing { display: inline-flex; gap: 4px; padding: 12px 14px; }
+.typing i { width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: .4; animation: typing 1.2s infinite; }
+.typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+@keyframes typing { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: .9; transform: translateY(-2px); } }
+
+.composer {
+  flex: none; display: flex; align-items: flex-end; gap: 8px; padding: 8px 12px calc(8px + var(--safe-bottom));
+  background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 -0.5px 0 var(--separator);
+}
+.composer .field { flex: 1; display: flex; align-items: flex-end; border: 1px solid var(--separator); border-radius: 18px; background: var(--bg-elevated); min-height: 36px; padding-left: 12px; }
+.composer textarea { flex: 1; border: 0; outline: 0; background: transparent; resize: none; font-size: 17px; line-height: 22px; padding: 6px 0; max-height: 120px; }
+.composer .send { width: 30px; height: 30px; margin: 2px; border-radius: 50%; background: var(--blue); color: #fff; display: grid; place-items: center; flex: none; transition: transform .15s, opacity .15s; }
+.composer .send svg { width: 16px; height: 16px; }
+.composer .send:disabled { opacity: .3; transform: scale(.9); }
+.composer-hint { flex: none; font-size: 12px; color: var(--label-2); text-align: center; padding: 6px 16px 0; background: var(--bar); }
+.composer-hint b { color: var(--label); font-weight: 600; }
+
+/* ---------- Inspector ---------- */
+.inspector { display: none; }
+
+/* ---------- Sheets ---------- */
+.backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.4); opacity: 0; transition: opacity .3s; z-index: 50; }
+.backdrop.show { opacity: 1; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 51; background: var(--bg); border-radius: 12px 12px 0 0;
+  max-height: calc(100% - var(--safe-top) - 10px); display: flex; flex-direction: column; box-shadow: var(--sheet-shadow);
+  transform: translateY(100%); transition: transform .42s cubic-bezier(.32,.72,0,1); touch-action: none;
+}
+.sheet.show { transform: translateY(0); }
+.sheet .grabber { width: 36px; height: 5px; border-radius: 3px; background: var(--label-3); margin: 5px auto 0; flex: none; }
+.sheet .sheet-bar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; height: 52px; padding: 0 8px; flex: none; }
+.sheet .sheet-bar h2 { margin: 0; font-size: 17px; font-weight: 600; text-align: center; }
+.sheet .sheet-body { overflow-y: auto; padding-bottom: calc(24px + var(--safe-bottom)); touch-action: pan-y; }
+
+.action-sheet { position: fixed; left: 8px; right: 8px; bottom: calc(8px + var(--safe-bottom)); z-index: 61; transform: translateY(120%); transition: transform .38s cubic-bezier(.32,.72,0,1); max-width: 520px; margin: 0 auto; }
+.action-sheet.show { transform: translateY(0); }
+.action-sheet .as-group { background: var(--bar); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px); border-radius: 14px; overflow: hidden; }
+@media (prefers-color-scheme: light) { .action-sheet .as-group { background: rgba(250,250,250,.9); } }
+.action-sheet .as-title { text-align: center; padding: 14px 16px; font-size: 13px; color: var(--label-2); line-height: 18px; }
+.action-sheet .as-title b { display: block; font-weight: 600; margin-bottom: 2px; }
+.action-sheet button { display: block; width: 100%; height: 57px; font-size: 20px; color: var(--blue); border-top: .5px solid var(--separator); letter-spacing: .38px; }
+.action-sheet button:active { background: var(--fill-3); }
+.action-sheet button.destructive { color: var(--red); }
+.action-sheet .cancel { margin-top: 8px; border-radius: 14px; font-weight: 600; background: var(--bg-elevated); border: 0; }
+.backdrop.as { z-index: 60; }
+
+.toast {
+  position: fixed; top: calc(10px + var(--safe-top)); left: 50%; z-index: 80; transform: translate(-50%, -140%);
+  background: var(--bg-elevated); border-radius: 999px; padding: 10px 18px 10px 14px; display: flex; align-items: center; gap: 10px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.18), 0 0 0 .5px var(--separator); font-size: 15px; font-weight: 600;
+  transition: transform .45s cubic-bezier(.32,.72,0,1); white-space: nowrap; max-width: calc(100vw - 32px);
+}
+.toast.show { transform: translate(-50%, 0); }
+.toast svg { width: 20px; height: 20px; flex: none; }
+
+/* ---------- Tab bar ---------- */
+.tabbar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; height: calc(83px - 34px + var(--safe-bottom, 0px) + 0px);
+  min-height: 49px; padding-bottom: var(--safe-bottom); display: flex;
+  background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  box-shadow: 0 -0.5px 0 var(--separator); transition: transform .35s cubic-bezier(.32,.72,0,1);
+}
+.tabbar.hide { transform: translateY(100%); }
+.tabbar button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding-top: 7px; gap: 2px; color: var(--gray); font-size: 10px; font-weight: 500; letter-spacing: .1px; position: relative; }
+.tabbar button svg { width: 26px; height: 26px; }
+.tabbar button.active { color: var(--blue); }
+.badge { position: absolute; top: 2px; left: calc(50% + 6px); min-width: 18px; height: 18px; border-radius: 9px; background: var(--red); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; padding: 0 5px; }
+
+/* ---------- Sign in ---------- */
+.signin { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+.signin .app-icon { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 10px 30px rgba(0,122,255,.3); margin-bottom: 22px; }
+.signin h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: .36px; }
+.signin p { color: var(--label-2); margin: 8px 0 28px; font-size: 17px; max-width: 330px; }
+.signin form { width: 100%; max-width: 360px; }
+.signin .group { margin: 0; }
+.signin .row input { text-align: left; color: var(--label); }
+.btn-primary { display: block; width: 100%; height: 50px; border-radius: 12px; background: var(--blue); color: #fff; font-size: 17px; font-weight: 600; margin-top: 16px; transition: opacity .15s; }
+.btn-primary:active { opacity: .7; }
+.btn-primary:disabled { opacity: .4; }
+.signin .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 12px; }
+.shake { animation: shake .4s; }
+@keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+
+/* ---------- Pairing ---------- */
+.qr-card { background: #fff; border-radius: 20px; padding: 16px; width: 232px; height: 232px; margin: 8px auto 0; box-shadow: 0 6px 24px rgba(0,0,0,.08); display: grid; place-items: center; }
+.qr-card img { width: 200px; height: 200px; image-rendering: pixelated; }
+.steps { margin: 20px 16px 0; counter-reset: s; }
+.steps li { list-style: none; display: flex; gap: 12px; align-items: flex-start; padding: 6px 4px; font-size: 15px; line-height: 20px; }
+.steps li::before { counter-increment: s; content: counter(s); flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 13px; font-weight: 700; display: grid; place-items: center; }
+.expires { text-align: center; color: var(--label-2); font-size: 13px; margin-top: 12px; font-variant-numeric: tabular-nums; }
+
+/* ---------- Phone: navigation stack ---------- */
+@media (max-width: 759px) {
+  .tab[data-tab=live] .list-page, .tab[data-tab=live] .detail-page { transition: transform .5s cubic-bezier(.32,.72,0,1), filter .5s; will-change: transform; }
+  .tab[data-tab=live] .detail-page { transform: translateX(100%); box-shadow: -10px 0 30px rgba(0,0,0,.08); }
+  .tab[data-tab=live].pushed .detail-page { transform: translateX(0); }
+  .tab[data-tab=live].pushed .list-page { transform: translateX(-30%); filter: brightness(.94); }
+  .tab[data-tab=live]:not(.pushed) .detail-page { visibility: hidden; transition: transform .5s cubic-bezier(.32,.72,0,1), visibility 0s .5s; }
+  .tab[data-tab=live].dragging .list-page, .tab[data-tab=live].dragging .detail-page { transition: none; }
+  .desktop-only { display: none !important; }
+}
+
+/* ---------- iPad / Mac: split view ---------- */
+@media (min-width: 760px) {
+  body { font-size: 15px; }
+  .phone-only { display: none !important; }
+  .tab[data-tab=live].active { display: flex; }
+  .tab[data-tab=live] .page { position: relative; inset: auto; }
+  .list-page { width: 340px; flex: none; border-right: .5px solid var(--separator); background: var(--bg-elevated); }
+  .list-page .group { margin: 0 8px; background: transparent; }
+  .list-page .row { background: transparent; border-radius: 10px; }
+  .list-page .convo + .convo::before { left: 76px; right: 12px; }
+  .list-page .search input { background: var(--fill-3); }
+  .detail-page { flex: 1; min-width: 0; }
+  .detail-page .navbar { background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); box-shadow: 0 .5px 0 var(--separator); }
+  .detail-page .navbar .nav-title { opacity: 1; }
+  .detail-page .back { display: none; }
+  .composer { padding-bottom: 10px; }
+  .tabbar { display: none; }
+  .scroll.with-tabbar { padding-bottom: 24px; }
+  .sheet { left: 50%; right: auto; bottom: auto; top: 50%; width: 540px; max-height: 80vh; border-radius: 14px; transform: translate(-50%, -46%) scale(.96); opacity: 0; transition: transform .3s cubic-bezier(.32,.72,0,1), opacity .2s; }
+  .sheet.show { transform: translate(-50%, -50%); opacity: 1; }
+  .sheet .grabber { display: none; }
+  .settings-page .scroll, .devices-page .scroll { display: block; }
+  .settings-page .scroll > *, .devices-page .scroll > * { max-width: 680px; margin-left: auto; margin-right: auto; }
+  .settings-page .group, .devices-page .group { margin-left: max(16px, calc((100% - 680px) / 2 + 16px)); margin-right: max(16px, calc((100% - 680px) / 2 + 16px)); }
+}
+@media (min-width: 1024px) {
+  .sidebar {
+    display: flex; flex-direction: column; width: 232px; flex: none; background: var(--sidebar);
+    backdrop-filter: saturate(180%) blur(30px); -webkit-backdrop-filter: saturate(180%) blur(30px);
+    border-right: .5px solid var(--separator); padding: 16px 10px;
+  }
+  .sidebar .brand { display: flex; align-items: center; gap: 10px; padding: 6px 10px 18px; font-weight: 700; font-size: 17px; }
+  .sidebar .brand img { width: 30px; height: 30px; border-radius: 7px; }
+  .sidebar .section { font-size: 11px; font-weight: 600; color: var(--label-2); padding: 12px 10px 5px; letter-spacing: .06px; }
+  .sidebar .item { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 10px; border-radius: 7px; font-size: 14px; text-align: left; }
+  .sidebar .item svg { width: 18px; height: 18px; color: var(--blue); }
+  .sidebar .item.active { background: var(--fill); font-weight: 600; }
+  .sidebar .item .count { margin-left: auto; font-size: 12px; color: var(--label-2); font-weight: 600; }
+  .sidebar .grow { flex: 1; }
+  .sidebar .who-am-i { font-size: 12px; color: var(--label-2); padding: 8px 10px; display: flex; align-items: center; gap: 8px; }
+  .sidebar .who-am-i .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+}
+@media (min-width: 1320px) {
+  .inspector {
+    display: flex; flex-direction: column; width: 340px; flex: none; border-left: .5px solid var(--separator); background: var(--bg);
+  }
+  .inspector .scroll { padding-bottom: 24px; }
+  .inspector .insp-title { font-size: 13px; font-weight: 600; color: var(--label-2); text-transform: uppercase; padding: 20px 20px 0; letter-spacing: -.08px; }
+  .controls-btn { display: none !important; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+
+<div class="signin" id="signin" hidden>
+  <img class="app-icon" src="/icon.svg" alt="">
+  <h1>Text Me</h1>
+  <p>Enter your owner access token to see and control live calls.</p>
+  <form id="signinForm" autocomplete="on">
+    <div class="group">
+      <label class="row"><span class="sr">Access token</span>
+        <input id="tokenInput" type="password" name="password" autocomplete="current-password" placeholder="Access Token" required>
+      </label>
+    </div>
+    <button class="btn-primary" type="submit" id="signinButton">Continue</button>
+    <div class="err" id="signinError" role="alert"></div>
+  </form>
+</div>
+
+<div class="app" id="app">
+  <nav class="sidebar" aria-label="Sections">
+    <div class="brand"><img src="/icon.svg" alt="">Text Me</div>
+    <div class="section">Assistant</div>
+    <button class="item" data-go="live"><span data-icon="wave"></span>Live<span class="count" id="sideCount"></span></button>
+    <button class="item" data-go="devices"><span data-icon="laptop"></span>Devices</button>
+    <button class="item" data-go="settings"><span data-icon="gear"></span>Settings</button>
+    <div class="grow"></div>
+    <div class="who-am-i"><span class="dot" id="connDot"></span><span id="connLabel">Connected</span></div>
+  </nav>
+
+  <main class="tabs">
+    <!-- Live -->
+    <section class="tab" data-tab="live" id="liveTab">
+      <div class="page list-page" id="listPage">
+        <header class="navbar" id="listNav">
+          <div class="nav-left"></div>
+          <div class="nav-title">Live</div>
+          <div class="nav-right"><button class="nav-btn icon phone-only" id="refreshBtn" aria-label="Refresh"><span data-icon="refresh"></span></button></div>
+        </header>
+        <div class="scroll with-tabbar" id="listScroll">
+          <h1 class="large-title">Live</h1>
+          <div class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="Search" aria-label="Search conversations"></div>
+          <div class="segmented" role="tablist" id="filter">
+            <button class="on" data-filter="all" role="tab">All</button>
+            <button data-filter="needs" role="tab">Needs You</button>
+            <button data-filter="active" role="tab">On Call</button>
+          </div>
+          <div class="group" id="list" role="list"></div>
+        </div>
+      </div>
+
+      <div class="page detail-page" id="detailPage">
+        <header class="navbar solid" id="detailNav">
+          <div class="nav-left"><button class="nav-btn back" id="backBtn"><span data-icon="chevronLeft"></span>Live</button></div>
+          <div><div class="nav-title" id="detailTitle"></div><div class="nav-sub" id="detailSub"></div></div>
+          <div class="nav-right"><button class="nav-btn icon controls-btn" id="controlsBtn" aria-label="Assistant controls"><span data-icon="sliders"></span></button></div>
+        </header>
+        <div id="detailEmpty" class="empty-state desktop-only" style="margin:auto">
+          <span data-icon="bubbles"></span>
+          <h3>No Conversation Selected</h3>
+          <p>Choose a call to see it live and take control.</p>
+        </div>
+        <div id="detailBody" hidden style="display:flex;flex-direction:column;flex:1;min-height:0">
+          <div class="detail-head">
+            <div class="island" id="island" role="status" aria-live="polite">
+              <div class="wave"><i></i><i></i><i></i><i></i><i></i></div>
+              <div class="island-text"><div class="island-title"><span id="islandTitle"></span><span class="timer" id="islandTimer"></span></div><div class="island-sub" id="islandSub"></div></div>
+              <span class="pill" id="islandPill"></span>
+            </div>
+            <div class="quick" id="quick"></div>
+          </div>
+          <div class="transcript" id="transcript" aria-live="polite"></div>
+          <div class="composer-hint" id="composerHint"></div>
+          <form class="composer" id="composer">
+            <div class="field"><textarea id="composerInput" rows="1" maxlength="2000" aria-label="Reply"></textarea>
+              <button class="send" id="sendBtn" type="submit" aria-label="Send" disabled><span data-icon="arrowUp"></span></button></div>
+          </form>
+        </div>
+      </div>
+
+      <aside class="inspector" id="inspector" aria-label="Assistant controls">
+        <header class="navbar solid"><div></div><div class="nav-title">Assistant</div><div></div></header>
+        <div class="scroll" id="inspectorBody"></div>
+      </aside>
+    </section>
+
+    <!-- Devices -->
+    <section class="tab" data-tab="devices">
+      <div class="page devices-page">
+        <header class="navbar" id="devicesNav"><div class="nav-left"></div><div class="nav-title">Devices</div><div class="nav-right"></div></header>
+        <div class="scroll with-tabbar" id="devicesScroll">
+          <h1 class="large-title">Devices</h1>
+          <div id="devicesBody"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="tab" data-tab="settings">
+      <div class="page settings-page">
+        <header class="navbar" id="settingsNav"><div class="nav-left"></div><div class="nav-title">Settings</div><div class="nav-right"></div></header>
+        <div class="scroll with-tabbar" id="settingsScroll">
+          <h1 class="large-title">Settings</h1>
+          <div id="settingsBody"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" id="tabbar" aria-label="Tabs">
+    <button data-go="live" class="active"><span data-icon="wave"></span>Live<span class="badge" id="tabBadge" hidden></span></button>
+    <button data-go="devices"><span data-icon="laptop"></span>Devices</button>
+    <button data-go="settings"><span data-icon="gear"></span>Settings</button>
+  </nav>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+'use strict';
+
+/* ---------------- Icons (SF Symbols–style) ---------------- */
+const I = {
+  wave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 10v4"/></svg>',
+  laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.8"/><path d="M2 19h20" stroke-linecap="round"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+  chevronLeft: '<svg viewBox="0 0 12 21" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10.5 10 19"/></svg>',
+  chevronRight: '<svg class="chev" viewBox="0 0 8 13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m1.5 1.5 5 5-5 5"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m20 20-4.6-4.6"/></svg>',
+  sliders: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2.2"/><circle cx="9" cy="17" r="2.2"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1.3"/><rect x="14" y="4.5" width="4" height="15" rx="1.3"/></svg>',
+  play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 4.8v14.4c0 .9 1 1.4 1.7.9l10.6-7.2a1.1 1.1 0 0 0 0-1.8L9.2 3.9c-.7-.5-1.7 0-1.7.9z"/></svg>',
+  person: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="7.5" r="4.2"/><path d="M3.8 20.2c0-4.2 3.7-6.7 8.2-6.7s8.2 2.5 8.2 6.7c0 .5-.4.8-.9.8H4.7c-.5 0-.9-.3-.9-.8z"/></svg>',
+  sparkles: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 2.8 11.9 8a2 2 0 0 0 1.2 1.2l5.1 1.9-5.1 1.9a2 2 0 0 0-1.2 1.2L10 19.4 8.1 14.2a2 2 0 0 0-1.2-1.2L1.8 11.1 6.9 9.2A2 2 0 0 0 8.1 8z"/><path d="m18.5 14.5.9 2.3 2.3.9-2.3.9-.9 2.3-.9-2.3-2.3-.9 2.3-.9z"/></svg>',
+  message: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.8 3 2.7 6.6 2.7 11c0 2.4 1.2 4.6 3.2 6.1-.1 1.3-.7 2.6-1.7 3.5-.2.2 0 .6.3.6 1.9 0 3.6-.7 4.8-1.7 0 0 1.6.5 2.7.5 5.2 0 9.3-3.6 9.3-8S17.2 3 12 3z"/></svg>',
+  phoneDown: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 8.6c-3.5 0-6.8 1-9.4 2.9-.8.6-1 1.7-.4 2.5l1.2 1.7c.5.7 1.4.9 2.2.6l2.4-1c.6-.3 1-.9 1-1.6v-1.5c1-.3 2-.4 3-.4s2 .1 3 .4v1.5c0 .7.4 1.3 1 1.6l2.4 1c.8.3 1.7.1 2.2-.6l1.2-1.7c.6-.8.4-1.9-.4-2.5C18.8 9.6 15.5 8.6 12 8.6z"/></svg>',
+  arrowUp: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V5M5.5 11 12 4.5 18.5 11"/></svg>',
+  bubbles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.5 4H5a2.5 2.5 0 0 0-2.5 2.5v6A2.5 2.5 0 0 0 5 15h1v3l3.5-3h5a2.5 2.5 0 0 0 2.5-2.5v-6A2.5 2.5 0 0 0 14.5 4z"/><path d="M17 8h2a2.5 2.5 0 0 1 2.5 2.5v5.5A2.5 2.5 0 0 1 19 18.5h-1V21l-3-2.5h-3.5"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6.6 2.9 8.7 5c.6.6.7 1.5.3 2.2l-1.2 2c1.3 2.6 3.4 4.7 6 6l2-1.2c.7-.4 1.6-.3 2.2.3l2.1 2.1c.7.7.7 1.8 0 2.5l-1.4 1.4c-1 1-2.6 1.3-3.9.7C8.9 18.4 5.6 15.1 3 9.2c-.6-1.3-.3-2.9.7-3.9l1.4-1.4c.7-.7 1.8-.7 2.5 0z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><path d="m4.5 12.5 5 5 10-11"/></svg>',
+  xmark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  exclamation: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M12 7v6" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.4" fill="#fff"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  qr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3.5" y="3.5" width="6" height="6" rx="1"/><rect x="14.5" y="3.5" width="6" height="6" rx="1"/><rect x="3.5" y="14.5" width="6" height="6" rx="1"/><path d="M14.5 14.5h2v2M20.5 14.5v6h-6M17.5 18.5h.01" stroke-linecap="round"/></svg>',
+  star: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="m12 2.8 2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3-4.6-4.4 6.3-.9z"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="8.5" y="2.5" width="7" height="12" rx="3.5"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
+  bolt: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13.5 2 4.8 13.1c-.4.5 0 1.2.6 1.2H11l-1 7.7 8.7-11.1c.4-.5 0-1.2-.6-1.2H12.5z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4.5" y="10.5" width="15" height="11" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  bell: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5a6 6 0 0 0-6 6v4.2L4.3 15.6c-.4.7.1 1.4.9 1.4h13.6c.8 0 1.3-.7.9-1.4L18 12.7V8.5a6 6 0 0 0-6-6zM9.5 18.5a2.5 2.5 0 0 0 5 0z"/></svg>',
+};
+document.querySelectorAll('[data-icon]').forEach((node) => { node.outerHTML = I[node.dataset.icon]; });
+
+/* ---------------- Helpers ---------------- */
+const $ = (selector, root = document) => root.querySelector(selector);
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const phoneMq = matchMedia('(max-width: 759px)');
+const isPhone = () => phoneMq.matches;
+const haptic = () => { try { navigator.vibrate && navigator.vibrate(8); } catch {} };
+const store = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { value == null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch {} },
+};
+
+function formatPhone(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits[0] === '1') return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  if (digits.length === 10) return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  return raw || 'Unknown';
+}
+function initials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter((part) => /^[A-Za-z]/.test(part));
+  return parts.length ? parts.slice(0, 2).map((part) => part[0].toUpperCase()).join('') : '';
+}
+function avatarHTML(name, large) {
+  const text = initials(name);
+  return `<div class="avatar${large ? ' lg' : ''}" aria-hidden="true">${text ? esc(text) : I.person}</div>`;
+}
+function relTime(iso) {
+  const date = new Date(iso); const now = new Date();
+  const diff = (now - date) / 1000;
+  if (diff < 60) return 'now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (date.toDateString() === now.toDateString()) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  if (diff < 6 * 86400) return date.toLocaleDateString([], { weekday: 'long' });
+  return date.toLocaleDateString([], { month: 'numeric', day: 'numeric', year: '2-digit' });
+}
+function stampText(iso) {
+  const date = new Date(iso); const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  if (date.toDateString() === now.toDateString()) return `<b>Today</b> ${time}`;
+  return `<b>${date.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}</b> ${time}`;
+}
+function duration(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+const STATES = {
+  idle: ['Connecting', 'gray'], starting: ['Connecting', 'gray'],
+  listening: ['Listening', 'green', true], transcribing: ['Hearing Caller', 'green', true],
+  thinking: ['Thinking', 'indigo', true], speaking: ['Speaking', 'blue', true],
+  waiting_for_owner: ['Needs You', 'orange', true], paused: ['Paused', 'orange'],
+  stopped: ['Ended', 'gray'], transferring: ['Moving to Text', 'teal', true],
+  text_active: ['Texting', 'green'], error: ['Problem', 'red'],
+};
+const stateMeta = (state) => {
+  const [label, color, live] = STATES[state] || [String(state || 'Ready').replace(/_/g, ' '), 'gray'];
+  return { label, color: `var(--${color})`, live: Boolean(live) };
+};
+
+function callerName(conversation) {
+  if (!conversation) return '';
+  if (conversation.callerName) return conversation.callerName;
+  const fromParticipants = (conversation.participants || []).find((participant) => participant.role === 'caller' && participant.displayName);
+  if (fromParticipants) return fromParticipants.displayName;
+  if (conversation.participant && conversation.participant.name) return conversation.participant.name;
+  const consent = [...(conversation.eventLog || [])].reverse().find((event) => event.type === 'sms.consent.granted' && event.payload && event.payload.displayName);
+  return consent ? consent.payload.displayName : '';
+}
+const displayName = (conversation) => callerName(conversation) || formatPhone(conversation.caller);
+
+/* ---------------- API ---------------- */
+const state = {
+  token: store.get('ownerToken') || '',
+  conversations: [], selectedId: null, detail: null,
+  filter: 'all', search: '', tab: 'live', config: null, devices: [],
+  stream: null, streamId: null, sending: false,
+};
+(() => {
+  const url = new URL(location.href);
+  const token = url.searchParams.get('token');
+  if (token) {
+    state.token = token; store.set('ownerToken', token);
+    url.searchParams.delete('token'); history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
+})();
+
+class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
+async function api(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  let response;
+  try {
+    response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch {
+    setConnection(false);
+    throw new ApiError("You're offline. Check your connection.", 0);
+  }
+  setConnection(true);
+  if (response.status === 401) { showSignIn(); throw new ApiError('Please sign in again.', 401); }
+  if (response.status === 204) return null;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new ApiError(data.error || 'Something went wrong.', response.status);
+  return data;
+}
+function setConnection(ok) {
+  $('#connDot').style.background = ok ? 'var(--green)' : 'var(--red)';
+  $('#connLabel').textContent = ok ? 'Connected' : 'Offline';
+}
+
+/* ---------------- Toast, sheets, action sheets ---------------- */
+let toastTimer;
+function toast(text, icon = 'check', color = 'var(--green)') {
+  const node = $('#toast');
+  node.innerHTML = `<span style="color:${color}">${I[icon]}</span><span>${esc(text)}</span>`;
+  node.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove('show'), 2200);
+}
+const errorToast = (error) => toast(error.message || 'Something went wrong.', 'exclamation', 'var(--red)');
+
+function openSheet({ title, body, onClose, doneLabel = 'Done' }) {
+  const backdrop = document.createElement('div'); backdrop.className = 'backdrop';
+  const sheet = document.createElement('div'); sheet.className = 'sheet'; sheet.setAttribute('role', 'dialog'); sheet.setAttribute('aria-modal', 'true'); sheet.setAttribute('aria-label', title);
+  sheet.innerHTML = `<div class="grabber"></div><div class="sheet-bar"><div></div><h2>${esc(title)}</h2><div style="text-align:right"><button class="nav-btn" data-close style="font-weight:600;margin-left:auto">${esc(doneLabel)}</button></div></div><div class="sheet-body"></div>`;
+  $('.sheet-body', sheet).appendChild(body);
+  document.body.append(backdrop, sheet);
+  requestAnimationFrame(() => { backdrop.classList.add('show'); sheet.classList.add('show'); });
+  const close = () => {
+    backdrop.classList.remove('show'); sheet.classList.remove('show');
+    setTimeout(() => { backdrop.remove(); sheet.remove(); }, 420);
+    onClose && onClose();
+  };
+  backdrop.onclick = close; $('[data-close]', sheet).onclick = close;
+  // Drag the grabber area down to dismiss, like a native sheet.
+  let startY = null, dy = 0;
+  const bar = [$('.grabber', sheet), $('.sheet-bar', sheet)];
+  bar.forEach((node) => node.addEventListener('touchstart', (event) => { startY = event.touches[0].clientY; sheet.style.transition = 'none'; }, { passive: true }));
+  sheet.addEventListener('touchmove', (event) => {
+    if (startY == null) return; dy = Math.max(0, event.touches[0].clientY - startY);
+    sheet.style.transform = `translateY(${dy}px)`;
+  }, { passive: true });
+  sheet.addEventListener('touchend', () => {
+    if (startY == null) return; sheet.style.transition = ''; sheet.style.transform = '';
+    if (dy > 120) close(); startY = null; dy = 0;
+  });
+  return { close, sheet };
+}
+
+function actionSheet({ title, message, actions }) {
+  return new Promise((resolve) => {
+    const backdrop = document.createElement('div'); backdrop.className = 'backdrop as';
+    const node = document.createElement('div'); node.className = 'action-sheet'; node.setAttribute('role', 'dialog');
+    node.innerHTML = `<div class="as-group">${title || message ? `<div class="as-title">${title ? `<b>${esc(title)}</b>` : ''}${esc(message || '')}</div>` : ''}${actions.map((action, index) => `<button data-i="${index}" class="${action.destructive ? 'destructive' : ''}">${esc(action.label)}</button>`).join('')}</div><button class="cancel" data-i="-1">Cancel</button>`;
+    if (!title && !message) $('.as-group button', node).style.borderTop = '0';
+    document.body.append(backdrop, node);
+    requestAnimationFrame(() => { backdrop.classList.add('show'); node.classList.add('show'); });
+    const done = (value) => {
+      backdrop.classList.remove('show'); node.classList.remove('show');
+      setTimeout(() => { backdrop.remove(); node.remove(); }, 380);
+      resolve(value);
+    };
+    backdrop.onclick = () => done(null);
+    node.querySelectorAll('button').forEach((button) => { button.onclick = () => done(Number(button.dataset.i) >= 0 ? actions[Number(button.dataset.i)].value : null); });
+  });
+}
+
+/* ---------------- Tabs & navigation ---------------- */
+function go(tab) {
+  state.tab = tab;
+  document.querySelectorAll('.tab').forEach((node) => node.classList.toggle('active', node.dataset.tab === tab));
+  document.querySelectorAll('[data-go]').forEach((node) => node.classList.toggle('active', node.dataset.go === tab));
+  if (tab === 'devices') loadDevices();
+  if (tab === 'settings') loadSettings();
+  updateTabbar();
+}
+document.querySelectorAll('[data-go]').forEach((node) => node.addEventListener('click', () => { haptic(); go(node.dataset.go); }));
+const updateTabbar = () => $('#tabbar').classList.toggle('hide', state.tab === 'live' && $('#liveTab').classList.contains('pushed'));
+
+function bindLargeTitle(scroller, navbar) {
+  const update = () => navbar.classList.toggle('scrolled', scroller.scrollTop > 34);
+  scroller.addEventListener('scroll', update, { passive: true }); update();
+}
+bindLargeTitle($('#listScroll'), $('#listNav'));
+bindLargeTitle($('#devicesScroll'), $('#devicesNav'));
+bindLargeTitle($('#settingsScroll'), $('#settingsNav'));
+
+function pushDetail() { $('#liveTab').classList.add('pushed'); updateTabbar(); }
+function popDetail() {
+  $('#liveTab').classList.remove('pushed'); updateTabbar();
+  if (isPhone()) { state.selectedId = null; closeStream(); setTimeout(renderList, 50); }
+}
+$('#backBtn').onclick = popDetail;
+
+// Interactive swipe-back from the left edge, like UINavigationController.
+(() => {
+  const tab = $('#liveTab'), detail = $('#detailPage'), list = $('#listPage');
+  let startX = null, dx = 0;
+  detail.addEventListener('touchstart', (event) => {
+    if (!isPhone() || event.touches[0].clientX > 28) return;
+    startX = event.touches[0].clientX; tab.classList.add('dragging');
+  }, { passive: true });
+  detail.addEventListener('touchmove', (event) => {
+    if (startX == null) return;
+    dx = Math.max(0, event.touches[0].clientX - startX);
+    detail.style.transform = `translateX(${dx}px)`;
+    list.style.transform = `translateX(${-30 + (dx / innerWidth) * 30}%)`;
+  }, { passive: true });
+  detail.addEventListener('touchend', () => {
+    if (startX == null) return;
+    tab.classList.remove('dragging'); detail.style.transform = ''; list.style.transform = '';
+    if (dx > innerWidth * 0.3) popDetail();
+    startX = null; dx = 0;
+  });
+})();
+
+/* ---------------- Sign in ---------------- */
+function showSignIn() {
+  $('#signin').hidden = false; $('#app').hidden = true;
+  setTimeout(() => $('#tokenInput').focus(), 50);
+}
+$('#signinForm').onsubmit = async (event) => {
+  event.preventDefault();
+  const token = $('#tokenInput').value.trim();
+  const button = $('#signinButton'); button.disabled = true; $('#signinError').textContent = '';
+  try {
+    const response = await fetch('/conversations', { headers: { Authorization: `Bearer ${token}` } });
+    if (response.status === 401) throw new Error("That token didn't work. Check it and try again.");
+    if (!response.ok) throw new Error("Couldn't reach the server. Try again.");
+    state.token = token; store.set('ownerToken', token);
+    $('#signin').hidden = true; $('#app').hidden = false;
+    boot();
+  } catch (error) {
+    $('#signinError').textContent = error.message;
+    const form = $('#signinForm'); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
+  } finally { button.disabled = false; }
+};
+
+/* ---------------- Conversation list ---------------- */
+$('#filter').addEventListener('click', (event) => {
+  const button = event.target.closest('button'); if (!button) return;
+  haptic(); state.filter = button.dataset.filter;
+  $('#filter').querySelectorAll('button').forEach((node) => node.classList.toggle('on', node === button));
+  renderList();
+});
+$('#search').addEventListener('input', (event) => { state.search = event.target.value.trim().toLowerCase(); renderList(); });
+$('#refreshBtn').onclick = () => { haptic(); loadList().then(() => toast('Up to date')); };
+
+const needsYou = (conversation) => (conversation.runtime && conversation.runtime.state === 'waiting_for_owner') || conversation.needsOwner;
+const isOnCall = (conversation) => (conversation.voice && conversation.voice.live) || (conversation.status !== 'completed' && conversation.primaryChannel === 'voice' && conversation.runtime && stateMeta(conversation.runtime.state).live);
+
+async function loadList() {
+  try {
+    state.conversations = await api('/conversations');
+    renderList();
+  } catch (error) { if (error.status !== 401) console.warn(error); }
+}
+
+function renderList() {
+  const listNode = $('#list');
+  let items = state.conversations.slice().sort((left, right) => new Date(right.updatedAt || right.startedAt) - new Date(left.updatedAt || left.startedAt));
+  const waiting = items.filter(needsYou).length;
+  $('#tabBadge').hidden = !waiting; $('#tabBadge').textContent = waiting;
+  $('#sideCount').textContent = items.length || '';
+  if (state.filter === 'needs') items = items.filter(needsYou);
+  if (state.filter === 'active') items = items.filter(isOnCall);
+  if (state.search) items = items.filter((conversation) => `${displayName(conversation)} ${conversation.caller} ${conversation.preview || ''}`.toLowerCase().includes(state.search));
+  if (!items.length) {
+    const copy = state.search ? ['No Results', `Nothing matches “${esc(state.search)}”.`]
+      : state.filter === 'needs' ? ['All Caught Up', 'Nothing needs your attention right now.']
+      : state.filter === 'active' ? ['No Live Calls', 'Calls your assistant is on will show up here.']
+      : ['No Conversations Yet', 'When someone calls, your assistant answers and the conversation appears here live.'];
+    listNode.innerHTML = `<div class="empty-state">${state.filter === 'needs' ? I.check : I.phone}<h3>${copy[0]}</h3><p>${copy[1]}</p></div>`;
+    listNode.style.background = 'transparent';
+    return;
+  }
+  listNode.style.background = '';
+  listNode.innerHTML = items.map((conversation) => {
+    const runtime = conversation.runtime || {};
+    const meta = conversation.status === 'completed' && !['text_active', 'transferring'].includes(runtime.state) ? stateMeta('stopped') : stateMeta(runtime.state);
+    const status = needsYou(conversation) ? stateMeta('waiting_for_owner') : meta;
+    const selected = state.selectedId === conversation.id && !isPhone();
+    const onCall = isOnCall(conversation);
+    return `<button class="row convo${selected ? ' selected' : ''}" role="listitem" data-id="${esc(conversation.id)}" aria-label="${esc(displayName(conversation))}">
+      <span class="unread-dot">${conversation.unread ? '<i></i>' : ''}</span>
+      ${avatarHTML(callerName(conversation))}
+      <span class="row-body">
+        <span class="convo-top"><span class="name">${esc(displayName(conversation))}</span><span class="time">${esc(relTime(conversation.updatedAt || conversation.startedAt))}${I.chevronRight}</span></span>
+        <span class="status-line" style="color:${status.color}"><span class="dot${status.live || onCall ? ' pulse' : ''}"></span>${esc(onCall && !needsYou(conversation) ? `On Call · ${status.label}` : status.label)}</span>
+        <span class="preview">${esc(conversation.preview || (onCall ? 'Your assistant is on the line…' : 'No messages yet'))}</span>
+      </span></button>`;
+  }).join('');
+  listNode.querySelectorAll('.convo').forEach((node) => node.onclick = () => { haptic(); openConversation(node.dataset.id); });
+}
+
+/* ---------------- Conversation detail ---------------- */
+async function openConversation(id) {
+  const changed = state.selectedId !== id;
+  state.selectedId = id;
+  if (changed) { state.detail = null; $('#transcript').innerHTML = ''; $('#composerInput').value = ''; }
+  $('#detailEmpty').hidden = true; $('#detailBody').hidden = false;
+  if (isPhone()) pushDetail();
+  const summary = state.conversations.find((conversation) => conversation.id === id);
+  if (summary && !state.detail) { $('#detailTitle').textContent = displayName(summary); }
+  renderList();
+  await loadDetail(id);
+  openStream(id);
+}
+
+let detailLoading = null;
+async function loadDetail(id = state.selectedId) {
+  if (!id) return;
+  if (detailLoading) { detailLoading.again = true; return; }
+  detailLoading = { again: false };
+  try {
+    const detail = await api(`/conversations/${encodeURIComponent(id)}`);
+    if (id !== state.selectedId) return;
+    state.detail = detail;
+    const index = state.conversations.findIndex((conversation) => conversation.id === id);
+    if (index >= 0) state.conversations[index] = { ...state.conversations[index], unread: false, runtime: detail.runtime, voice: detail.voice, state: detail.state };
+    renderDetail();
+  } catch (error) {
+    if (error.status === 404) { toast('That conversation is no longer available', 'exclamation', 'var(--orange)'); popDetail(); }
+  } finally {
+    const again = detailLoading.again; detailLoading = null;
+    if (again) loadDetail(id);
+  }
+}
+
+function canText(detail) { return (detail.eventLog || []).some((event) => event.type === 'sms.consent.granted'); }
+
+function renderDetail() {
+  const detail = state.detail; if (!detail) return;
+  const runtime = detail.runtime || {};
+  const name = displayName(detail);
+  $('#detailTitle').textContent = name;
+  $('#detailSub').textContent = callerName(detail) ? formatPhone(detail.caller) : '';
+  renderIsland(detail);
+  renderQuick(detail);
+  renderTranscript(detail);
+  renderComposer(detail);
+  renderInspector();
+}
+
+function renderIsland(detail) {
+  const runtime = detail.runtime || {};
+  const live = detail.voice && detail.voice.live;
+  const ended = detail.status === 'completed' && !['text_active', 'transferring'].includes(runtime.state);
+  const meta = ended ? stateMeta('stopped') : stateMeta(runtime.state);
+  const island = $('#island');
+  island.style.setProperty('--island-color', meta.color);
+  island.classList.toggle('animate', meta.live && runtime.state !== 'waiting_for_owner');
+  const mode = runtime.aiMode === 'owner_only' ? 'You’re in control' : runtime.aiMode === 'owner_assist' ? 'Assistant needs approval' : 'Assistant handling';
+  $('#islandTitle').textContent = ended ? (runtime.state === 'text_active' ? 'Texting' : 'Call Ended')
+    : runtime.state === 'text_active' ? 'Texting' : live ? 'On Call' : detail.primaryChannel === 'voice' ? 'Voice' : 'Conversation';
+  $('#islandSub').textContent = runtime.currentActivity ? `${runtime.currentActivity} · ${mode}` : mode;
+  $('#islandPill').textContent = meta.label;
+  tickTimer();
+}
+function tickTimer() {
+  const detail = state.detail; const timer = $('#islandTimer');
+  if (!detail) return;
+  const end = detail.endedAt ? new Date(detail.endedAt) : new Date();
+  const showTimer = detail.primaryChannel === 'voice' && detail.startedAt && (detail.voice?.live || detail.endedAt);
+  timer.textContent = showTimer ? duration(end - new Date(detail.startedAt)) : '';
+}
+setInterval(tickTimer, 1000);
+
+function renderQuick(detail) {
+  const runtime = detail.runtime || {};
+  const stopped = runtime.state === 'stopped';
+  const paused = runtime.state === 'paused';
+  const ownerMode = runtime.aiMode === 'owner_only';
+  const textAvailable = runtime.smsTransitionEnabled && !['text_active', 'transferring'].includes(runtime.state);
+  const buttons = [
+    stopped ? { id: 'start', label: 'Restart', icon: 'play', cls: 'blue' }
+      : paused ? { id: 'resume', label: 'Resume', icon: 'play', cls: 'on' }
+      : { id: 'pause', label: 'Pause', icon: 'pause' },
+    ownerMode ? { id: 'return-to-assistant', label: 'Hand Back', icon: 'sparkles', cls: 'on' } : { id: 'takeover', label: 'Take Over', icon: 'person', disabled: stopped },
+    { id: 'transition-to-sms', label: runtime.state === 'transferring' ? 'Waiting…' : 'Text', icon: 'message', disabled: !textAvailable || stopped },
+    { id: 'stop', label: 'End', icon: 'phoneDown', cls: 'red', disabled: stopped },
+  ];
+  $('#quick').innerHTML = buttons.map((button) => `<button class="qa ${button.cls || ''}" data-cmd="${button.id}" ${button.disabled ? 'disabled' : ''} aria-label="${esc(button.label)}"><span class="circle">${I[button.icon]}</span>${esc(button.label)}</button>`).join('');
+  $('#quick').querySelectorAll('[data-cmd]').forEach((node) => node.onclick = () => { haptic(); onQuick(node.dataset.cmd); });
+}
+
+async function onQuick(command) {
+  const name = displayName(state.detail);
+  if (command === 'stop') {
+    const confirmed = await actionSheet({
+      title: `End the assistant for ${name}?`,
+      message: state.detail.voice?.live ? 'The assistant will say goodbye and hang up. You can follow up by text.' : 'The assistant will stop responding in this conversation.',
+      actions: [{ label: state.detail.voice?.live ? 'End Call' : 'Stop Assistant', value: true, destructive: true }],
+    });
+    if (!confirmed) return;
+  }
+  if (command === 'transition-to-sms') {
+    const confirmed = await actionSheet({
+      title: 'Move to text?', message: `The assistant will ask ${name} if it’s OK to continue by text message.`,
+      actions: [{ label: 'Ask to Text', value: true }],
+    });
+    if (!confirmed) return;
+  }
+  const messages = {
+    pause: ['Assistant paused', 'pause', 'var(--orange)'], resume: ['Assistant resumed', 'play', 'var(--green)'],
+    start: ['Assistant restarted', 'play', 'var(--green)'], takeover: ['You’re in control', 'person', 'var(--blue)'],
+    'return-to-assistant': ['Assistant is back', 'sparkles', 'var(--indigo)'], 'transition-to-sms': ['Asking to text', 'message', 'var(--green)'],
+    stop: ['Assistant ended', 'phoneDown', 'var(--red)'],
+  };
+  await runtimeCall(`/runtime/${command}`, { method: 'POST' });
+  const [text, icon, color] = messages[command]; toast(text, icon, color);
+}
+
+/** Runtime commands carry the revision they were based on; on a stale revision we refresh once and retry. */
+async function runtimeCall(path, { method, body = {} }, retried = false) {
+  const id = state.selectedId; if (!id || !state.detail) return;
+  try {
+    const runtime = await api(`/conversations/${encodeURIComponent(id)}${path}`, { method, body: { ...body, expectedRevision: state.detail.runtime.revision } });
+    if (id === state.selectedId && runtime && runtime.conversationId) { state.detail.runtime = runtime; renderDetail(); }
+    loadList(); loadDetail(id);
+    return runtime;
+  } catch (error) {
+    if (error.status === 409 && /stale/i.test(error.message) && !retried) { await loadDetail(id); return runtimeCall(path, { method, body }, true); }
+    errorToast(error); renderDetail(); throw error;
+  }
+}
+
+function transcriptItems(detail) {
+  const items = (detail.messages || []).map((message) => ({ kind: 'message', at: message.occurredAt, message }));
+  const systemLabels = {
+    'call.received': ['phone', 'Incoming call'],
+    'call.ended': ['phoneDown', 'Call ended'],
+    'conversation.channel_transitioned': ['message', 'Moved to text messages'],
+    'sms.consent.granted': ['check', 'Caller agreed to text'],
+  };
+  for (const event of detail.eventLog || []) {
+    if (systemLabels[event.type]) items.push({ kind: 'system', at: event.occurredAt, icon: systemLabels[event.type][0], text: systemLabels[event.type][1] + (event.type === 'call.ended' && detail.durationSeconds ? ` · ${duration(detail.durationSeconds * 1000)}` : '') });
+    if (event.type === 'owner.attention.requested') items.push({ kind: 'attention', at: event.occurredAt, text: event.payload.question });
+    if (event.type === 'voice.started' && event.payload && event.payload.source === 'realtime') items.push({ kind: 'system', at: event.occurredAt, icon: 'sparkles', text: 'Assistant answered' });
+    if (event.type === 'voice.completed' && event.payload && event.payload.outcome === 'failed') items.push({ kind: 'system', at: event.occurredAt, icon: 'exclamation', text: 'Assistant couldn’t connect — caller was asked to text' });
+  }
+  return items.sort((left, right) => new Date(left.at) - new Date(right.at));
+}
+
+function renderTranscript(detail) {
+  const node = $('#transcript');
+  const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+  const items = transcriptItems(detail);
+  let html = ''; let lastAt = 0; let lastRole = null;
+  items.forEach((item, index) => {
+    const at = new Date(item.at).getTime();
+    if (!lastAt || at - lastAt > 15 * 60 * 1000) { html += `<div class="stamp">${stampText(item.at)}</div>`; lastRole = null; }
+    lastAt = at;
+    if (item.kind === 'system') { html += `<div class="sys">${I[item.icon]}${esc(item.text)}</div>`; lastRole = null; return; }
+    if (item.kind === 'attention') { html += `<div class="attention"><span class="tile" style="background:var(--orange)">${I.bell}</span><div><b>Assistant is asking you</b>${esc(item.text)}</div></div>`; lastRole = null; return; }
+    const message = item.message;
+    const next = items[index + 1];
+    const tail = !next || next.kind !== 'message' || next.message.role !== message.role;
+    const outgoing = message.role !== 'caller';
+    if (message.role !== lastRole) {
+      const who = message.role === 'caller' ? (callerName(detail) || 'Caller') : message.role === 'owner' ? 'You' : 'Assistant';
+      html += `<div class="who ${outgoing ? 'right' : ''}">${esc(who)}</div>`;
+    }
+    const via = message.channel === 'voice' ? `<span class="via">${I.mic}</span>` : '';
+    html += `<div class="bubble ${outgoing ? 'out' : 'in'}${message.role === 'owner' ? ' owner' : ''}${tail ? ' tail' : ''}">${esc(message.body)}${via}</div>`;
+    if (message.deliveryFailed) html += '<div class="receipt fail">Not Delivered</div>';
+    lastRole = message.role;
+  });
+  const runtimeState = detail.runtime && detail.runtime.state;
+  if (runtimeState === 'transcribing') html += '<div class="bubble in tail typing" aria-label="Caller is speaking"><i></i><i></i><i></i></div>';
+  if (runtimeState === 'thinking') html += '<div class="bubble out tail typing" aria-label="Assistant is thinking"><i></i><i></i><i></i></div>';
+  if (!items.length && !html) html = `<div class="empty-state" style="padding-top:40px">${I.wave}<h3>Waiting for the Caller</h3><p>The transcript appears here the moment anyone speaks.</p></div>`;
+  if (state.pendingMessage) html += `<div class="bubble out owner tail">${esc(state.pendingMessage)}</div><div class="receipt">Sending…</div>`;
+  node.innerHTML = html;
+  if (nearBottom || state.forceScroll) { node.scrollTop = node.scrollHeight; state.forceScroll = false; }
+}
+
+function renderComposer(detail) {
+  const input = $('#composerInput'); const hint = $('#composerHint');
+  const live = detail.voice && detail.voice.live;
+  const textable = canText(detail);
+  const name = callerName(detail) || 'the caller';
+  let enabled = true;
+  if (live) { input.placeholder = `Speak to ${name}…`; hint.innerHTML = `${I.mic.replace('<svg', '<svg style="display:inline;width:11px;height:11px;vertical-align:-1px"')} The assistant will <b>say your words</b> on the call`; }
+  else if (textable) { input.placeholder = `Tell your assistant what to text ${name}…`; hint.innerHTML = `Your assistant will <b>text ${esc(name)}</b> on your behalf`; }
+  else { enabled = false; input.placeholder = 'Texting isn’t available yet'; hint.innerHTML = `Tap <b>Text</b> to ask ${esc(name)} to continue by message`; }
+  hint.hidden = !hint.innerHTML;
+  input.disabled = !enabled;
+  updateSend();
+}
+const updateSend = () => { $('#sendBtn').disabled = state.sending || !$('#composerInput').value.trim() || $('#composerInput').disabled; };
+$('#composerInput').addEventListener('input', (event) => {
+  const input = event.target; input.style.height = 'auto'; input.style.height = `${Math.min(input.scrollHeight, 120)}px`; updateSend();
+});
+$('#composerInput').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !isPhone()) { event.preventDefault(); $('#composer').requestSubmit(); }
+});
+$('#composer').onsubmit = async (event) => {
+  event.preventDefault();
+  const input = $('#composerInput'); const body = input.value.trim(); if (!body || state.sending) return;
+  const id = state.selectedId; state.sending = true; haptic();
+  state.pendingMessage = body; state.forceScroll = true; input.value = ''; input.style.height = 'auto'; updateSend(); renderTranscript(state.detail);
+  try {
+    const key = `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const detail = await api(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { body, idempotencyKey: key } });
+    state.pendingMessage = null;
+    if (id === state.selectedId) { state.detail = { ...state.detail, ...detail }; state.forceScroll = true; renderDetail(); }
+    loadList();
+  } catch (error) {
+    state.pendingMessage = null; input.value = body; updateSend(); renderTranscript(state.detail); errorToast(error);
+  } finally { state.sending = false; updateSend(); }
+};
+
+/* ---------------- Assistant controls (sheet / inspector) ---------------- */
+function switchHTML(field, checked, disabled) {
+  return `<span class="switch"><input type="checkbox" role="switch" data-field="${field}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="track"></span><span class="knob"></span></span>`;
+}
+function segHTML(field, value, options) {
+  return `<div class="segmented inline" data-seg="${field}">${options.map(([key, label]) => `<button type="button" class="${value === key ? 'on' : ''}" data-value="${key}">${esc(label)}</button>`).join('')}</div>`;
+}
+function tileRow(icon, color, title, control, sub) {
+  return `<div class="row" style="--inset:57px"><span class="tile" style="background:${color}">${I[icon]}</span><span class="row-body"><span class="row-title">${esc(title)}</span>${sub ? `<div class="row-sub" style="font-size:13px">${esc(sub)}</div>` : ''}</span>${control}</div>`;
+}
+
+function controlsHTML() {
+  const runtime = state.detail && state.detail.runtime;
+  if (!runtime) return '<div class="empty-state">Select a conversation.</div>';
+  const voice = state.detail.voice || {};
+  return `
+    <div class="group-header">Live Call</div>
+    <div class="group">
+      ${tileRow('sparkles', 'var(--indigo)', 'Assistant Active', switchHTML('assistantEnabled', runtime.assistantEnabled))}
+      ${tileRow('wave', 'var(--green)', 'Voice Replies', switchHTML('voiceEnabled', runtime.voiceEnabled), 'Speak answers on the call')}
+      ${tileRow('mic', 'var(--orange)', 'Live Transcript', switchHTML('transcriptionEnabled', runtime.transcriptionEnabled))}
+      ${tileRow('message', 'var(--teal)', 'Offer Texting', switchHTML('smsTransitionEnabled', runtime.smsTransitionEnabled))}
+    </div>
+    <div class="group-footer">${voice.realtime ? `Realtime voice via AI Gateway · ${esc(voice.model || '')}` : 'Changes apply to this conversation immediately.'}</div>
+
+    <div class="group-header">Who Responds</div>
+    <div class="group"><div class="row-stack">${segHTML('aiMode', runtime.aiMode, [['automatic', 'Assistant'], ['owner_assist', 'Ask First'], ['owner_only', 'Only Me']])}</div></div>
+
+    <div class="group-header">Style</div>
+    <div class="group">
+      <div class="row-stack"><div class="row-title">Tone</div>${segHTML('responseStyle', runtime.responseStyle, [['concise', 'Concise'], ['friendly', 'Friendly'], ['professional', 'Formal']])}</div>
+      <div class="row-stack" style="position:relative"><div class="row-title">Length</div>${segHTML('verbosity', runtime.verbosity, [['short', 'Short'], ['normal', 'Normal'], ['detailed', 'Detailed']])}</div>
+    </div>
+
+    <div class="group-header">Ask Me</div>
+    <div class="group"><div class="row-stack">${segHTML('askOwnerWhen', runtime.askOwnerWhen, [['never', 'Never'], ['uncertain', 'Unsure'], ['important', 'Important'], ['always', 'Always']])}</div></div>
+    <div class="group-footer">When the assistant should check with you before answering.</div>
+
+    <div class="group-header">Permissions</div>
+    <div class="group">
+      ${tileRow('check', 'var(--green)', 'Make Commitments', switchHTML('allowCommitments', runtime.allowCommitments))}
+      ${tileRow('bolt', 'var(--orange)', 'Schedule Things', switchHTML('allowScheduling', runtime.allowScheduling))}
+      ${tileRow('bell', 'var(--red)', 'Promise Follow-ups', switchHTML('allowCallerFollowups', runtime.allowCallerFollowups))}
+    </div>
+
+    <div class="group-header">Instructions for This Call</div>
+    <div class="group"><div class="row-stack"><textarea data-instructions placeholder="e.g. Jordan is a VIP — offer Thursday afternoon.">${esc(runtime.customInstructions || '')}</textarea></div></div>
+    <div class="group-footer" style="display:flex;justify-content:space-between;align-items:center"><span>Revision ${esc(runtime.revision)}</span><button class="nav-btn" data-save-instructions style="height:32px;font-weight:600">Apply</button></div>
+  `;
+}
+
+function bindControls(root) {
+  root.querySelectorAll('input[data-field]').forEach((input) => input.onchange = async () => {
+    haptic();
+    try { await runtimeCall('/runtime', { method: 'PATCH', body: { [input.dataset.field]: input.checked } }); }
+    catch { input.checked = !input.checked; }
+  });
+  root.querySelectorAll('[data-seg]').forEach((seg) => seg.onclick = async (event) => {
+    const button = event.target.closest('button'); if (!button || button.classList.contains('on')) return;
+    haptic();
+    seg.querySelectorAll('button').forEach((node) => node.classList.toggle('on', node === button));
+    await runtimeCall('/runtime', { method: 'PATCH', body: { [seg.dataset.seg]: button.dataset.value } }).catch(() => {});
+  });
+  const save = root.querySelector('[data-save-instructions]');
+  if (save) save.onclick = async () => {
+    const text = root.querySelector('[data-instructions]').value.trim();
+    await runtimeCall('/runtime', { method: 'PATCH', body: { customInstructions: text } }).then(() => toast('Instructions applied')).catch(() => {});
+  };
+}
+
+let controlsSheet = null;
+function renderInspector() {
+  const inspector = $('#inspectorBody');
+  if (getComputedStyle($('#inspector')).display !== 'none' && !inspector.contains(document.activeElement)) { inspector.innerHTML = controlsHTML(); bindControls(inspector); }
+  if (controlsSheet && !controlsSheet.body.contains(document.activeElement)) { controlsSheet.body.innerHTML = controlsHTML(); bindControls(controlsSheet.body); }
+}
+$('#controlsBtn').onclick = () => {
+  if (!state.detail) return;
+  haptic();
+  const body = document.createElement('div'); body.innerHTML = controlsHTML(); bindControls(body);
+  const sheet = openSheet({ title: 'Assistant', body, onClose: () => { controlsSheet = null; } });
+  controlsSheet = { body, ...sheet };
+};
+
+/* ---------------- Live updates (SSE + polling) ---------------- */
+function closeStream() { if (state.stream) { state.stream.close(); state.stream = null; state.streamId = null; } }
+function openStream(id) {
+  if (state.streamId === id && state.stream) return;
+  closeStream();
+  const url = `/conversations/${encodeURIComponent(id)}/runtime/events${state.token ? `?token=${encodeURIComponent(state.token)}` : ''}`;
+  const source = new EventSource(url);
+  let timer;
+  const refresh = () => { clearTimeout(timer); timer = setTimeout(() => { if (state.selectedId === id) { loadDetail(id); loadList(); } }, 120); };
+  ['runtime.state_changed', 'runtime.transcript_final', 'runtime.ai_started', 'runtime.ai_completed', 'runtime.voice_started', 'runtime.voice_stopped',
+    'runtime.owner_needed', 'runtime.configuration_changed', 'runtime.paused', 'runtime.resumed', 'runtime.stopped', 'runtime.started',
+    'runtime.takeover', 'runtime.returned_to_assistant', 'runtime.sms_transition_requested', 'runtime.interrupted']
+    .forEach((name) => source.addEventListener(name, refresh));
+  source.onopen = () => setConnection(true);
+  state.stream = source; state.streamId = id;
+}
+
+/* ---------------- Devices ---------------- */
+async function loadDevices() {
+  try { state.devices = await api('/owner/devices'); } catch (error) { if (error.status !== 401) errorToast(error); return; }
+  renderDevices();
+}
+function deviceStatus(device) {
+  if (device.status === 'revoked') return ['Access Revoked', 'var(--gray)'];
+  if (device.status !== 'active') return ['Waiting for Pairing', 'var(--orange)'];
+  const health = device.health || {};
+  if (!health.messagesAccess || !health.sendCapability) return ['Needs Messages Access', 'var(--orange)'];
+  if (!health.authorizedChat) return ['Choose a Chat on the Mac', 'var(--orange)'];
+  return [`Connected${device.lastSeenAt ? ` · seen ${relTime(device.lastSeenAt)}` : ''}`, 'var(--green)'];
+}
+function renderDevices() {
+  const body = $('#devicesBody');
+  const devices = state.devices.filter((device) => device.status !== 'revoked');
+  const rows = devices.map((device) => {
+    const [status, color] = deviceStatus(device);
+    return `<button class="row" style="--inset:57px" data-device="${esc(device.id)}"><span class="tile" style="background:${device.status === 'active' ? 'var(--blue)' : 'var(--gray)'}">${I.laptop}</span>
+      <span class="row-body"><span class="row-title">${esc(device.name)}${device.isPrimary ? ' <span style="color:var(--orange);display:inline-block;width:13px;vertical-align:-1px">' + I.star + '</span>' : ''}</span><div class="row-sub" style="color:${color}">${esc(status)}</div></span>${I.chevronRight}</button>`;
+  }).join('');
+  body.innerHTML = `
+    <div class="group-header">Mac Messages</div>
+    <div class="group">${rows}<button class="row action" id="pairBtn" style="--inset:57px"><span class="tile" style="background:var(--green)">${I.plus}</span><span class="row-body">Pair a Mac…</span></button></div>
+    <div class="group-footer">Your Mac relays assistant updates to you in Messages, and your replies come straight back into the call.</div>`;
+  $('#pairBtn').onclick = pairMac;
+  body.querySelectorAll('[data-device]').forEach((node) => node.onclick = () => deviceActions(state.devices.find((device) => device.id === node.dataset.device)));
+}
+async function deviceActions(device) {
+  const actions = [];
+  if (device.status === 'active' && !device.isPrimary) actions.push({ label: 'Make Primary', value: 'primary' });
+  actions.push({ label: 'Revoke Access', value: 'revoke', destructive: true });
+  const choice = await actionSheet({ title: device.name, message: deviceStatus(device)[0], actions });
+  try {
+    if (choice === 'primary') { await api(`/owner/devices/${encodeURIComponent(device.id)}/primary`, { method: 'POST' }); toast(`${device.name} is now primary`, 'star', 'var(--orange)'); }
+    if (choice === 'revoke') { await api(`/owner/devices/${encodeURIComponent(device.id)}/revoke`, { method: 'POST' }); toast('Access revoked', 'lock', 'var(--red)'); }
+  } catch (error) { errorToast(error); }
+  if (choice) loadDevices();
+}
+async function pairMac() {
+  haptic();
+  const body = document.createElement('div');
+  body.innerHTML = '<div class="empty-state" style="padding:60px 0"><p>Creating a secure code…</p></div>';
+  let countdown;
+  const sheet = openSheet({ title: 'Pair a Mac', body, onClose: () => { clearInterval(countdown); loadDevices(); } });
+  try {
+    const pairing = await api('/owner/devices/pair/qr', { method: 'POST', body: { name: 'Mac Messages' } });
+    body.innerHTML = `
+      <div class="qr-card"><img alt="Pairing code for your Mac" src="${esc(pairing.qrDataUrl)}"></div>
+      <div class="expires" id="expires"></div>
+      <ol class="steps"><li>Open the Text Me bridge on your Mac.</li><li>Choose <b>Pair with iPhone</b> and scan this code — or paste the link below.</li><li>Pick the Messages chat you want updates in.</li></ol>
+      <div class="group" style="margin-top:18px"><button class="row action" id="copyLink" style="justify-content:center">Copy Pairing Link</button></div>`;
+    const expiresAt = new Date(pairing.expiresAt).getTime();
+    const tick = () => {
+      const left = expiresAt - Date.now();
+      $('#expires', body).textContent = left > 0 ? `Code expires in ${duration(left)}` : 'Code expired — close and try again';
+    };
+    tick(); countdown = setInterval(tick, 1000);
+    $('#copyLink', body).onclick = async () => {
+      try { await navigator.clipboard.writeText(pairing.pairingUri); toast('Link copied', 'check'); } catch { toast(pairing.pairingUri, 'qr', 'var(--blue)'); }
+    };
+  } catch (error) { sheet.close(); errorToast(error); }
+}
+
+/* ---------------- Settings ---------------- */
+async function loadSettings() {
+  try { state.config = await api('/owner/configuration'); } catch (error) { if (error.status !== 401) errorToast(error); return; }
+  renderSettings();
+}
+function renderSettings() {
+  const config = state.config; if (!config) return;
+  const sw = (section, key) => switchHTML(`${section}.${key}`, config[section][key]);
+  $('#settingsBody').innerHTML = `
+    <div class="group-header">Assistant</div>
+    <div class="group">
+      <label class="row"><span class="row-title" style="flex:none">Name</span><input type="text" data-text="assistant.assistantName" value="${esc(config.assistant.assistantName)}" maxlength="60"></label>
+      <div class="row-stack row-wrap" style="position:relative"><div class="row-title">Greeting</div><textarea data-text="assistant.greeting" maxlength="300">${esc(config.assistant.greeting)}</textarea></div>
+      <div class="row-stack row-wrap" style="position:relative"><div class="row-title">How to Introduce You</div><textarea data-text="assistant.ownerIntroduction" maxlength="300">${esc(config.assistant.ownerIntroduction)}</textarea></div>
+    </div>
+    <div class="group-header">Default Tone</div>
+    <div class="group"><div class="row-stack">${segHTML('assistant.tone', config.assistant.tone, [['friendly', 'Friendly'], ['warm', 'Warm'], ['professional', 'Professional']])}</div>
+      <div class="row-stack row-wrap" style="position:relative">${segHTML('assistant.responseStyle', config.assistant.responseStyle, [['concise', 'Concise'], ['detailed', 'Detailed']])}</div></div>
+    <div class="group-header">Calls</div>
+    <div class="group">
+      ${tileRow('phone', 'var(--green)', 'Answer Calls', sw('calls', 'answerCalls'))}
+      ${tileRow('person', 'var(--blue)', 'Ask for Caller’s Name', sw('calls', 'collectCallerName'))}
+      ${tileRow('bubbles', 'var(--indigo)', 'Ask Why They’re Calling', sw('calls', 'collectReason'))}
+      ${tileRow('message', 'var(--teal)', 'Offer to Continue by Text', sw('calls', 'offerSmsTransition'))}
+      ${tileRow('lock', 'var(--gray)', 'Require Texting Consent', sw('calls', 'requireSmsConsent'))}
+      ${tileRow('mic', 'var(--orange)', 'Voicemail Fallback', sw('calls', 'voicemailFallback'))}
+    </div>
+    <div class="group-header">Notifications</div>
+    <div class="group">
+      ${tileRow('laptop', 'var(--blue)', 'Mac Messages', sw('messages', 'macosMessagesEnabled'))}
+      ${tileRow('bell', 'var(--red)', 'Notify Me', sw('messages', 'notifyOwner'))}
+      ${tileRow('bolt', 'var(--orange)', 'Only When Needed', sw('messages', 'interruptOnlyWhenNeeded'))}
+      ${tileRow('bubbles', 'var(--indigo)', 'Include Summary', sw('messages', 'includeSummary'))}
+      ${tileRow('sparkles', 'var(--teal)', 'Suggest a Reply', sw('messages', 'includeSuggestedResponse'))}
+    </div>
+    <div class="group-footer">Settings apply to new calls. Use the controls on a live call to change it right away.</div>
+    ${state.token ? '<div class="group" style="margin-top:32px"><button class="row destructive" id="signOut">Sign Out</button></div>' : ''}
+    <div class="group-footer" style="text-align:center;margin:18px 0 8px">Configuration revision ${esc(config.revision)}</div>`;
+  const body = $('#settingsBody');
+  const patch = async (path, value) => {
+    const [section, key] = path.split('.');
+    try { state.config = await api('/owner/configuration', { method: 'PATCH', body: { [section]: { [key]: value } } }); toast('Saved'); }
+    catch (error) { errorToast(error); }
+    renderSettings();
+  };
+  body.querySelectorAll('input[data-field]').forEach((input) => input.onchange = () => { haptic(); patch(input.dataset.field, input.checked); });
+  body.querySelectorAll('[data-seg]').forEach((seg) => seg.onclick = (event) => {
+    const button = event.target.closest('button'); if (!button || button.classList.contains('on')) return;
+    haptic(); patch(seg.dataset.seg, button.dataset.value);
+  });
+  body.querySelectorAll('[data-text]').forEach((field) => field.onchange = () => {
+    const value = field.value.trim(); if (value) patch(field.dataset.text, value);
+  });
+  const signOut = $('#signOut'); if (signOut) signOut.onclick = async () => {
+    const confirmed = await actionSheet({ message: 'You’ll need your access token to sign back in.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
+    if (!confirmed) return;
+    store.set('ownerToken', null); state.token = ''; closeStream(); showSignIn();
+  };
+}
+
+/* ---------------- Boot ---------------- */
+let booted = false;
+async function boot() {
+  $('#signin').hidden = true; $('#app').hidden = false;
+  go(state.tab);
+  await loadList();
+  if (!booted) {
+    booted = true;
+    setInterval(loadList, 5000);
+    setInterval(() => { if (state.selectedId) loadDetail(); }, 8000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadList(); loadDetail(); } });
+    phoneMq.addEventListener('change', () => { if (!isPhone() && state.selectedId) $('#liveTab').classList.add('pushed'); renderList(); renderInspector(); updateTabbar(); });
+    addEventListener('resize', () => renderInspector());
+    const requested = new URL(location.href).searchParams.get('c');
+    if (requested) openConversation(requested);
+    else if (!isPhone() && state.conversations[0]) openConversation(state.conversations[0].id);
+  }
+}
+boot();
+</script>
+</body>
+</html>

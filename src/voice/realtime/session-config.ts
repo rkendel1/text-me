@@ -10,6 +10,14 @@ import type { RealtimeSessionConfig } from './connector.js';
  * realtime tool loop is client-driven), so these carry schemas only.
  */
 export const callTools = {
+  note_caller: tool({
+    description: "Record the caller's name and the reason for the call as soon as you learn them, " +
+      'so the owner can see who is on the line.',
+    inputSchema: z.object({
+      name: z.string().optional().describe("The caller's name as they gave it."),
+      reason: z.string().optional().describe('Why they are calling, in a few words.'),
+    }),
+  }),
   ask_owner: tool({
     description: 'Flag the owner because the caller needs a decision or information only the owner can give. ' +
       'The owner is notified immediately in their control app.',
@@ -61,7 +69,7 @@ export function buildInstructions(runtime: ConversationRuntime, configuration: O
     assistant.ownerIntroduction,
     `Open the call with: "${assistant.greeting}"`,
     'This is a live phone call: speak naturally, never use lists, markdown or emoji, and let the caller finish.',
-    'Find out who is calling and why, then help or take a clear message.',
+    'Find out who is calling and why (record it with note_caller), then help or take a clear message.',
     styleGuidance[runtime.responseStyle],
     verbosityGuidance[runtime.verbosity],
     askOwnerGuidance[runtime.askOwnerWhen],

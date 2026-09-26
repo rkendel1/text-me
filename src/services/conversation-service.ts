@@ -96,12 +96,7 @@ export class ConversationService {
     await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
       `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
     const ownerMessage = `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`;
-    if (this.ownerChannel) {
-      await this.sendOwnerMessage(conversationId, ownerKey, ownerMessage);
-    } else {
-      if (!this.ownerPhone) throw new HttpError(409, 'Owner phone number is not configured');
-      await this.sendOnce(conversationId, ownerKey, this.ownerPhone, ownerMessage);
-    }
+    await this.notifyOwner(conversationId, ownerKey, ownerMessage);
 
     await this.repository.appendEvent(conversationId, 'conversation.channel_transitioned', {
       from: 'voice',
@@ -139,6 +134,32 @@ export class ConversationService {
       text: input.body, channel: 'sms',
     }, new Date());
     return this.requireConversation(conversation.id);
+  }
+
+  /**
+   * Tell the owner the caller moved to text: Mac Messages first, then SMS. The
+   * caller has already been texted by now, so a missing owner channel must not
+   * block the transition; the failure is recorded and the conversation still
+   * appears in the owner's control app.
+   */
+  private async notifyOwner(conversationId: string, key: string, body: string): Promise<void> {
+    if (this.ownerChannel) {
+      try {
+        await this.sendOwnerMessage(conversationId, key, body);
+        return;
+      } catch {
+        // Recorded as owner.delivery.failed; fall back to SMS below.
+      }
+    }
+    if (!this.ownerPhone) {
+      if (!this.ownerChannel) throw new HttpError(409, 'Owner phone number is not configured');
+      return;
+    }
+    try {
+      await this.sendOnce(conversationId, key, this.ownerPhone, body);
+    } catch (error) {
+      if (!this.ownerChannel) throw error;
+    }
   }
 
   private voiceSummary(conversation: Conversation): string {

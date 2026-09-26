@@ -813,3 +813,31 @@ test('SMS transition runtime request preserves caller consent and can stream SSE
   assert.equal(converted.body.runtime.state, 'text_active');
   assert.equal(messaging.sentMessages.length, 2);
 });
+
+test('moving to text still works when no Mac is paired, notifying the owner by SMS instead', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const ownerDevices = new OwnerDeviceService();
+  const ownerConfiguration = new OwnerConfigurationService();
+  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerPhone: '+15550009999',
+    messagingProvider: messaging,
+    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
+    ownerDeviceService: ownerDevices,
+    ownerConfigurationService: ownerConfiguration,
+    ownerDeliveryStore: ownerDeliveries,
+  });
+  await request(app).post('/webhooks/fake/voice').send({ callId: 'no-mac', callerPhone: '+15553334444' });
+  const [conversation] = await repository.list();
+  await request(app).post(`/conversations/${conversation.id}/sms-consent`).send({ phoneNumber: '+15553334444', displayName: 'Jordan' });
+
+  const converted = await request(app).post(`/conversations/${conversation.id}/convert-to-text`);
+
+  assert.equal(converted.status, 200, JSON.stringify(converted.body));
+  assert.equal(converted.body.state, 'text_active');
+  assert.deepEqual(messaging.sentMessages.map((message) => message.to), ['+15553334444', '+15550009999']);
+  assert.ok(converted.body.events.includes('owner.delivery.failed'));
+});

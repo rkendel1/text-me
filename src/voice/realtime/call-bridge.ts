@@ -312,8 +312,20 @@ export class RealtimeCallBridge {
     let output: Record<string, unknown>;
     let followUp = true;
     try {
-      if (name === 'ask_owner') {
+      if (name === 'note_caller') {
+        const details = {
+          ...(typeof input.name === 'string' && input.name.trim() ? { name: input.name.trim() } : {}),
+          ...(typeof input.reason === 'string' && input.reason.trim() ? { reason: input.reason.trim() } : {}),
+        };
+        await this.services.repository.appendEvent(this.conversationId, 'caller.identified', {
+          ...details, source: 'realtime',
+        }, new Date());
+        output = { status: 'noted' };
+      } else if (name === 'ask_owner') {
         const question = typeof input.question === 'string' ? input.question : 'The caller needs the owner.';
+        await this.services.repository.appendEvent(this.conversationId, 'owner.attention.requested', {
+          question, callId, source: 'realtime',
+        }, new Date());
         await this.services.runtime.noteOwnerNeeded(this.conversationId, callId, question);
         output = { status: 'owner_notified', say: 'Let the caller know the owner has been notified and will respond shortly.' };
       } else if (name === 'continue_over_text') {

@@ -531,7 +531,9 @@ export class RuntimeControlService {
   ): Promise<void> {
     const conversation = await this.requireConversation(conversationId);
     const runtime = await this.ensureRuntime(conversation);
-    const next = this.bump(runtime, patch, false);
+    // Once a conversation has moved to text, trailing call activity (the goodbye) must not pull it back to voice.
+    const movedToText = conversation.events.some((event) => event.type === 'conversation.channel_transitioned');
+    const next = this.bump(runtime, movedToText ? { ...patch, state: 'text_active' } : patch, false);
     await this.store.save(next);
     await this.syncConversationState(conversation, next.state);
     await this.persistEvent(conversationId, eventType, {

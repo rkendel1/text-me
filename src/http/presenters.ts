@@ -1,5 +1,25 @@
 import type { Conversation } from '../domain/conversation.js';
 
+/** Best known caller name: explicit participant, then what they told the assistant, then SMS consent. */
+export function callerName(conversation: Conversation): string | undefined {
+  const participant = conversation.participants?.find((candidate) => candidate.role === 'caller')?.displayName;
+  if (participant) return participant;
+  const named = [...conversation.events].reverse().find((event) =>
+    (event.type === 'caller.identified' && typeof event.payload.name === 'string') ||
+    (event.type === 'sms.consent.granted' && typeof event.payload.displayName === 'string'));
+  return named ? String(named.payload.name ?? named.payload.displayName) : undefined;
+}
+
+/** The owner is needed when the assistant asked for them and they haven't replied since. */
+export function needsOwner(conversation: Conversation): boolean {
+  const lastTime = (type: string) => [...conversation.events].reverse()
+    .find((event) => event.type === type)?.occurredAt.getTime();
+  const lastOwnerMessage = lastTime('owner.message');
+  const lastAttention = lastTime('owner.attention.requested');
+  if (lastAttention !== undefined && (lastOwnerMessage === undefined || lastOwnerMessage < lastAttention)) return true;
+  return conversation.events.some((event) => event.type === 'assistant.message') && lastOwnerMessage === undefined;
+}
+
 export function presentConversation(conversation: Conversation): Record<string, unknown> {
   const lastRead = conversation.lastOwnerReadAt?.getTime() ??
     [...conversation.events].reverse().find((event) => event.type === 'owner.read')?.occurredAt.getTime() ?? 0;
@@ -39,9 +59,9 @@ export function presentConversation(conversation: Conversation): Record<string, 
       { role: 'owner' },
     ],
     ownerId: conversation.ownerId,
+    callerName: callerName(conversation) ?? null,
     summary: summary ? String(summary) : undefined,
-    needsOwner: conversation.events.some((event) => event.type === 'assistant.message') &&
-      !conversation.events.some((event) => event.type === 'owner.message'),
+    needsOwner: needsOwner(conversation),
     unread: conversation.events.some((event) => event.occurredAt.getTime() > lastRead &&
       event.type !== 'owner.read'),
     lastOwnerReadAt: conversation.lastOwnerReadAt?.toISOString() ?? null,
@@ -74,9 +94,9 @@ export function presentConversationSummary(
     endedAt: conversation.endedAt?.toISOString() ?? null,
     durationSeconds: conversation.durationSeconds,
     participant: {
-      name: conversation.participants?.find((participant) => participant.role === 'caller')?.displayName ??
-        [...conversation.events].reverse().find((event) => event.type === 'sms.consent.granted' &&
-          typeof event.payload.displayName === 'string')?.payload.displayName,
+      name: callerName(conversation),
+      reason: [...conversation.events].reverse().find((event) => event.type === 'caller.identified' &&
+        typeof event.payload.reason === 'string')?.payload.reason,
       phoneNumber: conversation.callerPhone,
     },
     preview: [...conversation.events].reverse()
@@ -84,8 +104,7 @@ export function presentConversationSummary(
       ?.payload.text ??
       [...conversation.events].find((event) => event.type === 'conversation.summary.created')?.payload.summary ??
       '',
-    needsOwner: conversation.events.some((event) => event.type === 'assistant.message') &&
-      !conversation.events.some((event) => event.type === 'owner.message'),
+    needsOwner: needsOwner(conversation),
     unread: conversation.events.some((event) => event.occurredAt.getTime() >
       (conversation.lastOwnerReadAt?.getTime() ?? 0) && event.type !== 'owner.read'),
     updatedAt: [...conversation.events].reduce(
