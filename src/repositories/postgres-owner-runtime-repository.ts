@@ -654,7 +654,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
       `
         UPDATE owner_message_deliveries
            SET status = 'sent', provider_request_id = $3, updated_at = NOW()
-         WHERE id = $1 AND device_id = $2
+         WHERE id = $1 AND device_id = $2 AND status = 'pending'
          RETURNING *
       `,
       [deliveryId, deviceId, providerRequestId],
@@ -667,7 +667,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
       `
         UPDATE owner_message_deliveries
            SET status = 'observed', observed_external_id = $3, observed_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND device_id = $2
+         WHERE id = $1 AND device_id = $2 AND status = 'sent'
          RETURNING *
       `,
       [deliveryId, deviceId, observedExternalId],

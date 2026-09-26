@@ -80,6 +80,7 @@ test('macOS bridge filters chats and deduplicates observed owner replies', async
     body: 'Friday at 2 works.',
     direction: 'incoming',
     externalId: 'message-1',
+    replyToExternalId: sendResult.providerRequestId,
     cursor: '3',
   });
   await adapter.observe({

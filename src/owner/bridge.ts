@@ -81,7 +81,7 @@ export class MacOSMessagesBridge {
   private cursor?: string;
   private readonly consumed = new Set<string>();
   private readonly pendingDeliveries = new Map<string, string>();
-  private readonly replyTargets: Array<{ deliveryId: string; externalId: string }> = [];
+  private readonly replyTargets = new Map<string, string>();
 
   constructor(
     private readonly adapter: MacMessagesAdapter,
@@ -117,7 +117,7 @@ export class MacOSMessagesBridge {
           externalId: message.externalId,
         });
         this.pendingDeliveries.delete(message.externalId);
-        this.replyTargets.push({ deliveryId, externalId: message.externalId });
+        this.replyTargets.set(message.externalId, deliveryId);
       }
       return;
     }
@@ -130,7 +130,9 @@ export class MacOSMessagesBridge {
         message.cursor <= this.cursor)
     ) return;
 
-    const replyTarget = this.replyTargets.shift();
+    const replyToExternalId = message.replyToExternalId;
+    const deliveryId = replyToExternalId ? this.replyTargets.get(replyToExternalId) : undefined;
+    if (replyToExternalId && deliveryId) this.replyTargets.delete(replyToExternalId);
     await this.backend.submitOwnerMessage({
       ownerId: this.options.ownerId,
       deviceId: this.options.deviceId,
@@ -138,8 +140,8 @@ export class MacOSMessagesBridge {
       externalId: message.externalId,
       body: message.body,
       occurredAt: message.observedAt,
-      deliveryId: replyTarget?.deliveryId,
-      replyToExternalId: replyTarget?.externalId,
+      deliveryId,
+      replyToExternalId,
     });
     this.consumed.add(message.externalId);
     await this.options.checkpoint.saveConsumed?.(message.externalId);

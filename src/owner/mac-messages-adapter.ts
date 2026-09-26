@@ -8,6 +8,7 @@ export interface ObservedMessagesMessage {
   direction: ObservedMessagesDirection;
   observedAt: Date;
   cursor?: string;
+  replyToExternalId?: string;
 }
 
 export type MessagesService = 'imessage' | 'sms';

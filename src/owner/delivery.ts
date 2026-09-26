@@ -74,7 +74,7 @@ export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
 
   async markSent(deviceId: string, deliveryId: string, providerRequestId: string): Promise<OwnerMessageDeliveryRecord | null> {
     const delivery = this.deliveries.get(deliveryId);
-    if (!delivery || delivery.deviceId !== deviceId) return null;
+    if (!delivery || delivery.deviceId !== deviceId || delivery.status !== 'pending') return null;
     delivery.status = 'sent';
     delivery.providerRequestId = providerRequestId;
     delivery.updatedAt = new Date();
@@ -83,7 +83,7 @@ export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
 
   async markObserved(deviceId: string, deliveryId: string, observedExternalId: string): Promise<OwnerMessageDeliveryRecord | null> {
     const delivery = this.deliveries.get(deliveryId);
-    if (!delivery || delivery.deviceId !== deviceId) return null;
+    if (!delivery || delivery.deviceId !== deviceId || delivery.status !== 'sent') return null;
     delivery.status = 'observed';
     delivery.observedExternalId = observedExternalId;
     delivery.observedAt = new Date();
@@ -93,7 +93,7 @@ export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
 
   async markFailed(deviceId: string, deliveryId: string, error: string): Promise<OwnerMessageDeliveryRecord | null> {
     const delivery = this.deliveries.get(deliveryId);
-    if (!delivery || delivery.deviceId !== deviceId) return null;
+    if (!delivery || delivery.deviceId !== deviceId || (delivery.status !== 'pending' && delivery.status !== 'sent')) return null;
     delivery.status = 'failed';
     delivery.error = error;
     delivery.failedAt = new Date();
