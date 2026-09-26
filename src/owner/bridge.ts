@@ -57,6 +57,7 @@ export interface OwnerBridgeBackend {
     externalId: string;
     body: string;
     occurredAt: Date;
+    deliveryId?: string;
   }): Promise<void>;
   confirmOwnerDelivery?(input: {
     ownerId: string;
@@ -79,6 +80,7 @@ export class MacOSMessagesBridge {
   private cursor?: string;
   private readonly consumed = new Set<string>();
   private readonly pendingDeliveries = new Map<string, string>();
+  private readonly readyReplies: string[] = [];
 
   constructor(
     private readonly adapter: MacMessagesAdapter,
@@ -114,6 +116,7 @@ export class MacOSMessagesBridge {
           externalId: message.externalId,
         });
         this.pendingDeliveries.delete(message.externalId);
+        this.readyReplies.push(deliveryId);
       }
       return;
     }
@@ -133,6 +136,7 @@ export class MacOSMessagesBridge {
       externalId: message.externalId,
       body: message.body,
       occurredAt: message.observedAt,
+      deliveryId: this.readyReplies.shift(),
     });
     this.consumed.add(message.externalId);
     await this.options.checkpoint.saveConsumed?.(message.externalId);

@@ -78,11 +78,11 @@ class BackendOwnerBridgeClient {
     if (!response.ok) throw new Error(`Delivery failure update failed: ${response.status}`);
   }
 
-  async submitReply(deviceId: string, externalId: string, body: string): Promise<void> {
+  async submitReply(deviceId: string, externalId: string, body: string, deliveryId?: string): Promise<void> {
     const response = await fetch(this.url(`/owner/devices/${deviceId}/messages/replies`), {
       method: 'POST',
       headers: { ...this.headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ externalId, body }),
+      body: JSON.stringify({ externalId, body, deliveryId }),
     });
     if (!response.ok) throw new Error(`Owner reply submit failed: ${response.status}`);
   }
@@ -127,11 +127,11 @@ async function main(): Promise<void> {
   const pollMs = Number(process.env.MAC_BRIDGE_POLL_MS ?? '5000');
   if (!backendUrl) throw new Error('BACKEND_URL is required');
   if (!photonModule) throw new Error('PHOTON_CLIENT_MODULE is required');
-  if (!pairingCredential) throw new Error('PAIRING_CREDENTIAL is required on first boot');
 
   const state = await loadState(statePath);
   const backend = new BackendOwnerBridgeClient(backendUrl, () => state);
   if (!state.deviceId || !state.sessionToken) {
+    if (!pairingCredential) throw new Error('PAIRING_CREDENTIAL is required on first boot');
     Object.assign(state, await backend.activate(pairingCredential));
     await saveState(statePath, state);
   }
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
       currentChatId = device.assistantChat.chatId;
       bridge = new MacOSMessagesBridge(adapter, {
         async submitOwnerMessage(input) {
-          await backend.submitReply(state.deviceId!, input.externalId, input.body);
+          await backend.submitReply(state.deviceId!, input.externalId, input.body, input.deliveryId);
         },
         async confirmOwnerDelivery(input) {
           await backend.markObserved(state.deviceId!, input.deliveryId, input.externalId);

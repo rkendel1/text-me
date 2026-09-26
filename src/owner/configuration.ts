@@ -52,7 +52,7 @@ export type OwnerConfigurationPatch = {
 export interface OwnerConfigurationStore {
   get(ownerId: string): Promise<OwnerConfiguration | null>;
   create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void>;
-  update(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void>;
+  update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void>;
   events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]>;
 }
 
@@ -71,7 +71,7 @@ export class InMemoryOwnerConfigurationStore implements OwnerConfigurationStore 
     }
   }
 
-  async update(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
+  async update(configuration: OwnerConfiguration, _previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
     this.configurations.set(configuration.ownerId, structuredClone(configuration));
     this.record(event);
   }
@@ -143,7 +143,7 @@ export class OwnerConfigurationService {
       calls: { ...current.calls, ...patch.calls },
       messages: { ...current.messages, ...patch.messages },
     };
-    await this.store.update(next, {
+    await this.store.update(next, current.revision, {
       type: patch.messages?.macosMessagesEnabled === true ? 'owner.channel.enabled'
         : patch.messages?.macosMessagesEnabled === false ? 'owner.channel.disabled'
         : patch.assistant ? 'assistant.settings.updated'

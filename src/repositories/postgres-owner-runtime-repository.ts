@@ -513,19 +513,18 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
     }
   }
 
-  async update(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
+  async update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
     await this.pool.query('BEGIN');
     try {
-      await this.pool.query(
+      const current = await this.pool.query(
         `
-          INSERT INTO owner_configurations (owner_id, revision, assistant, calls, messages, updated_at)
-          VALUES ($1, $2, $3, $4, $5, NOW())
-          ON CONFLICT (owner_id) DO UPDATE SET
-            revision = EXCLUDED.revision,
-            assistant = EXCLUDED.assistant,
-            calls = EXCLUDED.calls,
-            messages = EXCLUDED.messages,
-            updated_at = EXCLUDED.updated_at
+          UPDATE owner_configurations
+             SET revision = $2,
+                 assistant = $3,
+                 calls = $4,
+                 messages = $5,
+                 updated_at = NOW()
+           WHERE owner_id = $1 AND revision = $6
         `,
         [
           configuration.ownerId,
@@ -533,8 +532,12 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
           JSON.stringify(configuration.messages),
+          previousRevision,
         ],
       );
+      if (current.rowCount !== 1) {
+        throw new Error('Owner configuration update conflict');
+      }
       await this.pool.query(
         `
           INSERT INTO owner_configuration_revisions (owner_id, revision, assistant, calls, messages)
@@ -686,13 +689,15 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
     return result.rows[0] ? hydrateDelivery(result.rows[0]) : null;
   }
 
-  async claimReplyTarget(deviceId: string, externalId: string): Promise<OwnerMessageDeliveryRecord | null> {
+  async claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string): Promise<OwnerMessageDeliveryRecord | null> {
     const result = await this.pool.query<OwnerMessageDeliveryRow>(
       `
         WITH target AS (
           SELECT id
             FROM owner_message_deliveries
-           WHERE device_id = $1 AND status IN ('sent', 'observed')
+           WHERE device_id = $1
+             AND status IN ('sent', 'observed')
+             AND ($3::text IS NULL OR id = $3)
            ORDER BY created_at ASC
            LIMIT 1
            FOR UPDATE SKIP LOCKED
@@ -703,7 +708,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
          WHERE deliveries.id = target.id
          RETURNING deliveries.*
       `,
-      [deviceId, externalId],
+      [deviceId, externalId, deliveryId ?? null],
     );
     return result.rows[0] ? hydrateDelivery(result.rows[0]) : null;
   }
