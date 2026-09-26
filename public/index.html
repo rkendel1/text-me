@@ -13,7 +13,7 @@
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon-180.png">
 <style>
 :root {
   color-scheme: light dark;
@@ -288,6 +288,10 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .chip { font-size: 12px; font-weight: 600; padding: 5px 9px; border-radius: 999px; background: var(--fill-3); color: var(--label-2); white-space: nowrap; }
 .chip b { color: var(--label); font-weight: 600; }
 .chip.off b { color: var(--red); }
+.chip.temp { background: color-mix(in srgb, var(--indigo) 14%, transparent); color: var(--indigo); }
+.temp-banner { display: flex; align-items: center; gap: 10px; margin: 16px 16px 0; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--indigo) 12%, transparent); }
+.temp-banner span { flex: 1; font-size: 15px; color: var(--indigo); font-weight: 600; }
+.temp-banner button { color: var(--blue); font-weight: 600; font-size: 15px; }
 .strip .adjust { color: var(--blue); font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 4px; padding: 6px 4px; }
 .strip .adjust svg { width: 18px; height: 18px; }
 .transcript { flex: 1; overflow-y: auto; padding: 8px 12px 16px; display: flex; flex-direction: column; gap: 2px; overscroll-behavior: contain; }
@@ -856,6 +860,7 @@ function pushDetail() { $('#liveTab').classList.add('pushed'); updateTabbar(); }
 function popDetail() {
   $('#liveTab').classList.remove('pushed'); updateTabbar();
   if (isPhone()) { state.selectedId = null; closeStream(); setTimeout(renderList, 50); }
+  if (location.pathname !== '/') history.replaceState(null, '', '/');
 }
 $('#backBtn').onclick = popDetail;
 
@@ -1025,13 +1030,16 @@ function notifyNeeded(conversation) {
   banner.onclick = () => { banner.classList.remove('show'); openConversation(conversation.id); };
   banner.classList.add('show');
   clearTimeout(bannerTimer); bannerTimer = setTimeout(() => banner.classList.remove('show'), 6000);
-  try { if (document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification(`${displayName(conversation)} needs you`, { body: question, icon: '/icon.svg' }); } catch {}
 }
 
 /* ---------------- Conversation detail ---------------- */
-async function openConversation(id) {
+async function openConversation(id, options = {}) {
   const changed = state.selectedId !== id;
   state.selectedId = id;
+  // The live screen has its own URL, so a reload or a notification lands right back here.
+  const livePath = `/conversations/${encodeURIComponent(id)}/live`;
+  if (location.pathname !== livePath) history.replaceState(null, '', livePath);
+  if (options.instant) { $('#liveTab').classList.add('dragging'); setTimeout(() => $('#liveTab').classList.remove('dragging'), 50); }
   if (changed) { state.detail = null; $('#transcript').innerHTML = ''; $('#composerInput').value = ''; }
   $('#detailEmpty').hidden = true; $('#detailBody').hidden = false;
   if (isPhone()) pushDetail();
@@ -1133,7 +1141,8 @@ function renderStrip(detail) {
   $('#strip').innerHTML = `<div class="chips">
       <span class="chip${runtime.voiceEnabled ? '' : ' off'}">Voice <b>${onOff(runtime.voiceEnabled)}</b></span>
       <span class="chip${runtime.transcriptionEnabled ? '' : ' off'}">Transcribe <b>${onOff(runtime.transcriptionEnabled)}</b></span>
-      <span class="chip">AI <b>${esc(MODE_LABEL[currentHandling(runtime)])}</b></span></div>
+      <span class="chip">AI <b>${esc(MODE_LABEL[currentHandling(runtime)])}</b></span>
+      ${runtime.temporarySettings ? '<span class="chip temp">Temporary settings</span>' : ''}</div>
     <button class="adjust" id="adjustInline" aria-label="Adjust this conversation">${I.sliders}Adjust</button>`;
   $('#adjustInline').onclick = openAdjust;
   $('#strip .chips').onclick = openAdjust;
@@ -1151,7 +1160,7 @@ function renderQuick(detail) {
       : { id: 'pause', label: 'Pause', icon: 'pause' },
     ownerMode ? { id: 'return-to-assistant', label: 'Hand Back', icon: 'sparkles', cls: 'on' } : { id: 'takeover', label: 'Take Over', icon: 'person', disabled: stopped },
     { id: 'transition-to-sms', label: runtime.state === 'transferring' ? 'Waiting…' : 'Text', icon: 'message', disabled: !textAvailable || stopped },
-    { id: 'stop', label: 'End', icon: 'phoneDown', cls: 'red', disabled: stopped },
+    { id: 'stop', label: 'Stop', icon: 'phoneDown', cls: 'red', disabled: stopped },
   ];
   $('#quick').innerHTML = buttons.map((button) => `<button class="qa ${button.cls || ''}" data-cmd="${button.id}" ${button.disabled ? 'disabled' : ''} aria-label="${esc(button.label)}"><span class="circle">${I[button.icon]}</span>${esc(button.label)}</button>`).join('');
   $('#quick').querySelectorAll('[data-cmd]').forEach((node) => node.onclick = () => { haptic(); onQuick(node.dataset.cmd); });
@@ -1305,6 +1314,7 @@ function adjustHTML() {
   if (!runtime) return '<div class="empty-state">Select a conversation.</div>';
   const name = firstName(detail);
   return `
+    ${runtime.temporarySettings ? `<div class="temp-banner"><span>Temporary settings for ${esc(name)}</span><button type="button" data-reset>Reset to defaults</button></div>` : ''}
     <div class="group-header">How should I handle this?</div>
     <div class="group">${choiceRows('handling', currentHandling(runtime), HANDLING)}</div>
 
@@ -1350,6 +1360,14 @@ function bindAdjust(root) {
       toast(`${label} ${input.checked ? 'on' : 'off'}`, input.checked ? 'check' : 'xmark', input.checked ? 'var(--green)' : 'var(--gray)');
     } catch { input.checked = !input.checked; }
   });
+  const reset = root.querySelector('[data-reset]');
+  if (reset) reset.onclick = async () => {
+    haptic();
+    try {
+      await runtimeCall('/runtime/overrides', { method: 'DELETE' });
+      toast('Back to your defaults', 'check');
+    } catch { /* explained by runtimeCall */ }
+  };
   const save = root.querySelector('[data-save-instructions]');
   if (save) save.onclick = async () => {
     const text = root.querySelector('[data-instructions]').value.trim();
@@ -1358,10 +1376,12 @@ function bindAdjust(root) {
 }
 
 let controlsSheet = null;
+/** Re-render live, but never while the owner is typing in it. */
+const typingIn = (root) => root.contains(document.activeElement) && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox';
 function renderInspector() {
   const inspector = $('#inspectorBody');
-  if (getComputedStyle($('#inspector')).display !== 'none' && !inspector.contains(document.activeElement)) { inspector.innerHTML = adjustHTML(); bindAdjust(inspector); }
-  if (controlsSheet && !controlsSheet.body.contains(document.activeElement)) { controlsSheet.body.innerHTML = adjustHTML(); bindAdjust(controlsSheet.body); }
+  if (getComputedStyle($('#inspector')).display !== 'none' && !typingIn(inspector)) { inspector.innerHTML = adjustHTML(); bindAdjust(inspector); }
+  if (controlsSheet && !typingIn(controlsSheet.body)) { controlsSheet.body.innerHTML = adjustHTML(); bindAdjust(controlsSheet.body); }
 }
 function openAdjust() {
   if (!state.detail) return;
@@ -1445,25 +1465,6 @@ async function pairMac() {
 async function copyText(text, done) {
   try { await navigator.clipboard.writeText(text); toast(done, 'check'); } catch { toast(text, 'info', 'var(--blue)'); }
 }
-const webhookUrls = () => [
-  ['A call comes in', `${location.origin}/webhooks/twilio/voice`],
-  ['A message comes in', `${location.origin}/webhooks/twilio/sms`],
-  ['Call status changes', `${location.origin}/webhooks/twilio/status`],
-];
-function webhooksHTML() {
-  return webhookUrls().map(([label, url], index) => `<div class="hook"><div class="k">${esc(label)}</div><div class="v"><code>${esc(url)}</code><button type="button" data-copy="${index}">Copy</button></div></div>`).join('');
-}
-function bindWebhooks(root) {
-  root.querySelectorAll('[data-copy]').forEach((button) => button.onclick = () => copyText(webhookUrls()[Number(button.dataset.copy)][1], 'Copied'));
-}
-function openConnectNumber() {
-  const body = document.createElement('div');
-  body.style.padding = '0 16px';
-  body.innerHTML = `<p style="color:var(--label-2);font-size:15px;margin:4px 4px 16px">In your Twilio console, open your phone number and paste these under <b>Voice</b> and <b>Messaging</b> (HTTP POST).</p>${webhooksHTML()}`;
-  bindWebhooks(body);
-  openSheet({ title: 'Connect Your Number', body });
-}
-
 /* ---------------- Settings (defaults for every call) ---------------- */
 const BEHAVIORS = [
   { id: 'automatic', title: 'Handle everything', sub: 'Asks you only when it has to.' },
@@ -1503,19 +1504,28 @@ function renderSettings() {
     </div>
     <div class="group-footer">Keep it short — callers get straight to the point.</div>
 
+    <div class="group-header">Notifications</div>
+    <div class="group">
+      <div class="row" style="--inset:57px"><span class="tile" style="background:var(--red)">${I.bell}</span><span class="row-body"><span class="row-title">This ${isIOS() ? 'iPhone' : 'device'}</span><div class="row-sub" id="pushStatus">Checking…</div></span><button class="btn tinted" id="pushToggle" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Turn On</button></div>
+      ${tileRow('bolt', 'var(--orange)', 'Also tell me about calls I don’t need to handle', sw('messages.notifyOnActivity', config.messages.notifyOnActivity))}
+      <button class="row action" id="pushTest" style="--inset:57px" hidden><span class="tile" style="background:var(--gray)">${I.check}</span><span class="row-body">Send a Test Notification</span></button>
+    </div>
+    <div class="group-footer">By default you’re only interrupted when your assistant needs you.</div>
+
     <div class="group-header">Phone</div>
     <div class="group">
       ${tileRow('phone', 'var(--green)', 'Answer my calls', sw('calls.answerCalls', config.calls.answerCalls))}
-      <button class="row" style="--inset:57px" id="connectNumber"><span class="tile" style="background:var(--blue)">${I.bolt}</span><span class="row-body"><span class="row-title">Connect your number</span></span>${I.chevronRight}</button>
+      <div class="row" style="--inset:57px"><span class="tile" style="background:var(--blue)">${I.wave}</span><span class="row-body"><span class="row-title" id="phoneNumber">Your number</span><div class="row-sub" id="phoneStatus">Checking…</div></span><button class="btn tinted" id="phoneConnect" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Connect</button></div>
     </div>
 
-    <div class="group-header">Messages</div>
+    <div class="group-header">Integrations</div>
     <div class="group">
-      ${tileRow('laptop', 'var(--blue)', 'Notify me in Messages', sw('messages.macosMessagesEnabled', config.messages.macosMessagesEnabled))}
-      ${devicesHTML()}
-      <button class="row action" id="pairBtn" style="--inset:57px"><span class="tile" style="background:var(--green)">${I.plus}</span><span class="row-body">Pair a Mac…</span></button>
+      ${state.devices.some((device) => device.status !== 'revoked')
+        ? tileRow('laptop', 'var(--blue)', 'Mac Messages', sw('messages.macosMessagesEnabled', config.messages.macosMessagesEnabled), 'Get and answer questions in Messages') + devicesHTML()
+        : ''}
+      <button class="row action" id="pairBtn" style="--inset:57px"><span class="tile" style="background:var(--gray)">${I.laptop}</span><span class="row-body">Pair a Mac…<div class="row-sub" style="font-size:13px">Optional — answer from Messages on your Mac</div></span></button>
     </div>
-    <div class="group-footer">You’re only notified when your assistant needs you. Reply right from Messages.</div>
+    <div class="group-footer">Optional. Everything works from your iPhone without a Mac.</div>
 
     ${state.token ? '<div class="group" style="margin-top:32px"><button class="row destructive" id="signOut">Sign Out</button></div>' : ''}
     <div style="height:24px"></div>`;
@@ -1538,7 +1548,8 @@ function renderSettings() {
   });
   body.querySelectorAll('[data-device]').forEach((node) => node.onclick = () => deviceActions(state.devices.find((device) => device.id === node.dataset.device)));
   $('#pairBtn').onclick = pairMac;
-  $('#connectNumber').onclick = openConnectNumber;
+  refreshPushRow();
+  refreshPhoneRow();
   const signOut = $('#signOut'); if (signOut) signOut.onclick = async () => {
     const confirmed = await actionSheet({ message: 'You’ll need your access token to sign back in.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
     if (!confirmed) return;
@@ -1546,47 +1557,207 @@ function renderSettings() {
   };
 }
 
-/* ---------------- First run ---------------- */
-function showOnboarding(step = 1) {
+async function refreshPushRow() {
+  const status = await pushState();
+  const label = { on: 'On', off: 'Off', denied: 'Blocked in iOS Settings', install: 'Add to Home Screen to turn on', unsupported: 'Not available in this browser' }[status];
+  if (!$('#pushStatus')) return;
+  $('#pushStatus').textContent = label;
+  $('#pushStatus').style.color = status === 'on' ? 'var(--green)' : '';
+  $('#pushToggle').hidden = status !== 'off';
+  $('#pushTest').hidden = status !== 'on';
+  $('#pushToggle').onclick = async () => {
+    try { await enablePush(); toast('Notifications on', 'bell', 'var(--red)'); } catch (error) { errorToast(error); }
+    refreshPushRow();
+  };
+  $('#pushTest').onclick = async () => {
+    try { await api('/owner/push/test', { method: 'POST' }); toast('Sent — check your lock screen', 'bell', 'var(--red)'); } catch (error) { errorToast(error); }
+  };
+}
+async function refreshPhoneRow() {
+  try {
+    const phone = await api('/owner/phone');
+    if (!$('#phoneStatus')) return;
+    $('#phoneNumber').textContent = phone.phoneNumber ? formatPhone(phone.phoneNumber) : 'Your number';
+    $('#phoneStatus').textContent = !phone.available ? 'Set up with your account' : phone.connected ? 'Connected — your assistant answers it' : 'Not connected yet';
+    $('#phoneStatus').style.color = phone.connected ? 'var(--green)' : '';
+    $('#phoneConnect').hidden = !phone.available || phone.connected;
+    $('#phoneConnect').onclick = async () => {
+      try { await api('/owner/phone/connect', { method: 'POST' }); toast('Number connected', 'check'); } catch (error) { errorToast(error); }
+      refreshPhoneRow();
+    };
+  } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
+}
+
+/* ---------------- First run (no Mac, no provider setup) ---------------- */
+async function finishOnboarding() {
+  try {
+    state.config = await api('/owner/configuration', { method: 'PATCH', body: { onboarding: { completed: true } } });
+  } catch (error) { errorToast(error); return; }
+  $('#onboard').hidden = true;
+  toast('You’re all set', 'check');
+}
+async function showOnboarding(step = 'welcome') {
   const node = $('#onboard'); node.hidden = false;
-  if (step === 1) {
+  const next = (to) => () => showOnboarding(to);
+  if (step === 'welcome') {
     node.innerHTML = `<div class="inner">
       <img class="app-icon" src="/icon.svg" alt="">
       <h1>Welcome</h1>
-      <p class="lede">Your phone is now a conversational inbox. Calls are answered by your assistant.</p>
-      <div class="feature"><span class="tile" style="background:var(--green)">${I.wave}</span><div><b>Watch what’s happening</b><span>See every call live, as it happens.</span></div></div>
-      <div class="feature"><span class="tile" style="background:var(--blue)">${I.person}</span><div><b>Step in anytime</b><span>Take over or answer a question in one tap.</span></div></div>
-      <div class="feature"><span class="tile" style="background:var(--teal)">${I.message}</span><div><b>Move to text</b><span>Conversations continue by message, naturally.</span></div></div>
-      <div class="feature"><span class="tile" style="background:var(--indigo)">${I.sliders}</span><div><b>Change how it behaves</b><span>Adjust any conversation while it’s going.</span></div></div>
+      <p class="lede">Your phone number becomes a conversational inbox. Your assistant answers every call.</p>
+      <div class="feature"><span class="tile" style="background:var(--green)">${I.wave}</span><div><b>See what’s happening</b><span>Every call, live, on your iPhone.</span></div></div>
+      <div class="feature"><span class="tile" style="background:var(--red)">${I.bell}</span><div><b>Only when it matters</b><span>You’re notified when your assistant needs you.</span></div></div>
+      <div class="feature"><span class="tile" style="background:var(--blue)">${I.person}</span><div><b>Step in with one tap</b><span>Answer, take over, or move the conversation to text.</span></div></div>
       <div class="grow"></div>
-      <button class="btn filled" id="obNext">Connect My Number</button></div>`;
-    $('#obNext').onclick = () => showOnboarding(2);
-  } else if (step === 2) {
-    node.innerHTML = `<div class="inner">
-      <h1 style="text-align:left;font-size:28px">Connect your number</h1>
-      <p class="lede" style="text-align:left">In your Twilio console, open your phone number and paste these (HTTP POST):</p>
-      ${webhooksHTML()}
+      <button class="btn filled" id="obNext">Get Started</button></div>`;
+    $('#obNext').onclick = next('number');
+  } else if (step === 'number') {
+    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Your number</h1>
+      <p class="lede" style="text-align:left" id="obNumberText">Checking your number…</p>
       <div class="grow"></div>
-      <button class="btn filled" id="obNext">Continue</button>
-      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">I’ll do this later</button></div>`;
-    bindWebhooks(node);
-    $('#obNext').onclick = () => showOnboarding(3);
-    $('#obSkip').onclick = () => showOnboarding(3);
-  } else {
+      <button class="btn filled" id="obConnect" hidden>Connect My Number</button>
+      <button class="btn filled" id="obNext" hidden>Continue</button></div>`;
+    $('#obNext').onclick = next('behavior');
+    try {
+      const phone = await api('/owner/phone');
+      const number = phone.phoneNumber ? formatPhone(phone.phoneNumber) : 'your number';
+      if (!phone.available || phone.connected) {
+        $('#obNumberText').innerHTML = `<b style="color:var(--label)">${esc(number)}</b> is ready. When someone calls it, your assistant answers.`;
+        $('#obNext').hidden = false;
+      } else {
+        $('#obNumberText').innerHTML = `Calls to <b style="color:var(--label)">${esc(number)}</b> will be answered by your assistant.`;
+        $('#obConnect').hidden = false;
+        $('#obConnect').onclick = async () => {
+          $('#obConnect').disabled = true; $('#obConnect').textContent = 'Connecting…';
+          try { await api('/owner/phone/connect', { method: 'POST' }); showOnboarding('behavior'); }
+          catch (error) { errorToast(error); $('#obConnect').disabled = false; $('#obConnect').textContent = 'Connect My Number'; }
+        };
+      }
+    } catch { $('#obNumberText').textContent = 'Your number will be answered by your assistant.'; $('#obNext').hidden = false; }
+  } else if (step === 'behavior') {
     node.innerHTML = `<div class="inner">
-      <h1 style="text-align:left;font-size:28px">How should I normally handle calls?</h1>
+      <h1 style="text-align:left;font-size:28px">How should your assistant handle calls?</h1>
       <p class="lede" style="text-align:left">You can change this anytime — even during a call.</p>
-      <button class="big-choice" data-behavior="automatic"><b>Handle everything</b><span>I’ll take care of callers and only ask you when I must.</span></button>
-      <button class="big-choice" data-behavior="ask_when_unsure"><b>Ask me when needed</b><span>I’ll keep talking, and check with you before deciding.</span></button></div>`;
+      <button class="big-choice" data-behavior="automatic"><b>Handle everything</b><span>It takes care of callers and only asks you when it must.</span></button>
+      <button class="big-choice" data-behavior="ask_when_unsure"><b>Ask me when needed</b><span>It keeps talking, and checks with you before deciding.</span></button></div>`;
     node.querySelectorAll('[data-behavior]').forEach((button) => button.onclick = async () => {
       haptic();
-      try {
-        state.config = await api('/owner/configuration', { method: 'PATCH', body: { assistant: { behavior: button.dataset.behavior }, onboarding: { completed: true } } });
-        node.hidden = true; toast('You’re all set', 'check');
-        try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch {}
-      } catch (error) { errorToast(error); }
+      try { state.config = await api('/owner/configuration', { method: 'PATCH', body: { assistant: { behavior: button.dataset.behavior } } }); }
+      catch (error) { errorToast(error); return; }
+      showOnboarding(isIOS() && !isStandalone() ? 'install' : 'notifications');
     });
+  } else if (step === 'install') {
+    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Add to your Home Screen</h1>
+      <p class="lede" style="text-align:left">So your assistant can reach you with notifications, add Text Me to your Home Screen:</p>
+      <ol class="steps" style="margin:0 0 0 -4px"><li>Tap the <b>Share</b> button in Safari.</li><li>Choose <b>Add to Home Screen</b>.</li><li>Open <b>Text Me</b> from your Home Screen to finish.</li></ol>
+      <div class="grow"></div>
+      <button class="btn" style="color:var(--blue)" id="obSkip">Not Now</button></div>`;
+    $('#obSkip').onclick = next('notifications');
+  } else if (step === 'notifications') {
+    const support = pushSupport();
+    node.innerHTML = `<div class="inner"><div class="hero" style="padding-top:12px"><div class="shield" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)">${I.bell}</div></div>
+      <h1 style="font-size:28px">Turn on notifications</h1>
+      <p class="lede">You’ll only hear from your assistant when it needs you — like “Jordan needs you: Can you do Friday at 2?”</p>
+      <div class="grow"></div>
+      <button class="btn filled" id="obEnable" ${support === 'supported' ? '' : 'hidden'}>Turn On Notifications</button>
+      ${support === 'supported' ? '' : `<p class="lede" style="margin:0 0 12px">${support === 'install' ? 'Open Text Me from your Home Screen to turn these on.' : 'This browser can’t show notifications; you can still use Text Me here.'}</p>`}
+      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">${support === 'supported' ? 'Not Now' : 'Continue'}</button></div>`;
+    $('#obSkip').onclick = finishOnboarding;
+    const enable = $('#obEnable');
+    if (enable) enable.onclick = async () => {
+      try { await enablePush(); toast('Notifications on', 'bell', 'var(--red)'); finishOnboarding(); } catch (error) { errorToast(error); }
+    };
   }
+}
+
+/* ---------------- Deep links, notification intents, owner live stream ---------------- */
+/** Open exactly the conversation a notification points to, and run its intent as a server-side command. */
+async function handleDeepLink(href) {
+  const url = new URL(href, location.origin);
+  const match = url.pathname.match(/^\/conversations\/([^/]+)\/live$/);
+  if (!match) return false;
+  const conversationId = decodeURIComponent(match[1]);
+  const attentionId = url.searchParams.get('attention');
+  const intent = url.searchParams.get('intent');
+  if (state.tab !== 'live') go('live');
+  await openConversation(conversationId, { instant: true });
+  if (attentionId) api(`/owner/attention/${encodeURIComponent(attentionId)}/opened`, { method: 'POST' }).catch(() => {});
+  if (intent === 'take_over') {
+    try {
+      if (attentionId) await api(`/owner/attention/${encodeURIComponent(attentionId)}/actions`, { method: 'POST', body: { action: 'take_over' } });
+      else await runtimeCall('/runtime/takeover', { method: 'POST' });
+      toast('You’re in control', 'person', 'var(--blue)');
+      loadDetail(conversationId);
+    } catch (error) { errorToast(error); }
+  } else if (intent === 'reply') {
+    setTimeout(() => $('#composerInput').focus(), 300);
+  }
+  return true;
+}
+
+let ownerStream;
+function openOwnerStream() {
+  if (ownerStream) ownerStream.close();
+  ownerStream = new EventSource(`/owner/events${state.token ? `?token=${encodeURIComponent(state.token)}` : ''}`);
+  let timer;
+  const refresh = (conversationId) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { loadList(); if (state.selectedId && conversationId === state.selectedId) loadDetail(); }, 150);
+  };
+  ownerStream.addEventListener('runtime.attention', (event) => {
+    const data = JSON.parse(event.data);
+    refresh(data.conversationId);
+    // A call that needs you (or just started) takes over the screen when you're looking at Now.
+    const important = ['assistant_needs_owner', 'conversation_started', 'error'].includes(data.payload.attentionType);
+    const onNow = state.tab === 'live' && (isPhone() ? !$('#liveTab').classList.contains('pushed') : !state.detail || !isActive(state.detail));
+    if (important && onNow && document.visibilityState === 'visible') openConversation(data.conversationId);
+  });
+  ['runtime.state_changed', 'runtime.transcript_final', 'runtime.ai_completed', 'runtime.owner_needed', 'runtime.configuration_changed',
+    'runtime.paused', 'runtime.resumed', 'runtime.stopped', 'runtime.takeover', 'runtime.returned_to_assistant', 'runtime.voice_stopped']
+    .forEach((name) => ownerStream.addEventListener(name, (event) => refresh(JSON.parse(event.data).conversationId)));
+  ownerStream.onopen = () => setConnection(true);
+}
+
+/* ---------------- Push notifications (this device) ---------------- */
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+function pushSupport() {
+  if ('serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window) return 'supported';
+  return isIOS() && !isStandalone() ? 'install' : 'unsupported';
+}
+async function pushState() {
+  if (pushSupport() !== 'supported') return pushSupport();
+  if (Notification.permission === 'denied') return 'denied';
+  try {
+    const registration = await navigator.serviceWorker.getRegistration('/');
+    const subscription = registration && await registration.pushManager.getSubscription();
+    return subscription && Notification.permission === 'granted' ? 'on' : 'off';
+  } catch { return 'off'; }
+}
+function base64UrlToBytes(value) {
+  const padded = (value + '='.repeat((4 - (value.length % 4)) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  return Uint8Array.from(atob(padded), (ch) => ch.charCodeAt(0));
+}
+/** Must run from a tap (iOS requires a user gesture for the permission prompt). */
+async function enablePush() {
+  const support = pushSupport();
+  if (support !== 'supported') throw new Error(support === 'install' ? 'Add Text Me to your Home Screen first, then open it from there.' : 'This browser can’t show notifications.');
+  const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Notifications are off. You can turn them on in Settings for Text Me.');
+  const { publicKey } = await api('/owner/push/config');
+  const subscription = await registration.pushManager.getSubscription() ||
+    await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: base64UrlToBytes(publicKey) });
+  await api('/owner/push/devices', { method: 'POST', body: {
+    subscription: subscription.toJSON(),
+    label: isIOS() ? 'iPhone' : 'This device',
+    supportsActions: 'maxActions' in Notification && Notification.maxActions > 0,
+  } });
+}
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'open') handleDeepLink(event.data.url);
+  });
 }
 
 /* ---------------- Boot ---------------- */
@@ -1599,16 +1770,18 @@ async function boot() {
     state.config = config;
     if (!config.onboarding || !config.onboarding.completed) showOnboarding();
   }).catch(() => {});
+  openOwnerStream();
   if (!booted) {
     booted = true;
-    setInterval(loadList, 5000);
-    setInterval(() => { if (state.selectedId) loadDetail(); }, 8000);
+    // The owner stream carries changes as they happen; this is only a safety net.
+    setInterval(loadList, 30000);
+    setInterval(() => { if (state.selectedId) loadDetail(); }, 30000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadList(); loadDetail(); } });
     phoneMq.addEventListener('change', () => { if (!isPhone() && state.selectedId) $('#liveTab').classList.add('pushed'); renderList(); renderInspector(); updateTabbar(); });
     addEventListener('resize', () => renderInspector());
-    const requested = new URL(location.href).searchParams.get('c');
-    if (requested) openConversation(requested);
-    else if (!isPhone()) {
+    if (await handleDeepLink(location.href)) {
+      history.replaceState(null, '', location.pathname);
+    } else if (!isPhone()) {
       const first = state.conversations.find(needsYou) || state.conversations.find(isActive) || state.conversations[0];
       if (first) openConversation(first.id);
     }

@@ -40,6 +40,7 @@ import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
 import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from './runtime/commands.js';
 import { OwnerAttentionService } from './attention/service.js';
+import type { PhoneNumberService } from './telephony/phone-number.js';
 import { attentionUrl, createSurfaceDeviceId, type OwnerDeviceCapability } from './attention/model.js';
 import { NotificationRouter } from './attention/router.js';
 import { MacMessagesSurface, OwnerSmsSurface, VapidPushSender, WebPushSurface, type PushSender } from './attention/surfaces.js';
@@ -87,6 +88,8 @@ export interface AppOptions {
   surfaceDeviceStore?: OwnerSurfaceDeviceStore;
   appSecretStore?: AppSecretStore;
   pushSender?: PushSender;
+  /** Lets the owner connect their number from the app (no provider console). */
+  phoneNumbers?: PhoneNumberService;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
@@ -793,6 +796,28 @@ export function createApp(options: AppOptions): express.Express {
       clearInterval(keepAlive);
       unsubscribe();
     });
+  });
+
+  // ---- The owner's phone number ----
+  app.get('/owner/phone', ownerAuth, async (_request, response, next) => {
+    try {
+      if (!options.phoneNumbers) {
+        response.json({ available: false, phoneNumber: null, connected: false });
+        return;
+      }
+      response.json({ available: true, ...(await options.phoneNumbers.status()) });
+    } catch (error) {
+      next(new HttpError(502, 'Couldn’t reach your phone provider. Try again in a moment.'));
+    }
+  });
+
+  app.post('/owner/phone/connect', ownerAuth, async (_request, response, next) => {
+    try {
+      if (!options.phoneNumbers) throw new HttpError(409, 'No phone number is set up for this account yet');
+      response.json(await options.phoneNumbers.connect());
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t connect your number'));
+    }
   });
 
   app.get('/owner/configuration', ownerAuth, async (request, response) => {

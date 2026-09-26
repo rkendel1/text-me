@@ -288,3 +288,27 @@ test('the owner-wide live stream carries attention for the owner’s conversatio
   askOwner(owner);
   await eventually(() => /event: runtime\.attention[\s\S]*"attentionType":"assistant_needs_owner"/.test(received.join('')), 'attention on the owner stream');
 });
+
+test('connecting the number points it at this deployment without any provider console', async () => {
+  const { PhoneNumberService } = await import('../src/telephony/phone-number.js');
+  const numbers = new Map([['+15550000000', { sid: 'PN1', phoneNumber: '+15550000000', voiceUrl: 'https://old.example/voice', smsUrl: null as string | null, statusCallback: null as string | null }]]);
+  const client = {
+    find: async (phoneNumber: string) => numbers.get(phoneNumber) ?? null,
+    update: async (_sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }) => {
+      const updated = { ...numbers.get('+15550000000')!, ...urls };
+      numbers.set('+15550000000', updated);
+      return updated;
+    },
+  };
+  const app = createApp({
+    repository: new InMemoryConversationRepository(),
+    phoneNumbers: new PhoneNumberService(client, '+15550000000', 'https://text-me.vercel.app'),
+  });
+  assert.deepEqual((await request(app).get('/owner/phone')).body, { available: true, phoneNumber: '+15550000000', found: true, connected: false });
+  const connected = await request(app).post('/owner/phone/connect');
+  assert.equal(connected.status, 200);
+  assert.equal(numbers.get('+15550000000')!.voiceUrl, 'https://text-me.vercel.app/webhooks/twilio/voice');
+  assert.equal(numbers.get('+15550000000')!.smsUrl, 'https://text-me.vercel.app/webhooks/twilio/sms');
+  assert.equal(numbers.get('+15550000000')!.statusCallback, 'https://text-me.vercel.app/webhooks/twilio/status');
+  assert.equal((await request(app).get('/owner/phone')).body.connected, true);
+});

@@ -30,6 +30,7 @@ import {
   PostgresOwnerSurfaceDeviceStore,
 } from './attention/postgres.js';
 import { VapidPushSender } from './attention/surfaces.js';
+import { PhoneNumberService, TwilioPhoneNumberClient } from './telephony/phone-number.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
 import { createGateway } from 'ai';
@@ -127,6 +128,11 @@ export function buildServer(
     runtimeOverrideStore: runtimeOverrides,
     runtimeEventBus,
     runtimeCommandStore: runtimeCommands,
+    phoneNumbers: new PhoneNumberService(
+      new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
+      config.twilioPhoneNumber,
+      config.publicBaseUrl,
+    ),
     attentionStore,
     notificationDeliveryStore: notificationDeliveries,
     surfaceDeviceStore: surfaceDevices,
