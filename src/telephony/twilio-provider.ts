@@ -82,7 +82,7 @@ export class TwilioProvider implements TelephonyProvider {
   answerCall(): ProviderResponse {
     const response = new twilio.twiml.VoiceResponse();
     response.say(
-      'Hi. This number is currently unavailable. Please tell me why you are calling after the tone.',
+      "Hi. This is Randy's assistant. He isn't taking calls right now. What can I help you with?",
     );
     response.record({
       maxLength: 120,

@@ -59,7 +59,7 @@ export class FakeTelephonyProvider implements TelephonyProvider {
 
   answerCall(): ProviderResponse {
     return {
-      body: '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Hi. This number is currently unavailable. Please tell me why you are calling after the tone.</Say><Record maxLength="120" playBeep="true" trim="trim-silence" /><Hangup /></Response>',
+      body: '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Hi. This is Randy&apos;s assistant. He isn&apos;t taking calls right now. What can I help you with?</Say><Record maxLength="120" playBeep="true" trim="trim-silence" /><Hangup /></Response>',
       contentType: 'text/xml; charset=utf-8',
     };
   }
