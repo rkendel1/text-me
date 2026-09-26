@@ -26,6 +26,13 @@ ul{background:#fff;border-radius:12px;padding:6px 0;margin:0;list-style:none}li{
 
   return createServer((request, response) => {
     const path = (request.url ?? '/').split('?')[0];
+    const requestId = request.headers['x-vercel-id'] ?? request.headers['x-request-id'] ?? null;
+    console.warn('[startup] serving failure response', {
+      requestId,
+      method: request.method,
+      path,
+      status: path === '/health' ? 200 : 503,
+    });
     const json = (status: number, body: unknown) => {
       response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       response.end(JSON.stringify(body));

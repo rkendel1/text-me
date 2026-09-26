@@ -21,15 +21,18 @@ try {
   ({ server } = buildServer());
 } catch (error) {
   // A crash here would surface only as INTERNAL_FUNCTION_INVOCATION_FAILED; say what's wrong instead.
-  console.error('Startup failed:', error);
+  console.error('[startup] failed', error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error);
   server = startupFailureServer(error);
 }
 
 // Always listen: on Vercel the Node runtime intercepts listen() to capture this
 // server (Express app + media-stream WebSocket); everywhere else it binds the port.
 const port = Number(process.env.PORT ?? '3000');
+server.on('error', (error) => {
+  console.error('[server] listen/runtime error', { port, error });
+});
 server.listen(port, () => {
-  if (!process.env.VERCEL) console.log(`text-me listening on port ${port}`);
+  console.info('[server] listening', { port, vercel: Boolean(process.env.VERCEL), environment: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? 'development' });
 });
 
 export default server;

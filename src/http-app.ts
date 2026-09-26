@@ -281,6 +281,28 @@ export function createApp(options: AppOptions): express.Express {
     ? options.beforeRequest()
     : options.beforeRequest ?? Promise.resolve();
   const app = express();
+  app.use((request, response, next) => {
+    const startedAt = Date.now();
+    const requestId = request.header('x-vercel-id') ?? request.header('x-request-id');
+    const path = request.path;
+    response.on('finish', () => {
+      console.info('[http]', JSON.stringify({
+        requestId: requestId ?? null,
+        method: request.method,
+        path,
+        status: response.statusCode,
+        durationMs: Date.now() - startedAt,
+        environment: options.release?.environment ?? process.env.NODE_ENV ?? 'development',
+        commit: options.release?.commit ?? null,
+      }));
+    });
+    response.on('close', () => {
+      if (!response.writableEnded) {
+        console.warn('[http] client disconnected', JSON.stringify({ requestId: requestId ?? null, method: request.method, path }));
+      }
+    });
+    next();
+  });
   const providers = createProviderMap(
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
   );
@@ -1737,7 +1759,12 @@ export function createApp(options: AppOptions): express.Express {
         return;
       }
 
-      console.error(error);
+      console.error('[http] request failed', JSON.stringify({
+        requestId: _request.header('x-vercel-id') ?? _request.header('x-request-id') ?? null,
+        method: _request.method,
+        path: _request.path,
+        error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error,
+      }));
       response.status(500).json({ error: 'Internal server error' });
     },
   );
