@@ -992,8 +992,9 @@ $('#backBtn').onclick = popDetail;
 
 /* ---------------- Sign in ---------------- */
 function showSignIn(message) {
+  // Keep the first reason shown (expired / signed out); later unauthenticated requests don't erase it.
+  if (message || $('#signin').hidden) $('#signinError').textContent = message || '';
   $('#signin').hidden = false; $('#app').hidden = true;
-  $('#signinError').textContent = message || '';
   closeStream(); if (ownerStream) { ownerStream.close(); ownerStream = null; }
   postNative({ type: 'signedOut' });
   setTimeout(() => $('#tokenInput').focus(), 50);
@@ -1864,7 +1865,7 @@ async function refreshSessions() {
   try { sessions = await api('/auth/sessions'); } catch { return; }
   if (!$('#sessionRows')) return;
   node.innerHTML = sessions.map((session) => `<button class="row" style="--inset:57px" data-session="${esc(session.id)}" ${session.current ? 'disabled' : ''}>
-    <span class="tile" style="background:${session.platform === 'ios' ? 'var(--blue)' : 'var(--gray)'}">${session.platform === 'ios' ? I.phone : I.laptop}</span>
+    <span class="tile" style="background:${session.platform === 'ios' ? 'var(--blue)' : 'var(--gray)'}">${session.platform === 'ios' || /iPhone|iPad/.test(session.label) ? I.phone : I.laptop}</span>
     <span class="row-body"><span class="row-title">${esc(session.label)}${session.current ? ' · This device' : ''}</span>
     <div class="row-sub">Active ${esc(relTime(session.lastUsedAt))}</div></span>${session.current ? '' : I.chevronRight}</button>`).join('');
   node.querySelectorAll('[data-session]:not([disabled])').forEach((row) => row.onclick = async () => {
@@ -1899,19 +1900,61 @@ async function refreshPushRow() {
     try { await api('/owner/push/test', { method: 'POST' }); toast('Sent — check your lock screen', 'bell', 'var(--red)'); } catch (error) { errorToast(error); }
   };
 }
+/**
+ * The owner keeps their real number. Their carrier forwards calls they don't
+ * take to the assistant line, which callers never see.
+ */
 async function refreshPhoneRow() {
   try {
     const phone = await api('/owner/phone');
     if (!$('#phoneStatus')) return;
-    $('#phoneNumber').textContent = phone.phoneNumber ? formatPhone(phone.phoneNumber) : 'Your number';
-    $('#phoneStatus').textContent = !phone.available ? 'Set up with your account' : phone.connected ? 'Connected — your assistant answers it' : 'Not connected yet';
-    $('#phoneStatus').style.color = phone.connected ? 'var(--green)' : '';
-    $('#phoneConnect').hidden = !phone.available || phone.connected;
-    $('#phoneConnect').onclick = async () => {
-      try { await api('/owner/phone/connect', { method: 'POST' }); toast('Number connected', 'check'); } catch (error) { errorToast(error); }
-      refreshPhoneRow();
-    };
+    $('#phoneNumber').textContent = phone.ownerNumber ? formatPhone(phone.ownerNumber) : 'Your number';
+    const forwarding = phone.forwardingSeen
+      ? [`Forwarding works · last call ${relTime(phone.lastForwardedAt)}`, 'var(--green)']
+      : phone.available && phone.connected ? ['Set up forwarding so your assistant gets calls you miss', 'var(--orange)']
+        : [phone.error || 'Assistant line not connected yet', 'var(--orange)'];
+    $('#phoneStatus').textContent = forwarding[0];
+    $('#phoneStatus').style.color = forwarding[1];
+    $('#phoneConnect').hidden = !phone.available;
+    $('#phoneConnect').textContent = phone.forwardingSeen ? 'Details' : 'Set Up';
+    $('#phoneConnect').onclick = () => forwardingSheet();
   } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
+}
+
+function forwardingHTML(phone) {
+  const codes = phone.forwarding || [];
+  return `
+    <p class="lede" style="text-align:left;margin:0 0 14px">Callers keep dialing <b style="color:var(--label)">${esc(phone.ownerNumber ? formatPhone(phone.ownerNumber) : 'your number')}</b>. Calls you don’t answer, decline, or can’t take go to your assistant.</p>
+    ${codes.map((code, index) => `<div class="group-header">${esc(code.carrier)}</div>
+      <div class="group"><div class="row"><span class="row-body"><span class="row-title" style="font-family:ui-monospace,Menlo,monospace;font-size:19px">${esc(code.enable)}</span>
+        <div class="row-sub">${esc(code.detail)} Turn off: ${esc(code.disable)}</div></span>
+        <button class="btn tinted" data-copy="${index}" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px">Copy</button></div></div>`).join('')}
+    <div class="group-footer">Open the Phone app, paste the code into the keypad, and tap Call. Your carrier confirms on screen. Test it: call your number from another phone and don’t answer.</div>
+    <div class="group"><div class="row"><span class="row-body"><span class="row-title">Assistant line</span><div class="row-sub">${esc(phone.assistantLine ? formatPhone(phone.assistantLine) : phone.error || '—')} · texts to callers come from this number</div></span>
+      <span class="value" style="color:${phone.connected ? 'var(--green)' : 'var(--orange)'}">${phone.connected ? 'Connected' : 'Not connected'}</span></div></div>
+    <div class="group-footer" id="forwardSeen">${phone.forwardingSeen ? `✓ Forwarded calls are arriving (last ${esc(relTime(phone.lastForwardedAt))}).` : 'Waiting for the first forwarded call.'}</div>`;
+}
+
+async function forwardingSheet() {
+  haptic();
+  const body = document.createElement('div');
+  body.innerHTML = '<div class="connect-wait" style="padding:60px 0"><span class="spinner"></span></div>';
+  openSheet({ title: 'Keep Your Number', body, onClose: () => refreshPhoneRow() });
+  let phone = await api('/owner/phone').catch((error) => ({ error: error.message }));
+  // The assistant line must point at this deployment before forwarding can reach it.
+  if (phone.available && phone.assistantLine && !phone.connected) {
+    try { await api('/owner/phone/connect', { method: 'POST' }); phone = await api('/owner/phone'); } catch (error) { errorToast(error); }
+  }
+  body.innerHTML = forwardingHTML(phone);
+  bindForwardingCopy(body, phone);
+}
+
+function bindForwardingCopy(root, phone) {
+  root.querySelectorAll('[data-copy]').forEach((button) => button.onclick = async () => {
+    const code = phone.forwarding[Number(button.dataset.copy)].enable;
+    try { await navigator.clipboard.writeText(code); toast('Copied — paste it in the Phone keypad'); }
+    catch { toast(code, 'info', 'var(--blue)'); }
+  });
 }
 
 /* ---------------- First run (no Mac, no provider setup) ---------------- */
@@ -1937,28 +1980,22 @@ async function showOnboarding(step = 'welcome') {
       <button class="btn filled" id="obNext">Get Started</button></div>`;
     $('#obNext').onclick = next('number');
   } else if (step === 'number') {
-    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Your number</h1>
-      <p class="lede" style="text-align:left" id="obNumberText">Checking your number…</p>
+    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Keep your number</h1>
+      <div id="obForwarding"><p class="lede" style="text-align:left">Getting your assistant line ready…</p></div>
       <div class="grow"></div>
-      <button class="btn filled" id="obConnect" hidden>Connect My Number</button>
-      <button class="btn filled" id="obNext" hidden>Continue</button></div>`;
+      <button class="btn filled" id="obNext">I’ve Turned On Forwarding</button>
+      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">Do This Later</button></div>`;
     $('#obNext').onclick = next('behavior');
+    $('#obSkip').onclick = next('behavior');
     try {
-      const phone = await api('/owner/phone');
-      const number = phone.phoneNumber ? formatPhone(phone.phoneNumber) : 'your number';
-      if (!phone.available || phone.connected) {
-        $('#obNumberText').innerHTML = `<b style="color:var(--label)">${esc(number)}</b> is ready. When someone calls it, your assistant answers.`;
-        $('#obNext').hidden = false;
-      } else {
-        $('#obNumberText').innerHTML = `Calls to <b style="color:var(--label)">${esc(number)}</b> will be answered by your assistant.`;
-        $('#obConnect').hidden = false;
-        $('#obConnect').onclick = async () => {
-          $('#obConnect').disabled = true; $('#obConnect').textContent = 'Connecting…';
-          try { await api('/owner/phone/connect', { method: 'POST' }); showOnboarding('behavior'); }
-          catch (error) { errorToast(error); $('#obConnect').disabled = false; $('#obConnect').textContent = 'Connect My Number'; }
-        };
+      let phone = await api('/owner/phone');
+      if (phone.available && phone.assistantLine && !phone.connected) {
+        await api('/owner/phone/connect', { method: 'POST' });
+        phone = await api('/owner/phone');
       }
-    } catch { $('#obNumberText').textContent = 'Your number will be answered by your assistant.'; $('#obNext').hidden = false; }
+      $('#obForwarding').innerHTML = forwardingHTML(phone);
+      bindForwardingCopy($('#obForwarding'), phone);
+    } catch (error) { $('#obForwarding').innerHTML = `<p class="lede" style="text-align:left">${esc(error.message)}</p>`; }
   } else if (step === 'behavior') {
     node.innerHTML = `<div class="inner">
       <h1 style="text-align:left;font-size:28px">How should your assistant handle calls?</h1>

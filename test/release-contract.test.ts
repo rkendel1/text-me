@@ -351,6 +351,8 @@ test('production never falls back to in-memory state, fake providers or a fake m
   };
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', PUBLIC_BASE_URL: 'https://x.test' }), /AI Gateway credential is required in production/);
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'http://x.test' }), /must be an https URL/);
+  assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'https://x.test', REALTIME_VOICE: 'off' }),
+    /REALTIME_VOICE=off isn’t supported in production/);
   const vercel = getConfig({ ...env, VERCEL: '1', VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'text-me.vercel.app', VERCEL_GIT_COMMIT_SHA: 'abc123' });
   assert.equal(vercel.production, true);
   assert.equal(vercel.enableFakeProviderRoutes, false);
@@ -382,4 +384,50 @@ test('health: liveness always answers; readiness says exactly what a deployment 
   assert.equal(ready.body.checks.productionComposition.ok, false);
   assert.equal(ready.body.checks.webhookSignatures.ok, false);
   assert.ok(!JSON.stringify(ready.body).includes(ACCESS_KEY), 'no secrets');
+});
+
+test('keep your real number: the assistant line is optional config, and forwarding is proven by a forwarded call', async (t) => {
+  const { PhoneNumberService, forwardingCodes } = await import('../src/telephony/phone-number.js');
+  type PhoneRecord = { sid: string; phoneNumber: string; voiceUrl: string | null; smsUrl: string | null; statusCallback: string | null };
+  const account = (numbers: PhoneRecord[]) => ({
+    numbers,
+    find: async (phoneNumber: string) => numbers.find((number) => number.phoneNumber === phoneNumber) ?? null,
+    list: async () => numbers,
+    update: async (sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }) =>
+      Object.assign(numbers.find((number) => number.sid === sid)!, urls),
+  });
+  const line = (): PhoneRecord => ({ sid: 'PN1', phoneNumber: '+15550000000', voiceUrl: null, smsUrl: null, statusCallback: null });
+
+  // No TWILIO_PHONE_NUMBER: the account's only number becomes the hidden assistant line.
+  const single = new PhoneNumberService(account([line()]), undefined, 'https://text-me.vercel.app', '+15551112222');
+  assert.equal(await single.assistantLine(), '+15550000000');
+  await single.connect();
+  const status = await single.status();
+  assert.deepEqual([status.ownerNumber, status.assistantLine, status.connected], ['+15551112222', '+15550000000', true]);
+  assert.deepEqual(status.forwarding.map((code) => [code.enable, code.disable]), [['**004*+15550000000#', '##004#'], ['*715550000000', '*73']]);
+  assert.deepEqual(forwardingCodes('+447700900123').map((code) => code.carrier), ['AT&T, T-Mobile and most carriers'], 'no Verizon code outside the US');
+  // Ambiguous or missing: a clear message instead of guessing.
+  assert.match((await new PhoneNumberService(account([]), undefined, 'https://x.test').status()).error!, /no phone number yet/);
+  assert.match((await new PhoneNumberService(account([line(), { ...line(), sid: 'PN2', phoneNumber: '+15550000001' }]), undefined, 'https://x.test').status()).error!,
+    /Set TWILIO_PHONE_NUMBER/);
+  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', OWNER_PHONE_NUMBER: '+2', OWNER_AUTH_TOKEN: 'k' };
+  assert.equal(getConfig(env).twilioPhoneNumber, undefined, 'TWILIO_PHONE_NUMBER is optional');
+
+  // A call someone placed to the owner's real number, forwarded by the carrier.
+  const repository = new InMemoryConversationRepository();
+  const app = createApp({
+    repository, ownerAuthToken: ACCESS_KEY, messagingProvider: new FakeMessagingProvider(),
+    phoneNumbers: new PhoneNumberService(account([line()]), undefined, 'https://text-me.vercel.app', '+15551112222'),
+    providers: [new TwilioProvider(), new FakeTelephonyProvider()],
+  });
+  const headers = { Authorization: `Bearer ${ACCESS_KEY}` };
+  assert.equal((await request(app).get('/owner/phone').set(headers)).body.forwardingSeen, false);
+  const forwarded = await request(app).post('/webhooks/twilio/voice').type('form')
+    .send({ CallSid: 'CA9', From: '+15553334444', To: '+15550000000', ForwardedFrom: '+15551112222' });
+  assert.equal(forwarded.status, 200);
+  const phone = (await request(app).get('/owner/phone').set(headers)).body;
+  assert.equal(phone.forwardingSeen, true);
+  assert.ok(phone.lastForwardedAt);
+  const [conversation] = await repository.list();
+  assert.ok(conversation.events.some((event) => event.type === 'call.forwarded' && event.payload.from === '+15551112222'));
 });

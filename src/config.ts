@@ -37,7 +37,8 @@ export interface AppConfig {
   publicBaseUrl: string;
   twilioAccountSid: string;
   twilioAuthToken: string;
-  twilioPhoneNumber: string;
+  /** The assistant line (optional: auto-detected from the Twilio account). */
+  twilioPhoneNumber?: string;
   ownerPhone: string;
   ownerId: string;
   ownerAuthToken: string;
@@ -96,7 +97,8 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is required (add Neon from the Vercel Marketplace, or set it manually)');
   }
-  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'OWNER_PHONE_NUMBER', 'OWNER_AUTH_TOKEN'];
+  // TWILIO_PHONE_NUMBER is optional: the account's only number is used as the assistant line.
+  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'OWNER_PHONE_NUMBER', 'OWNER_AUTH_TOKEN'];
   for (const key of required) {
     if (!env[key]) throw new Error(`${key} is required`);
   }
@@ -105,6 +107,9 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const aiGateway = resolveAiGateway(env);
   if (production && !aiGateway) {
     throw new Error('An AI Gateway credential is required in production: set AI_GATEWAY_API_KEY (Vercel deployments use OIDC automatically)');
+  }
+  if (production && env.REALTIME_VOICE === 'off') {
+    throw new Error('REALTIME_VOICE=off isn’t supported in production: calls would get a canned greeting instead of your assistant');
   }
   if (production && !/^https:\/\//.test(resolvePublicBaseUrl(env))) {
     throw new Error('PUBLIC_BASE_URL must be an https URL in production (Twilio calls back to it)');
@@ -123,7 +128,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: resolvePublicBaseUrl(env),
     twilioAccountSid: env.TWILIO_ACCOUNT_SID!,
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!,
-    twilioPhoneNumber: env.TWILIO_PHONE_NUMBER!,
+    twilioPhoneNumber: env.TWILIO_PHONE_NUMBER || undefined,
     ownerPhone: env.OWNER_PHONE_NUMBER!,
     ownerId: env.OWNER_ID ?? 'owner',
     ownerAuthToken: env.OWNER_AUTH_TOKEN ?? '',

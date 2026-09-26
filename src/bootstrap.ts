@@ -102,6 +102,12 @@ export function buildServer(
   const textAgent = ai
     ? new AiSdkTextAgent(createGateway({ apiKey: ai.apiKey, baseURL: ai.baseURL, teamIdOrSlug: ai.teamIdOrSlug })(ai.textModelId))
     : undefined;
+  const phoneNumbers = new PhoneNumberService(
+    new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
+    config.twilioPhoneNumber,
+    config.publicBaseUrl,
+    config.ownerPhone,
+  );
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 
   const app = createApp({
@@ -115,10 +121,11 @@ export function buildServer(
       ...(config.production ? [] : [new FakeTelephonyProvider()]),
     ],
     includeFakeProviderRoutes: config.enableFakeProviderRoutes,
+    // Texts come from the assistant line (configured, or the account's only number).
     messagingProvider: new TwilioMessagingProvider(
       config.twilioAccountSid,
       config.twilioAuthToken,
-      config.twilioPhoneNumber,
+      config.twilioPhoneNumber ?? (() => phoneNumbers.assistantLine()),
     ),
     ownerPhone: config.ownerPhone,
     ownerId: config.ownerId,
@@ -134,11 +141,7 @@ export function buildServer(
     runtimeEventBus,
     runtimeCommandStore: runtimeCommands,
     publicBaseUrl: config.publicBaseUrl,
-    phoneNumbers: new PhoneNumberService(
-      new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
-      config.twilioPhoneNumber,
-      config.publicBaseUrl,
-    ),
+    phoneNumbers,
     attentionStore,
     notificationDeliveryStore: notificationDeliveries,
     surfaceDeviceStore: surfaceDevices,

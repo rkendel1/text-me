@@ -135,6 +135,7 @@ const PRODUCTION_REQUIREMENTS: Array<[keyof AppOptions, string]> = [
   ['authSessionStore', 'sign-in session store'],
   ['messagingProvider', 'SMS provider'],
   ['conversationModel', 'AI text model'],
+  ['realtimeVoice', 'realtime voice agent'],
   ['pushSender', 'push sender'],
   ['ownerAuthToken', 'OWNER_AUTH_TOKEN'],
   ['twilioAuthToken', 'TWILIO_AUTH_TOKEN'],
@@ -167,6 +168,11 @@ function registerIncomingCallRoute(
     try {
       const incomingCall = provider.parseIncomingCall(request.body);
       const conversation = await service.incomingCall(incomingCall);
+      // Callers dialed the owner's real number; their carrier forwarded the call here.
+      const forwardedFrom = typeof incomingCall.payload.ForwardedFrom === 'string' ? incomingCall.payload.ForwardedFrom : '';
+      if (forwardedFrom && !conversation.events.some((event) => event.type === 'call.forwarded')) {
+        await service.recordEvent(conversation.id, 'call.forwarded', { from: forwardedFrom });
+      }
       const settings = await configuration.get(conversation.ownerId ?? defaultOwnerId);
       if (!settings.calls.answerCalls) {
         // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
@@ -179,7 +185,7 @@ function registerIncomingCallRoute(
             action: `/webhooks/twilio/voicemail?conversationId=${encodeURIComponent(conversation.id)}`,
           });
         } else {
-          twiml.say(`${owner} can't take calls right now. Please send a text message to this number instead.`);
+          twiml.say(`${owner} can't take calls right now. Please send a text message instead.`);
         }
         twiml.hangup();
         await service.answerCall(conversation.id, incomingCall.payload);
@@ -1198,7 +1204,18 @@ export function createApp(options: AppOptions): express.Express {
         response.json({ available: false, phoneNumber: null, connected: false });
         return;
       }
-      response.json({ available: true, ...(await options.phoneNumbers.status()) });
+      const status = await options.phoneNumbers.status();
+      // Forwarding is proven by a real forwarded call, not assumed from a setting.
+      const forwarded = (await service.listConversations())
+        .flatMap((conversation) => conversation.events.filter((event) => event.type === 'call.forwarded'))
+        .map((event) => event.occurredAt.getTime())
+        .sort((left, right) => right - left);
+      response.json({
+        available: true,
+        ...status,
+        forwardingSeen: forwarded.length > 0,
+        lastForwardedAt: forwarded.length ? new Date(forwarded[0]).toISOString() : null,
+      });
     } catch (error) {
       next(new HttpError(502, 'Couldn’t reach your phone provider. Try again in a moment.'));
     }

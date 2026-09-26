@@ -301,6 +301,7 @@ test('connecting the number points it at this deployment without any provider co
   const numbers = new Map([['+15550000000', { sid: 'PN1', phoneNumber: '+15550000000', voiceUrl: 'https://old.example/voice', smsUrl: null as string | null, statusCallback: null as string | null }]]);
   const client = {
     find: async (phoneNumber: string) => numbers.get(phoneNumber) ?? null,
+    list: async () => [...numbers.values()],
     update: async (_sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }) => {
       const updated = { ...numbers.get('+15550000000')!, ...urls };
       numbers.set('+15550000000', updated);
@@ -311,7 +312,9 @@ test('connecting the number points it at this deployment without any provider co
     repository: new InMemoryConversationRepository(),
     phoneNumbers: new PhoneNumberService(client, '+15550000000', 'https://text-me.vercel.app'),
   });
-  assert.deepEqual((await request(app).get('/owner/phone')).body, { available: true, phoneNumber: '+15550000000', found: true, connected: false });
+  const before = (await request(app).get('/owner/phone')).body;
+  assert.deepEqual([before.available, before.phoneNumber, before.assistantLine, before.found, before.connected, before.forwardingSeen],
+    [true, '+15550000000', '+15550000000', true, false, false]);
   const connected = await request(app).post('/owner/phone/connect');
   assert.equal(connected.status, 200);
   assert.equal(numbers.get('+15550000000')!.voiceUrl, 'https://text-me.vercel.app/webhooks/twilio/voice');
