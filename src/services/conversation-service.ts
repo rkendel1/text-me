@@ -3,6 +3,7 @@ import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provider.js';
 import type { MessagingProvider } from '../messaging/provider.js';
+import type { OwnerChannel } from '../owner/channel.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 
 const allowedTransitions: Record<ConversationStatus, ConversationStatus[]> = {
@@ -24,6 +25,7 @@ export class ConversationService {
     private readonly messaging?: MessagingProvider,
     private readonly ownerPhone = process.env.OWNER_PHONE_NUMBER,
     private readonly ownerId = process.env.OWNER_ID ?? 'owner',
+    private readonly ownerChannel?: OwnerChannel,
   ) {}
 
   async incomingCall(input: IncomingCall): Promise<Conversation> {
@@ -93,9 +95,13 @@ export class ConversationService {
     const ownerKey = `conversation:${conversationId}:sms:owner-summary`;
     await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
       `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
-    if (!this.ownerPhone) throw new HttpError(409, 'Owner phone number is not configured');
-    await this.sendOnce(conversationId, ownerKey, this.ownerPhone,
-      `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`);
+    const ownerMessage = `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`;
+    if (this.ownerChannel) {
+      await this.sendOwnerMessage(conversationId, ownerKey, ownerMessage);
+    } else {
+      if (!this.ownerPhone) throw new HttpError(409, 'Owner phone number is not configured');
+      await this.sendOnce(conversationId, ownerKey, this.ownerPhone, ownerMessage);
+    }
 
     await this.repository.appendEvent(conversationId, 'conversation.channel_transitioned', {
       from: 'voice',
@@ -162,6 +168,39 @@ export class ConversationService {
     } catch (error) {
       await this.repository.appendEvent(conversationId, 'sms.invitation.failed', {
         to, idempotencyKey: key, error: error instanceof Error ? error.message : 'unknown',
+      }, new Date());
+      throw error;
+    }
+
+  }
+
+  private async sendOwnerMessage(
+    conversationId: string,
+    messageId: string,
+    body: string,
+  ): Promise<void> {
+    const conversation = await this.requireConversation(conversationId);
+    const channel = this.ownerChannel;
+    if (!channel) throw new Error('Owner channel is not configured');
+    if (conversation.events.some((event) =>
+      event.type === 'owner.delivery.requested' && event.payload.messageId === messageId)) return;
+    await this.repository.appendEvent(conversationId, 'owner.message.created', {
+      messageId, body, source: channel.type,
+    }, new Date());
+    try {
+      const delivery = await channel.sendMessage({
+        ownerId: this.ownerId,
+        conversationId,
+        messageId,
+        body,
+      });
+      await this.repository.appendEvent(conversationId, 'owner.delivery.requested', {
+        messageId, deliveryId: delivery.deliveryId, source: channel.type,
+      }, new Date());
+    } catch (error) {
+      await this.repository.appendEvent(conversationId, 'owner.delivery.failed', {
+        messageId, source: channel.type,
+        error: error instanceof Error ? error.message : 'unknown',
       }, new Date());
       throw error;
     }

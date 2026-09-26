@@ -16,6 +16,8 @@ import { FakeVoiceProvider } from './voice/fake-provider.js';
 import type { VoiceProvider } from './voice/provider.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
+import type { OwnerChannel } from './owner/channel.js';
+import { OwnerDeviceService } from './owner/device.js';
 import twilio from 'twilio';
 
 export interface AppOptions {
@@ -30,6 +32,8 @@ export interface AppOptions {
   twilioAuthToken?: string;
   ownerId?: string;
   ownerAuthToken?: string;
+  ownerChannel?: OwnerChannel;
+  ownerDeviceService?: OwnerDeviceService;
 }
 
 function createProviderMap(
@@ -84,7 +88,10 @@ export function createApp(options: AppOptions): express.Express {
   );
   const messaging = options.messagingProvider ?? new FakeMessagingProvider();
   const ownerId = options.ownerId ?? process.env.OWNER_ID ?? 'owner';
-  const service = new ConversationService(options.repository, messaging, options.ownerPhone, ownerId);
+  const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
+  const service = new ConversationService(
+    options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
+  );
   const engine = new ConversationEngine(
     options.repository,
     options.speechProvider ?? new FakeSpeechProvider(),
@@ -151,6 +158,60 @@ export function createApp(options: AppOptions): express.Express {
       registerStatusRoute(app, '/webhooks/fake/status', fake, service);
     }
   }
+
+  app.post('/owner/devices/pair', ownerAuth, async (request, response, next) => {
+    try {
+      const result = await ownerDevices.pair(
+        (request as Request & { ownerId?: string }).ownerId!,
+        typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
+      );
+      response.status(201).json({
+        ...result,
+        device: { ...result.device, createdAt: result.device.createdAt.toISOString() },
+        expiresAt: result.expiresAt.toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/devices/:id/activate', async (request, response, next) => {
+    try {
+      const code = typeof request.body?.pairingCode === 'string' ? request.body.pairingCode : '';
+      const result = await ownerDevices.activate(String(request.params.id), code);
+      response.json({
+        ...result,
+        device: {
+          ...result.device,
+          createdAt: result.device.createdAt.toISOString(),
+          lastSeenAt: result.device.lastSeenAt?.toISOString() ?? null,
+        },
+      });
+    } catch (error) {
+      next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
+    }
+  });
+
+  app.get('/owner/devices', ownerAuth, async (request, response, next) => {
+    try {
+      const devices = await ownerDevices.list((request as Request & { ownerId?: string }).ownerId!);
+      response.json(devices);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/devices/:id/revoke', ownerAuth, async (request, response, next) => {
+    try {
+      await ownerDevices.revoke(
+        (request as Request & { ownerId?: string }).ownerId!,
+        String(request.params.id),
+      );
+      response.status(204).send();
+    } catch (error) {
+      next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
+    }
+  });
 
   app.get('/conversations', ownerAuth, async (request, response, next) => {
     try {
