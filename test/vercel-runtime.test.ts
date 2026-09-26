@@ -173,7 +173,7 @@ test('runtime commands persist in Postgres and never regress from applied_live',
     provider: 'fake', providerCallId: `cmd-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: 'owner',
   });
   const id = `cmd_${Date.now()}`;
-  await store.record({ id, conversationId: conversation.id, ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
+  await store.record({ id, conversationId: conversation.id, runtimeId: 'rt_test', ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
   await store.update(id, { status: 'applied_live', appliedLiveAt: new Date() });
   await store.update(id, { status: 'applied', processedAt: new Date() });
   const [stored] = await store.list(conversation.id);
