@@ -158,8 +158,8 @@ function createProviderMap(
 
 function bearerToken(request: Request): string | undefined {
   const authorization = request.header('Authorization') ?? '';
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-  return match?.[1].trim() || undefined;
+  if (authorization.slice(0, 6).toLowerCase() !== 'bearer' || authorization[6]?.trim() !== '') return undefined;
+  return authorization.slice(7).trim() || undefined;
 }
 
 function registerIncomingCallRoute(
