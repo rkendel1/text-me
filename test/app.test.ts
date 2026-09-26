@@ -355,6 +355,31 @@ test('voice conversations bridge to one idempotent SMS conversation', async () =
   assert.equal(first.body.state, 'text_active');
 });
 
+test('sms consent and text conversion routes are available before any turn callbacks run', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const app = createApp({
+    repository,
+    messagingProvider: messaging,
+    ownerPhone: '+15555550000',
+  });
+
+  await request(app).post('/webhooks/fake/voice')
+    .send({ callId: 'bridge-routes', callerPhone: '+15555550123' });
+  const id = (await request(app).get('/conversations')).body[0].id;
+
+  const consent = await request(app)
+    .post(`/conversations/${id}/sms-consent`)
+    .send({ phoneNumber: '+15555550123', displayName: 'John' });
+  const bridge = await request(app).post(`/conversations/${id}/convert-to-text`);
+
+  assert.equal(consent.status, 200, JSON.stringify(consent.body));
+  assert.equal(bridge.status, 200, JSON.stringify(bridge.body));
+  assert.equal(bridge.body.id, id);
+  assert.equal(bridge.body.primaryChannel, 'sms');
+  assert.equal(messaging.sentMessages.length, 2);
+});
+
 test('text-active turns use messaging instead of voice', async () => {
   const repository = new InMemoryConversationRepository();
   const messaging = new FakeMessagingProvider();
@@ -383,6 +408,23 @@ test('text-active turns use messaging instead of voice', async () => {
 
   assert.equal(voice.outputs.length, 0);
   assert.equal(messaging.sentMessages.length, 3);
+});
+
+test('global device activation route works without priming the per-device activation route', async () => {
+  const repository = new InMemoryConversationRepository();
+  const app = createApp({ repository });
+
+  const pair = await request(app)
+    .post('/owner/devices/pair/qr')
+    .send({ name: 'Audit Mac' });
+  const activate = await request(app)
+    .post('/owner/devices/activate')
+    .send({ pairingCredential: pair.body.pairingUri });
+
+  assert.equal(pair.status, 201, JSON.stringify(pair.body));
+  assert.equal(activate.status, 200, JSON.stringify(activate.body));
+  assert.equal(activate.body.device.id, pair.body.deviceId);
+  assert.equal(typeof activate.body.sessionToken, 'string');
 });
 
 test('authenticated owner inbox authorizes and mediates web messages', async () => {

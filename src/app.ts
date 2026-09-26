@@ -219,17 +219,16 @@ export function createApp(options: AppOptions): express.Express {
           lastSeenAt: result.device.lastSeenAt?.toISOString() ?? null,
         },
       });
+    } catch (error) {
+      next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
+    }
+  });
 
-      app.post('/owner/devices/activate', async (request, response, next) => {
-        try {
-          const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
-          const result = await ownerDevices.activatePairing(credential);
-          response.json(result);
-        } catch (error) {
-          next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
-        }
-      });
-
+  app.post('/owner/devices/activate', async (request, response, next) => {
+    try {
+      const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
+      const result = await ownerDevices.activatePairing(credential);
+      response.json(result);
     } catch (error) {
       next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
     }
@@ -434,32 +433,32 @@ document.querySelector('#devicesButton').onclick=loadDevices;loadList();loadDevi
         callbackId,
         audio: request.body?.audio,
       });
+      response.json(presentConversation(conversation));
+    } catch (error) {
+      next(error);
+    }
+  });
 
-      app.post('/conversations/:id/convert-to-text', async (request, response, next) => {
-        try {
-          const conversation = await service.convertToTextConversation(request.params.id);
-          response.json(presentConversation(conversation));
-        } catch (error) {
-          next(error);
-        }
-      });
+  app.post('/conversations/:id/convert-to-text', async (request, response, next) => {
+    try {
+      const conversation = await service.convertToTextConversation(request.params.id);
+      response.json(presentConversation(conversation));
+    } catch (error) {
+      next(error);
+    }
+  });
 
-      app.post('/conversations/:id/sms-consent', async (request, response, next) => {
-        try {
-          const phone = request.body?.phoneNumber ?? request.body?.phone;
-          if (typeof phone !== 'string' || !phone.trim()) {
-            throw new HttpError(400, 'Missing required field: phoneNumber');
-          }
-          const conversation = await service.grantSmsConsent(
-            request.params.id,
-            phone,
-            typeof request.body?.displayName === 'string' ? request.body.displayName : undefined,
-          );
-          response.json(presentConversation(conversation));
-        } catch (error) {
-          next(error);
-        }
-      });
+  app.post('/conversations/:id/sms-consent', async (request, response, next) => {
+    try {
+      const phone = request.body?.phoneNumber ?? request.body?.phone;
+      if (typeof phone !== 'string' || !phone.trim()) {
+        throw new HttpError(400, 'Missing required field: phoneNumber');
+      }
+      const conversation = await service.grantSmsConsent(
+        request.params.id,
+        phone,
+        typeof request.body?.displayName === 'string' ? request.body.displayName : undefined,
+      );
       response.json(presentConversation(conversation));
     } catch (error) {
       next(error);
