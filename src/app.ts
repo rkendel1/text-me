@@ -94,6 +94,23 @@ export function createApp(options: AppOptions): express.Express {
   const ownerId = options.ownerId ?? process.env.OWNER_ID ?? 'owner';
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
   const ownerConfiguration = options.ownerConfigurationService ?? new OwnerConfigurationService();
+  const requestWindows = new Map<string, { startedAt: number; count: number }>();
+  const rateLimit = (request: Request, response: Response, next: NextFunction): void => {
+    const key = `${request.ip}:${request.path}`;
+    const now = Date.now();
+    const window = requestWindows.get(key);
+    if (!window || now - window.startedAt >= 60_000) {
+      requestWindows.set(key, { startedAt: now, count: 1 });
+      next();
+      return;
+    }
+    if (window.count >= 60) {
+      response.status(429).json({ error: 'Too many requests' });
+      return;
+    }
+    window.count += 1;
+    next();
+  };
   const service = new ConversationService(
     options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
   );
@@ -236,7 +253,7 @@ export function createApp(options: AppOptions): express.Express {
     return device;
   };
 
-  app.post('/owner/devices/:id/heartbeat', async (request, response, next) => {
+  app.post('/owner/devices/:id/heartbeat', rateLimit, async (request, response, next) => {
     try {
       await deviceAuth(request);
       if (!options.ownerMessagesAdapter?.checkCapabilities) throw new HttpError(501, 'Messages capability checks are unavailable');
@@ -249,7 +266,7 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/owner/devices/:id/messages/chats', async (request, response, next) => {
+  app.get('/owner/devices/:id/messages/chats', rateLimit, async (request, response, next) => {
     try {
       await deviceAuth(request);
       if (!options.ownerMessagesAdapter) throw new HttpError(501, 'Messages chat discovery is unavailable');
@@ -260,7 +277,7 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/owner/devices/:id/messages/chat', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/:id/messages/chat', rateLimit, ownerAuth, async (request, response, next) => {
     try {
       const service = request.body?.service;
       const chatId = request.body?.chatId;
@@ -290,7 +307,7 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/owner/devices/:id/configuration', async (request, response, next) => {
+  app.get('/owner/devices/:id/configuration', rateLimit, async (request, response, next) => {
     try {
       const device = await deviceAuth(request);
       response.json({ deviceId: device.id, ownerId: device.ownerId, configuration: ownerConfiguration.get(device.ownerId) });
