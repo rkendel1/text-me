@@ -6,6 +6,7 @@ import { toDataURL } from 'qrcode';
 import { HttpError } from './errors.js';
 import { presentConversation, presentConversationSummary } from './http/presenters.js';
 import type { Conversation } from './domain/conversation.js';
+import { openOwnerRequest } from './domain/owner-requests.js';
 import type { ConversationRepository } from './repositories/conversation-repository.js';
 import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
@@ -120,12 +121,15 @@ function registerStatusRoute(
   });
 }
 
-function presentRuntime(runtime: Awaited<ReturnType<RuntimeControlService['getRuntimeForConversation']>>) {
+function presentRuntime(
+  runtime: Awaited<ReturnType<RuntimeControlService['getRuntimeForConversation']>>,
+  conversation?: Conversation,
+) {
   // The spec's owner-facing vocabulary; `state` keeps the fine-grained activity.
   const status = runtime.state === 'stopped' ? 'ended'
     : runtime.state === 'paused' ? 'paused'
       : runtime.aiMode === 'owner_only' ? 'takeover'
-        : runtime.state === 'waiting_for_owner' ? 'owner_needed'
+        : runtime.state === 'waiting_for_owner' || (conversation && openOwnerRequest(conversation)) ? 'owner_needed'
           : runtime.state === 'text_active' ? 'text_active'
             : runtime.state === 'idle' || runtime.state === 'starting' ? 'idle' : 'active';
   return {
@@ -852,7 +856,7 @@ export function createApp(options: AppOptions): express.Express {
       }
       response.json(await Promise.all(conversations.map(async (conversation) => ({
         ...presentConversationSummary(conversation),
-        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
         voice: presentVoice(conversation),
       }))));
     } catch (error) {
@@ -871,7 +875,7 @@ export function createApp(options: AppOptions): express.Express {
       const refreshed = await service.getConversation(conversation.id);
       response.json({
         ...presentConversation(refreshed!),
-        runtime: presentRuntime(await runtime.getRuntimeForConversation(refreshed!)),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(refreshed!), refreshed!),
         voice: presentVoice(refreshed!),
       });
     } catch (error) {
@@ -903,7 +907,7 @@ export function createApp(options: AppOptions): express.Express {
       });
       response.json({
         ...presentConversation(conversation),
-        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
         voice: presentVoice(conversation),
       });
     } catch (error) {
@@ -938,7 +942,7 @@ export function createApp(options: AppOptions): express.Express {
       });
       response.json({
         ...presentConversation(conversation),
-        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
       });
     } catch (error) {
       next(error);
@@ -951,7 +955,7 @@ export function createApp(options: AppOptions): express.Express {
       await runtime.finalizeSmsTransition(conversation.id);
       response.json({
         ...presentConversation(conversation),
-        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
       });
     } catch (error) {
       next(error);

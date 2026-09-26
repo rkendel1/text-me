@@ -214,6 +214,39 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .empty-state h3 { margin: 0 0 6px; font-size: 22px; font-weight: 700; color: var(--label); letter-spacing: .35px; }
 .empty-state p { margin: 0; font-size: 15px; line-height: 20px; }
 
+/* ---------- Now ---------- */
+.section-title { font-size: 20px; font-weight: 700; letter-spacing: .38px; margin: 22px 20px 10px; display: flex; align-items: center; gap: 8px; }
+.section-title .count { font-size: 15px; font-weight: 600; color: var(--label-2); }
+.card { background: var(--bg-elevated); border-radius: 16px; margin: 0 16px 12px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.card-top { display: flex; align-items: center; gap: 12px; }
+.card-top .avatar { width: 40px; height: 40px; font-size: 16px; }
+.card-name { font-size: 20px; font-weight: 700; letter-spacing: .38px; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-reason { font-size: 15px; color: var(--label-2); margin-top: 1px; }
+.live-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; padding: 5px 9px; border-radius: 999px; color: var(--pill, var(--green)); background: color-mix(in srgb, var(--pill, var(--green)) 14%, transparent); white-space: nowrap; }
+.live-pill i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; }
+.quote { margin: 12px 0 0; font-size: 17px; line-height: 22px; }
+.quote::before { content: '“'; } .quote::after { content: '”'; }
+.card-status { margin-top: 10px; font-size: 15px; color: var(--label-2); display: flex; align-items: center; gap: 6px; }
+.card-status b { color: var(--label); font-weight: 600; }
+.btn { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 44px; border-radius: 12px; font-size: 17px; font-weight: 600; padding: 10px 14px; transition: transform .1s, opacity .15s; text-align: center; }
+.btn:active { transform: scale(.98); opacity: .8; }
+.btn.filled { background: var(--blue); color: #fff; }
+.btn.tinted { background: color-mix(in srgb, var(--blue) 14%, transparent); color: var(--blue); }
+.btn.gray { background: var(--fill-3); color: var(--label); }
+.btn.orange { background: var(--orange); color: #fff; }
+.btn:disabled { opacity: .4; }
+.btn-stack { display: grid; gap: 8px; margin-top: 14px; }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.needs .card-kicker { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--orange); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 10px; }
+.needs .card-kicker svg { width: 15px; height: 15px; }
+.needs .question { font-size: 17px; line-height: 22px; font-weight: 600; margin-top: 10px; }
+.hero { text-align: center; padding: 36px 32px 8px; }
+.hero .shield { width: 64px; height: 64px; border-radius: 50%; background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green); display: grid; place-items: center; margin: 0 auto 14px; }
+.hero .shield svg { width: 32px; height: 32px; }
+.hero h2 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: .36px; }
+.hero p { margin: 6px 0 0; color: var(--label-2); font-size: 17px; }
+.recent .row-sub { font-size: 15px; }
+
 /* ---------- Detail ---------- */
 .detail-page { z-index: 2; }
 .detail-head { flex: none; padding: 4px 16px 12px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
@@ -245,6 +278,18 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .qa.blue .circle { background: var(--blue); color: #fff; }
 .qa:disabled { opacity: .35; pointer-events: none; }
 
+.owner-card { width: 100%; max-width: 560px; background: color-mix(in srgb, var(--orange) 12%, var(--bg-elevated)); border-radius: 16px; padding: 14px 14px 12px; }
+.owner-card .card-kicker { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--orange); text-transform: uppercase; letter-spacing: .5px; }
+.owner-card .card-kicker svg { width: 14px; height: 14px; }
+.owner-card .question { font-size: 17px; line-height: 22px; font-weight: 600; margin: 6px 0 12px; }
+.owner-card .btn { min-height: 40px; font-size: 15px; }
+.strip { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 560px; }
+.strip .chips { flex: 1; display: flex; gap: 6px; flex-wrap: wrap; cursor: pointer; }
+.chip { font-size: 12px; font-weight: 600; padding: 5px 9px; border-radius: 999px; background: var(--fill-3); color: var(--label-2); white-space: nowrap; }
+.chip b { color: var(--label); font-weight: 600; }
+.chip.off b { color: var(--red); }
+.strip .adjust { color: var(--blue); font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 4px; padding: 6px 4px; }
+.strip .adjust svg { width: 18px; height: 18px; }
 .transcript { flex: 1; overflow-y: auto; padding: 8px 12px 16px; display: flex; flex-direction: column; gap: 2px; overscroll-behavior: contain; }
 .stamp { text-align: center; font-size: 11px; color: var(--label-2); margin: 14px 0 6px; font-weight: 500; letter-spacing: .06px; }
 .stamp b { font-weight: 600; }
@@ -286,6 +331,45 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .composer .send:disabled { opacity: .3; transform: scale(.9); }
 .composer-hint { flex: none; font-size: 12px; color: var(--label-2); text-align: center; padding: 6px 16px 0; background: var(--bar); }
 .composer-hint b { color: var(--label); font-weight: 600; }
+
+/* ---------- Radio (checkmark) lists ---------- */
+.choice .row-title { flex: 1; }
+.choice .row-sub { font-size: 13px; }
+.choice .mark { width: 20px; height: 20px; color: var(--blue); flex: none; visibility: hidden; }
+.choice.on .mark { visibility: visible; }
+.applies { display: flex; align-items: center; gap: 8px; margin: 18px 16px 0; padding: 12px 14px; border-radius: 12px; background: color-mix(in srgb, var(--blue) 10%, transparent); color: var(--blue); font-size: 15px; font-weight: 600; }
+.applies svg { width: 18px; height: 18px; flex: none; }
+
+/* ---------- Onboarding ---------- */
+.onboard { position: fixed; inset: 0; z-index: 85; background: var(--bg); overflow-y: auto; padding: calc(40px + var(--safe-top)) 24px calc(24px + var(--safe-bottom)); display: flex; flex-direction: column; align-items: center; }
+.onboard .inner { width: 100%; max-width: 420px; flex: 1; display: flex; flex-direction: column; }
+.onboard .app-icon { width: 84px; height: 84px; border-radius: 19px; margin: 12px auto 20px; box-shadow: 0 10px 30px rgba(0,122,255,.3); }
+.onboard h1 { font-size: 34px; font-weight: 700; letter-spacing: .37px; text-align: center; margin: 0; }
+.onboard .lede { text-align: center; color: var(--label-2); font-size: 17px; margin: 10px 0 26px; }
+.feature { display: flex; gap: 14px; align-items: flex-start; margin: 0 4px 18px; }
+.feature .tile { width: 36px; height: 36px; border-radius: 10px; }
+.feature .tile svg { width: 20px; height: 20px; }
+.feature b { display: block; font-size: 17px; }
+.feature span { color: var(--label-2); font-size: 15px; }
+.onboard .grow { flex: 1; min-height: 20px; }
+.hook { background: var(--bg-elevated); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+.hook .k { font-size: 13px; color: var(--label-2); }
+.hook .v { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
+.hook code { flex: 1; font: 13px/1.35 ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all; }
+.hook button { color: var(--blue); font-weight: 600; font-size: 15px; }
+.big-choice { text-align: left; background: var(--bg-elevated); border-radius: 14px; padding: 16px; margin-bottom: 12px; border: 2px solid transparent; width: 100%; }
+.big-choice b { font-size: 17px; display: block; }
+.big-choice span { color: var(--label-2); font-size: 15px; }
+.big-choice:active { border-color: var(--blue); }
+
+/* ---------- Banner ---------- */
+.banner { position: fixed; top: calc(8px + var(--safe-top)); left: 8px; right: 8px; max-width: 480px; margin: 0 auto; z-index: 81; transform: translateY(-160%); transition: transform .45s cubic-bezier(.32,.72,0,1);
+  background: var(--bar); backdrop-filter: saturate(180%) blur(30px); -webkit-backdrop-filter: saturate(180%) blur(30px); border-radius: 20px; padding: 12px 14px; display: flex; gap: 12px; align-items: center; box-shadow: 0 10px 40px rgba(0,0,0,.2); text-align: left; width: calc(100% - 16px); }
+.banner.show { transform: translateY(0); }
+.banner img { width: 38px; height: 38px; border-radius: 9px; }
+.banner b { display: block; font-size: 15px; }
+.banner span { font-size: 15px; color: var(--label); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.banner small { font-size: 13px; color: var(--label-2); margin-left: auto; align-self: flex-start; }
 
 /* ---------- Inspector ---------- */
 .inspector { display: none; }
@@ -370,6 +454,18 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   .tab[data-tab=live]:not(.pushed) .detail-page { visibility: hidden; transition: transform .5s cubic-bezier(.32,.72,0,1), visibility 0s .5s; }
   .tab[data-tab=live].dragging .list-page, .tab[data-tab=live].dragging .detail-page { transition: none; }
   .desktop-only { display: none !important; }
+  .detail-head { gap: 8px; padding-bottom: 8px; }
+  .island { padding: 9px 12px 9px 14px; border-radius: 22px; }
+  .quick { gap: 14px; }
+  .qa { width: 62px; font-size: 11px; gap: 4px; }
+  .qa .circle { width: 48px; height: 48px; }
+  .qa .circle svg { width: 21px; height: 21px; }
+  .strip .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .strip .chips::-webkit-scrollbar { display: none; }
+  .strip .adjust { display: none; }
+  .owner-card { padding: 12px; }
+  .owner-card .question { margin: 4px 0 10px; }
+  .owner-card .btn-stack { margin-top: 0; gap: 6px; }
 }
 
 /* ---------- iPad / Mac: split view ---------- */
@@ -382,6 +478,11 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   .list-page .group { margin: 0 8px; background: transparent; }
   .list-page .row { background: transparent; border-radius: 10px; }
   .list-page .convo + .convo::before { left: 76px; right: 12px; }
+  .list-page .card { margin-left: 12px; margin-right: 12px; background: var(--bg); }
+  .list-page .recent.group { margin: 0 12px; background: var(--bg); }
+  .list-page .recent .row { background: transparent; }
+  .list-page .recent .row.selected { background: var(--selection); color: #fff; }
+  .list-page .recent .row.selected .row-sub, .list-page .recent .row.selected .row-value { color: rgba(255,255,255,.8); }
   .list-page .search input { background: var(--fill-3); }
   .detail-page { flex: 1; min-width: 0; }
   .detail-page .navbar { background: var(--bar); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); box-shadow: 0 .5px 0 var(--separator); }
@@ -446,8 +547,7 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   <nav class="sidebar" aria-label="Sections">
     <div class="brand"><img src="/icon.svg" alt="">Text Me</div>
     <div class="section">Assistant</div>
-    <button class="item" data-go="live"><span data-icon="wave"></span>Live<span class="count" id="sideCount"></span></button>
-    <button class="item" data-go="devices"><span data-icon="laptop"></span>Devices</button>
+    <button class="item" data-go="live"><span data-icon="wave"></span>Now<span class="count" id="sideCount"></span></button>
     <button class="item" data-go="settings"><span data-icon="gear"></span>Settings</button>
     <div class="grow"></div>
     <div class="who-am-i"><span class="dot" id="connDot"></span><span id="connLabel">Connected</span></div>
@@ -459,26 +559,20 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
       <div class="page list-page" id="listPage">
         <header class="navbar" id="listNav">
           <div class="nav-left"></div>
-          <div class="nav-title">Live</div>
-          <div class="nav-right"><button class="nav-btn icon phone-only" id="refreshBtn" aria-label="Refresh"><span data-icon="refresh"></span></button></div>
+          <div class="nav-title">Now</div>
+          <div class="nav-right"></div>
         </header>
         <div class="scroll with-tabbar" id="listScroll">
-          <h1 class="large-title">Live</h1>
-          <div class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="Search" aria-label="Search conversations"></div>
-          <div class="segmented" role="tablist" id="filter">
-            <button class="on" data-filter="all" role="tab">All</button>
-            <button data-filter="needs" role="tab">Needs You</button>
-            <button data-filter="active" role="tab">On Call</button>
-          </div>
-          <div class="group" id="list" role="list"></div>
+          <h1 class="large-title">Now</h1>
+          <div id="list" role="list"></div>
         </div>
       </div>
 
       <div class="page detail-page" id="detailPage">
         <header class="navbar solid" id="detailNav">
-          <div class="nav-left"><button class="nav-btn back" id="backBtn"><span data-icon="chevronLeft"></span>Live</button></div>
+          <div class="nav-left"><button class="nav-btn back" id="backBtn"><span data-icon="chevronLeft"></span>Now</button></div>
           <div><div class="nav-title" id="detailTitle"></div><div class="nav-sub" id="detailSub"></div></div>
-          <div class="nav-right"><button class="nav-btn icon controls-btn" id="controlsBtn" aria-label="Assistant controls"><span data-icon="sliders"></span></button></div>
+          <div class="nav-right"><button class="nav-btn controls-btn" id="controlsBtn" style="font-weight:600">Adjust</button></div>
         </header>
         <div id="detailEmpty" class="empty-state desktop-only" style="margin:auto">
           <span data-icon="bubbles"></span>
@@ -492,7 +586,9 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
               <div class="island-text"><div class="island-title"><span id="islandTitle"></span><span class="timer" id="islandTimer"></span></div><div class="island-sub" id="islandSub"></div></div>
               <span class="pill" id="islandPill"></span>
             </div>
+            <div class="owner-card" id="ownerCard" hidden></div>
             <div class="quick" id="quick"></div>
+            <div class="strip" id="strip"></div>
           </div>
           <div class="transcript" id="transcript" aria-live="polite"></div>
           <div class="composer-hint" id="composerHint"></div>
@@ -504,20 +600,9 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
       </div>
 
       <aside class="inspector" id="inspector" aria-label="Assistant controls">
-        <header class="navbar solid"><div></div><div class="nav-title">Assistant</div><div></div></header>
+        <header class="navbar solid"><div></div><div class="nav-title">This Conversation</div><div></div></header>
         <div class="scroll" id="inspectorBody"></div>
       </aside>
-    </section>
-
-    <!-- Devices -->
-    <section class="tab" data-tab="devices">
-      <div class="page devices-page">
-        <header class="navbar" id="devicesNav"><div class="nav-left"></div><div class="nav-title">Devices</div><div class="nav-right"></div></header>
-        <div class="scroll with-tabbar" id="devicesScroll">
-          <h1 class="large-title">Devices</h1>
-          <div id="devicesBody"></div>
-        </div>
-      </div>
     </section>
 
     <!-- Settings -->
@@ -533,13 +618,14 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   </main>
 
   <nav class="tabbar" id="tabbar" aria-label="Tabs">
-    <button data-go="live" class="active"><span data-icon="wave"></span>Live<span class="badge" id="tabBadge" hidden></span></button>
-    <button data-go="devices"><span data-icon="laptop"></span>Devices</button>
+    <button data-go="live" class="active"><span data-icon="wave"></span>Now<span class="badge" id="tabBadge" hidden></span></button>
     <button data-go="settings"><span data-icon="gear"></span>Settings</button>
   </nav>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<button class="banner" id="banner" type="button" aria-live="assertive"></button>
+<div class="onboard" id="onboard" hidden></div>
 
 <script>
 'use strict';
@@ -572,6 +658,9 @@ const I = {
   mic: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="8.5" y="2.5" width="7" height="12" rx="3.5"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
   bolt: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13.5 2 4.8 13.1c-.4.5 0 1.2.6 1.2H11l-1 7.7 8.7-11.1c.4-.5 0-1.2-.6-1.2H12.5z"/></svg>',
   lock: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4.5" y="10.5" width="15" height="11" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.4 2.9 8.3 7 9.6 4.1-1.3 7-5.2 7-9.6V6z"/><path d="m9 12 2 2 4-4"/></svg>',
+  checkmark: '<svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" opacity=".18"/><circle cx="12" cy="7.6" r="1.4"/><rect x="10.8" y="10.4" width="2.4" height="7" rx="1.2"/></svg>',
   bell: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2.5a6 6 0 0 0-6 6v4.2L4.3 15.6c-.4.7.1 1.4.9 1.4h13.6c.8 0 1.3-.7.9-1.4L18 12.7V8.5a6 6 0 0 0-6-6zM9.5 18.5a2.5 2.5 0 0 0 5 0z"/></svg>',
 };
 document.querySelectorAll('[data-icon]').forEach((node) => { node.outerHTML = I[node.dataset.icon]; });
@@ -750,7 +839,6 @@ function go(tab) {
   state.tab = tab;
   document.querySelectorAll('.tab').forEach((node) => node.classList.toggle('active', node.dataset.tab === tab));
   document.querySelectorAll('[data-go]').forEach((node) => node.classList.toggle('active', node.dataset.go === tab));
-  if (tab === 'devices') loadDevices();
   if (tab === 'settings') loadSettings();
   updateTabbar();
 }
@@ -762,7 +850,6 @@ function bindLargeTitle(scroller, navbar) {
   scroller.addEventListener('scroll', update, { passive: true }); update();
 }
 bindLargeTitle($('#listScroll'), $('#listNav'));
-bindLargeTitle($('#devicesScroll'), $('#devicesNav'));
 bindLargeTitle($('#settingsScroll'), $('#settingsNav'));
 
 function pushDetail() { $('#liveTab').classList.add('pushed'); updateTabbar(); }
@@ -816,61 +903,129 @@ $('#signinForm').onsubmit = async (event) => {
   } finally { button.disabled = false; }
 };
 
-/* ---------------- Conversation list ---------------- */
-$('#filter').addEventListener('click', (event) => {
-  const button = event.target.closest('button'); if (!button) return;
-  haptic(); state.filter = button.dataset.filter;
-  $('#filter').querySelectorAll('button').forEach((node) => node.classList.toggle('on', node === button));
-  renderList();
-});
-$('#search').addEventListener('input', (event) => { state.search = event.target.value.trim().toLowerCase(); renderList(); });
-$('#refreshBtn').onclick = () => { haptic(); loadList().then(() => toast('Up to date')); };
+/* ---------------- Now ---------------- */
+const needsYou = (conversation) => Boolean(conversation.ownerRequest) || (conversation.runtime && conversation.runtime.status === 'owner_needed');
+const isActive = (conversation) => (conversation.voice && conversation.voice.live) ||
+  (conversation.runtime && ['active', 'takeover', 'paused', 'owner_needed'].includes(conversation.runtime.status) && conversation.status !== 'completed');
+const firstName = (conversation) => (callerName(conversation) || '').split(' ')[0] || displayName(conversation);
 
-const needsYou = (conversation) => (conversation.runtime && conversation.runtime.state === 'waiting_for_owner') || conversation.needsOwner;
-const isOnCall = (conversation) => (conversation.voice && conversation.voice.live) || (conversation.status !== 'completed' && conversation.primaryChannel === 'voice' && conversation.runtime && stateMeta(conversation.runtime.state).live);
+function handlingText(conversation) {
+  const runtime = conversation.runtime || {};
+  if (runtime.status === 'takeover') return '<b>You’re in control</b>';
+  if (runtime.status === 'paused') return '<b>Paused</b> — the assistant is holding';
+  if (needsYou(conversation)) return '<b>Waiting for you</b>';
+  if (runtime.status === 'text_active') return 'Assistant is texting';
+  return 'Assistant is handling it';
+}
+function recentSubtitle(conversation) {
+  const runtime = conversation.runtime || {};
+  if (runtime.status === 'text_active' || conversation.state === 'text_active') return 'Text conversation';
+  if (conversation.status === 'completed' || runtime.status === 'ended') {
+    return conversation.participant && conversation.participant.reason ? `Handled · ${conversation.participant.reason}` : 'Assistant handled call';
+  }
+  return conversation.preview || 'Conversation';
+}
 
 async function loadList() {
   try {
+    const previous = new Map(state.conversations.map((conversation) => [conversation.id, conversation.ownerRequest && conversation.ownerRequest.requestId]));
     state.conversations = await api('/conversations');
+    if (state.loadedOnce) {
+      for (const conversation of state.conversations) {
+        const request = conversation.ownerRequest;
+        if (request && previous.get(conversation.id) !== request.requestId) notifyNeeded(conversation);
+      }
+    }
+    state.loadedOnce = true;
     renderList();
   } catch (error) { if (error.status !== 401) console.warn(error); }
 }
 
+function quickRepliesHTML(conversation, request) {
+  const replies = (request.suggestedReplies || []).slice(0, 2);
+  return `<div class="btn-stack">
+    ${replies.map((reply) => `<button class="btn filled" data-reply="${esc(reply)}" data-id="${esc(conversation.id)}">${esc(reply)}</button>`).join('')}
+    <div class="btn-row"><button class="btn tinted" data-else="${esc(conversation.id)}">Reply…</button><button class="btn gray" data-takeover="${esc(conversation.id)}">Take Over</button></div>
+  </div>`;
+}
+
 function renderList() {
   const listNode = $('#list');
-  let items = state.conversations.slice().sort((left, right) => new Date(right.updatedAt || right.startedAt) - new Date(left.updatedAt || left.startedAt));
-  const waiting = items.filter(needsYou).length;
-  $('#tabBadge').hidden = !waiting; $('#tabBadge').textContent = waiting;
-  $('#sideCount').textContent = items.length || '';
-  if (state.filter === 'needs') items = items.filter(needsYou);
-  if (state.filter === 'active') items = items.filter(isOnCall);
-  if (state.search) items = items.filter((conversation) => `${displayName(conversation)} ${conversation.caller} ${conversation.preview || ''}`.toLowerCase().includes(state.search));
-  if (!items.length) {
-    const copy = state.search ? ['No Results', `Nothing matches “${esc(state.search)}”.`]
-      : state.filter === 'needs' ? ['All Caught Up', 'Nothing needs your attention right now.']
-      : state.filter === 'active' ? ['No Live Calls', 'Calls your assistant is on will show up here.']
-      : ['No Conversations Yet', 'When someone calls, your assistant answers and the conversation appears here live.'];
-    listNode.innerHTML = `<div class="empty-state">${state.filter === 'needs' ? I.check : I.phone}<h3>${copy[0]}</h3><p>${copy[1]}</p></div>`;
-    listNode.style.background = 'transparent';
-    return;
+  const items = state.conversations.slice().sort((left, right) => new Date(right.updatedAt || right.startedAt) - new Date(left.updatedAt || left.startedAt));
+  const waiting = items.filter(needsYou);
+  const active = items.filter((conversation) => !needsYou(conversation) && isActive(conversation));
+  const recent = items.filter((conversation) => !needsYou(conversation) && !isActive(conversation));
+  $('#tabBadge').hidden = !waiting.length; $('#tabBadge').textContent = waiting.length;
+  $('#sideCount').textContent = waiting.length || '';
+  document.title = waiting.length ? `(${waiting.length}) Text Me` : 'Text Me';
+
+  let html = '';
+  for (const conversation of waiting) {
+    const request = conversation.ownerRequest || { question: conversation.lastCallerMessage || 'The caller is waiting for you.', suggestedReplies: [] };
+    html += `<div class="card needs" data-open="${esc(conversation.id)}">
+      <div class="card-kicker">${I.bell} Owner Needed</div>
+      <div class="card-top">${avatarHTML(callerName(conversation))}<div style="flex:1;min-width:0"><div class="card-name">${esc(displayName(conversation))}</div>
+        ${conversation.participant && conversation.participant.reason ? `<div class="card-reason">${esc(conversation.participant.reason)}</div>` : ''}</div>
+        ${isActive(conversation) && conversation.voice && conversation.voice.live ? '<span class="live-pill"><i></i>Live</span>' : ''}</div>
+      <div class="question">${esc(request.question)}</div>
+      ${quickRepliesHTML(conversation, request)}
+    </div>`;
   }
-  listNode.style.background = '';
-  listNode.innerHTML = items.map((conversation) => {
-    const runtime = conversation.runtime || {};
-    const meta = conversation.status === 'completed' && !['text_active', 'transferring'].includes(runtime.state) ? stateMeta('stopped') : stateMeta(runtime.state);
-    const status = needsYou(conversation) ? stateMeta('waiting_for_owner') : meta;
-    const selected = state.selectedId === conversation.id && !isPhone();
-    const onCall = isOnCall(conversation);
-    return `<button class="row convo${selected ? ' selected' : ''}" role="listitem" data-id="${esc(conversation.id)}" aria-label="${esc(displayName(conversation))}">
-      <span class="unread-dot">${conversation.unread ? '<i></i>' : ''}</span>
-      ${avatarHTML(callerName(conversation))}
-      <span class="row-body">
-        <span class="convo-top"><span class="name">${esc(displayName(conversation))}</span><span class="time">${esc(relTime(conversation.updatedAt || conversation.startedAt))}${I.chevronRight}</span></span>
-        <span class="status-line" style="color:${status.color}"><span class="dot${status.live || onCall ? ' pulse' : ''}"></span>${esc(onCall && !needsYou(conversation) ? `On Call · ${status.label}` : status.label)}</span>
-        <span class="preview">${esc(conversation.preview || (onCall ? 'Your assistant is on the line…' : 'No messages yet'))}</span>
-      </span></button>`;
-  }).join('');
-  listNode.querySelectorAll('.convo').forEach((node) => node.onclick = () => { haptic(); openConversation(node.dataset.id); });
+  for (const conversation of active) {
+    const live = conversation.voice && conversation.voice.live;
+    const paused = conversation.runtime && conversation.runtime.status === 'paused';
+    html += `<div class="card" data-open="${esc(conversation.id)}">
+      <div class="card-top">${avatarHTML(callerName(conversation))}<div style="flex:1;min-width:0"><div class="card-name">${esc(displayName(conversation))}</div>
+        <div class="card-reason">${esc(conversation.participant && conversation.participant.reason ? `Calling about ${conversation.participant.reason.toLowerCase()}` : live ? 'On the phone now' : 'Active conversation')}</div></div>
+        <span class="live-pill" style="--pill:${paused ? 'var(--orange)' : 'var(--green)'}"><i></i>${paused ? 'Paused' : live ? 'Live' : 'Active'}</span></div>
+      ${conversation.lastCallerMessage ? `<p class="quote">${esc(conversation.lastCallerMessage)}</p>` : ''}
+      <div class="card-status">${handlingText(conversation)}</div>
+      <div class="btn-stack"><button class="btn tinted" data-open-btn="${esc(conversation.id)}">Open Conversation</button></div>
+    </div>`;
+  }
+  if (!waiting.length && !active.length) {
+    html += `<div class="hero"><div class="shield">${I.shield}</div><h2>You’re covered.</h2><p>${state.conversations.length ? 'Nothing needs you. Your assistant is handling your calls.' : 'Your assistant will answer your calls. They’ll show up here.'}</p></div>`;
+  }
+  if (recent.length) {
+    html += `<div class="section-title">Recent</div><div class="group recent">${recent.map((conversation) => `
+      <button class="row${state.selectedId === conversation.id && !isPhone() ? ' selected' : ''}" style="--inset:68px" data-open="${esc(conversation.id)}">
+        ${avatarHTML(callerName(conversation)).replace('class="avatar"', 'class="avatar" style="width:40px;height:40px;font-size:16px"')}
+        <span class="row-body"><span class="row-title" style="font-weight:600">${esc(displayName(conversation))}</span><div class="row-sub">${esc(recentSubtitle(conversation))}</div></span>
+        <span class="row-value" style="font-size:15px">${esc(relTime(conversation.updatedAt || conversation.startedAt))}</span>${I.chevronRight}</button>`).join('')}</div>`;
+  }
+  listNode.innerHTML = html;
+  listNode.querySelectorAll('[data-open]').forEach((node) => node.addEventListener('click', (event) => {
+    if (event.target.closest('button[data-reply],button[data-else],button[data-takeover]')) return;
+    haptic(); openConversation(node.dataset.open);
+  }));
+  listNode.querySelectorAll('[data-reply]').forEach((button) => button.onclick = () => answerOwner(button.dataset.id, button.dataset.reply, button));
+  listNode.querySelectorAll('[data-else]').forEach((button) => button.onclick = async () => { await openConversation(button.dataset.else); $('#composerInput').focus(); });
+  listNode.querySelectorAll('[data-takeover]').forEach((button) => button.onclick = async () => { await openConversation(button.dataset.takeover); onQuick('takeover'); });
+}
+
+/** One-tap answer to the assistant's question. */
+async function answerOwner(conversationId, text, button) {
+  haptic();
+  if (button) { button.disabled = true; button.textContent = 'Sending…'; }
+  try {
+    const key = `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const detail = await api(`/conversations/${encodeURIComponent(conversationId)}/messages`, { method: 'POST', body: { body: text, idempotencyKey: key } });
+    const name = firstName(detail);
+    toast(detail.voice && detail.voice.live ? `Telling ${name} now` : `Sent to ${name}`, 'check');
+    if (state.selectedId === conversationId) { state.detail = { ...state.detail, ...detail }; renderDetail(); }
+    loadList();
+  } catch (error) { errorToast(error); if (button) { button.disabled = false; button.textContent = text; } }
+}
+
+let bannerTimer;
+function notifyNeeded(conversation) {
+  const banner = $('#banner');
+  const question = conversation.ownerRequest ? conversation.ownerRequest.question : 'Needs your answer';
+  banner.innerHTML = `<img src="/icon.svg" alt=""><div style="flex:1;min-width:0"><b>${esc(displayName(conversation))} needs you</b><span>${esc(question)}</span></div><small>now</small>`;
+  banner.onclick = () => { banner.classList.remove('show'); openConversation(conversation.id); };
+  banner.classList.add('show');
+  clearTimeout(bannerTimer); bannerTimer = setTimeout(() => banner.classList.remove('show'), 6000);
+  try { if (document.hidden && 'Notification' in window && Notification.permission === 'granted') new Notification(`${displayName(conversation)} needs you`, { body: question, icon: '/icon.svg' }); } catch {}
 }
 
 /* ---------------- Conversation detail ---------------- */
@@ -916,7 +1071,9 @@ function renderDetail() {
   $('#detailTitle').textContent = name;
   $('#detailSub').textContent = callerName(detail) ? formatPhone(detail.caller) : '';
   renderIsland(detail);
+  renderOwnerCard(detail);
   renderQuick(detail);
+  renderStrip(detail);
   renderTranscript(detail);
   renderComposer(detail);
   renderInspector();
@@ -926,14 +1083,15 @@ function renderIsland(detail) {
   const runtime = detail.runtime || {};
   const live = detail.voice && detail.voice.live;
   const ended = detail.status === 'completed' && !['text_active', 'transferring'].includes(runtime.state);
-  const meta = ended ? stateMeta('stopped') : stateMeta(runtime.state);
+  const meta = ended ? stateMeta('stopped') : detail.ownerRequest ? stateMeta('waiting_for_owner') : stateMeta(runtime.state);
   const island = $('#island');
   island.style.setProperty('--island-color', meta.color);
   island.classList.toggle('animate', meta.live && runtime.state !== 'waiting_for_owner');
-  const mode = runtime.aiMode === 'owner_only' ? 'You’re in control' : runtime.aiMode === 'owner_assist' ? 'Assistant needs approval' : 'Assistant handling';
+  const mode = runtime.aiMode === 'owner_only' ? 'You’re in control' : runtime.aiMode === 'owner_assist' ? 'Asking you before decisions' : 'Assistant is handling it';
   $('#islandTitle').textContent = ended ? (runtime.state === 'text_active' ? 'Texting' : 'Call Ended')
     : runtime.state === 'text_active' ? 'Texting' : live ? 'On Call' : detail.primaryChannel === 'voice' ? 'Voice' : 'Conversation';
-  $('#islandSub').textContent = runtime.currentActivity ? `${runtime.currentActivity} · ${mode}` : mode;
+  $('#islandSub').textContent = detail.ownerRequest ? 'Waiting for your answer · caller is on hold with the assistant'
+    : runtime.currentActivity ? `${runtime.currentActivity} · ${mode}` : mode;
   $('#islandPill').textContent = meta.label;
   tickTimer();
 }
@@ -945,6 +1103,41 @@ function tickTimer() {
   timer.textContent = showTimer ? duration(end - new Date(detail.startedAt)) : '';
 }
 setInterval(tickTimer, 1000);
+
+function renderOwnerCard(detail) {
+  const node = $('#ownerCard'); const request = detail.ownerRequest;
+  node.hidden = !request;
+  if (!request) return;
+  node.innerHTML = `<div class="card-kicker">${I.bell} Owner Needed</div><div class="question">${esc(request.question)}</div>${quickRepliesHTML(detail, request)}`;
+  node.querySelectorAll('[data-reply]').forEach((button) => button.onclick = () => answerOwner(detail.id, button.dataset.reply, button));
+  node.querySelector('[data-else]').onclick = () => { $('#composerInput').focus(); };
+  node.querySelector('[data-takeover]').onclick = () => onQuick('takeover');
+}
+
+const HANDLING = [
+  { id: 'everything', title: 'Handle everything', sub: 'The assistant decides and only asks when it must.', patch: { aiMode: 'automatic', askOwnerWhen: 'never', allowCommitments: true } },
+  { id: 'unsure', title: 'Ask me when unsure', sub: 'Keeps talking, checks with you when it isn’t sure.', patch: { aiMode: 'owner_assist', askOwnerWhen: 'uncertain', allowCommitments: true } },
+  { id: 'commitments', title: 'Ask me before making commitments', sub: 'Nothing gets promised without your OK.', patch: { aiMode: 'owner_assist', askOwnerWhen: 'important', allowCommitments: false } },
+  { id: 'takeover', title: 'Let me take over', sub: 'The assistant stops answering; it relays your replies.' },
+];
+function currentHandling(runtime) {
+  if (runtime.aiMode === 'owner_only') return 'takeover';
+  if (runtime.aiMode === 'owner_assist') return runtime.allowCommitments === false ? 'commitments' : 'unsure';
+  return 'everything';
+}
+const MODE_LABEL = { everything: 'Automatic', unsure: 'Ask me', commitments: 'Ask before commitments', takeover: 'You' };
+
+function renderStrip(detail) {
+  const runtime = detail.runtime || {};
+  const onOff = (value) => (value ? 'On' : 'Off');
+  $('#strip').innerHTML = `<div class="chips">
+      <span class="chip${runtime.voiceEnabled ? '' : ' off'}">Voice <b>${onOff(runtime.voiceEnabled)}</b></span>
+      <span class="chip${runtime.transcriptionEnabled ? '' : ' off'}">Transcribe <b>${onOff(runtime.transcriptionEnabled)}</b></span>
+      <span class="chip">AI <b>${esc(MODE_LABEL[currentHandling(runtime)])}</b></span></div>
+    <button class="adjust" id="adjustInline" aria-label="Adjust this conversation">${I.sliders}Adjust</button>`;
+  $('#adjustInline').onclick = openAdjust;
+  $('#strip .chips').onclick = openAdjust;
+}
 
 function renderQuick(detail) {
   const runtime = detail.runtime || {};
@@ -1016,6 +1209,7 @@ function transcriptItems(detail) {
   for (const event of detail.eventLog || []) {
     if (systemLabels[event.type]) items.push({ kind: 'system', at: event.occurredAt, icon: systemLabels[event.type][0], text: systemLabels[event.type][1] + (event.type === 'call.ended' && detail.durationSeconds ? ` · ${duration(detail.durationSeconds * 1000)}` : '') });
     if (event.type === 'owner.attention.requested') items.push({ kind: 'attention', at: event.occurredAt, text: event.payload.question });
+    if (event.type === 'assistant.activity' && event.payload.tool !== 'ask_owner') items.push({ kind: 'system', at: event.occurredAt, icon: 'sparkles', text: event.payload.summary });
     if (event.type === 'voice.started' && event.payload && event.payload.source === 'realtime') items.push({ kind: 'system', at: event.occurredAt, icon: 'sparkles', text: 'Assistant answered' });
     if (event.type === 'voice.completed' && event.payload && event.payload.outcome === 'failed') items.push({ kind: 'system', at: event.occurredAt, icon: 'exclamation', text: 'Assistant couldn’t connect — caller was asked to text' });
   }
@@ -1032,7 +1226,7 @@ function renderTranscript(detail) {
     if (!lastAt || at - lastAt > 15 * 60 * 1000) { html += `<div class="stamp">${stampText(item.at)}</div>`; lastRole = null; }
     lastAt = at;
     if (item.kind === 'system') { html += `<div class="sys">${I[item.icon]}${esc(item.text)}</div>`; lastRole = null; return; }
-    if (item.kind === 'attention') { html += `<div class="attention"><span class="tile" style="background:var(--orange)">${I.bell}</span><div><b>Assistant is asking you</b>${esc(item.text)}</div></div>`; lastRole = null; return; }
+    if (item.kind === 'attention') { html += `<div class="attention"><span class="tile" style="background:var(--orange)">${I.bell}</span><div><b>Assistant asked you</b>${esc(item.text)}</div></div>`; lastRole = null; return; }
     const message = item.message;
     const next = items[index + 1];
     const tail = !next || next.kind !== 'message' || next.message.role !== message.role;
@@ -1061,7 +1255,7 @@ function renderComposer(detail) {
   const textable = canText(detail);
   const name = callerName(detail) || 'the caller';
   let enabled = true;
-  if (live) { input.placeholder = `Speak to ${name}…`; hint.innerHTML = `${I.mic.replace('<svg', '<svg style="display:inline;width:11px;height:11px;vertical-align:-1px"')} The assistant will <b>say your words</b> on the call`; }
+  if (live) { input.placeholder = `Reply to ${name}…`; hint.innerHTML = `${I.mic.replace('<svg', '<svg style="display:inline;width:11px;height:11px;vertical-align:-1px"')} Your assistant will <b>tell ${esc(name)}</b> on the call`; }
   else if (textable) { input.placeholder = `Tell your assistant what to text ${name}…`; hint.innerHTML = `Your assistant will <b>text ${esc(name)}</b> on your behalf`; }
   else { enabled = false; input.placeholder = 'Texting isn’t available yet'; hint.innerHTML = `Tap <b>Text</b> to ask ${esc(name)} to continue by message`; }
   hint.hidden = !hint.innerHTML;
@@ -1091,7 +1285,7 @@ $('#composer').onsubmit = async (event) => {
   } finally { state.sending = false; updateSend(); }
 };
 
-/* ---------------- Assistant controls (sheet / inspector) ---------------- */
+/* ---------------- Adjust (this conversation only) ---------------- */
 function switchHTML(field, checked, disabled) {
   return `<span class="switch"><input type="checkbox" role="switch" data-field="${field}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="track"></span><span class="knob"></span></span>`;
 }
@@ -1101,79 +1295,83 @@ function segHTML(field, value, options) {
 function tileRow(icon, color, title, control, sub) {
   return `<div class="row" style="--inset:57px"><span class="tile" style="background:${color}">${I[icon]}</span><span class="row-body"><span class="row-title">${esc(title)}</span>${sub ? `<div class="row-sub" style="font-size:13px">${esc(sub)}</div>` : ''}</span>${control}</div>`;
 }
-
-function controlsHTML() {
-  const runtime = state.detail && state.detail.runtime;
-  if (!runtime) return '<div class="empty-state">Select a conversation.</div>';
-  const voice = state.detail.voice || {};
-  return `
-    <div class="group-header">Live Call</div>
-    <div class="group">
-      ${tileRow('sparkles', 'var(--indigo)', 'Assistant Active', switchHTML('assistantEnabled', runtime.assistantEnabled))}
-      ${tileRow('wave', 'var(--green)', 'Voice Replies', switchHTML('voiceEnabled', runtime.voiceEnabled), 'Speak answers on the call')}
-      ${tileRow('mic', 'var(--orange)', 'Live Transcript', switchHTML('transcriptionEnabled', runtime.transcriptionEnabled))}
-      ${tileRow('message', 'var(--teal)', 'Offer Texting', switchHTML('smsTransitionEnabled', runtime.smsTransitionEnabled))}
-    </div>
-    <div class="group-footer">${voice.realtime ? `Realtime voice via AI Gateway · ${esc(voice.model || '')}` : 'Changes apply to this conversation immediately.'}</div>
-
-    <div class="group-header">Who Responds</div>
-    <div class="group"><div class="row-stack">${segHTML('aiMode', runtime.aiMode, [['automatic', 'Assistant'], ['owner_assist', 'Ask First'], ['owner_only', 'Only Me']])}</div></div>
-
-    <div class="group-header">Style</div>
-    <div class="group">
-      <div class="row-stack"><div class="row-title">Tone</div>${segHTML('responseStyle', runtime.responseStyle, [['concise', 'Concise'], ['friendly', 'Friendly'], ['professional', 'Formal']])}</div>
-      <div class="row-stack" style="position:relative"><div class="row-title">Length</div>${segHTML('verbosity', runtime.verbosity, [['short', 'Short'], ['normal', 'Normal'], ['detailed', 'Detailed']])}</div>
-    </div>
-
-    <div class="group-header">Ask Me</div>
-    <div class="group"><div class="row-stack">${segHTML('askOwnerWhen', runtime.askOwnerWhen, [['never', 'Never'], ['uncertain', 'Unsure'], ['important', 'Important'], ['always', 'Always']])}</div></div>
-    <div class="group-footer">When the assistant should check with you before answering.</div>
-
-    <div class="group-header">Permissions</div>
-    <div class="group">
-      ${tileRow('check', 'var(--green)', 'Make Commitments', switchHTML('allowCommitments', runtime.allowCommitments))}
-      ${tileRow('bolt', 'var(--orange)', 'Schedule Things', switchHTML('allowScheduling', runtime.allowScheduling))}
-      ${tileRow('bell', 'var(--red)', 'Promise Follow-ups', switchHTML('allowCallerFollowups', runtime.allowCallerFollowups))}
-    </div>
-
-    <div class="group-header">Instructions for This Call</div>
-    <div class="group"><div class="row-stack"><textarea data-instructions placeholder="e.g. Jordan is a VIP — offer Thursday afternoon.">${esc(runtime.customInstructions || '')}</textarea></div></div>
-    <div class="group-footer" style="display:flex;justify-content:space-between;align-items:center"><span>Revision ${esc(runtime.revision)}</span><button class="nav-btn" data-save-instructions style="height:32px;font-weight:600">Apply</button></div>
-  `;
+function choiceRows(name, current, options) {
+  return options.map((option) => `<button class="row choice${current === option.id ? ' on' : ''}" data-choice="${name}" data-value="${option.id}">
+    <span class="row-body"><span class="row-title">${esc(option.title)}</span>${option.sub ? `<div class="row-sub">${esc(option.sub)}</div>` : ''}</span>${I.checkmark}</button>`).join('');
 }
 
-function bindControls(root) {
+function adjustHTML() {
+  const detail = state.detail; const runtime = detail && detail.runtime;
+  if (!runtime) return '<div class="empty-state">Select a conversation.</div>';
+  const name = firstName(detail);
+  return `
+    <div class="group-header">How should I handle this?</div>
+    <div class="group">${choiceRows('handling', currentHandling(runtime), HANDLING)}</div>
+
+    <div class="group-header">Response style</div>
+    <div class="group">${choiceRows('verbosity', runtime.verbosity, [{ id: 'short', title: 'Concise' }, { id: 'normal', title: 'Normal' }, { id: 'detailed', title: 'Detailed' }])}</div>
+
+    <div class="group-header">Call</div>
+    <div class="group">
+      ${tileRow('wave', 'var(--green)', 'Voice', switchHTML('voiceEnabled', runtime.voiceEnabled), 'The assistant speaks on the call')}
+      ${tileRow('mic', 'var(--orange)', 'Transcription', switchHTML('transcriptionEnabled', runtime.transcriptionEnabled), 'You see what the caller says')}
+      ${tileRow('message', 'var(--teal)', 'Offer to text', switchHTML('smsTransitionEnabled', runtime.smsTransitionEnabled))}
+    </div>
+
+    <div class="group-header">Anything I should know?</div>
+    <div class="group"><div class="row-stack"><textarea data-instructions placeholder="e.g. ${esc(name)} is a VIP — Thursday afternoon is fine.">${esc(runtime.customInstructions || '')}</textarea></div></div>
+    <div class="group-footer" style="text-align:right"><button class="nav-btn" data-save-instructions style="height:32px;font-weight:600;margin-left:auto">Apply</button></div>
+
+    <div class="applies">${I.info}These changes apply only to ${esc(name)}.</div>
+    <div class="group-footer" style="margin-bottom:12px">Your usual defaults stay the same — change them in Settings.</div>`;
+}
+
+function bindAdjust(root) {
+  root.querySelectorAll('[data-choice]').forEach((row) => row.onclick = async () => {
+    if (row.classList.contains('on')) return;
+    haptic();
+    root.querySelectorAll(`[data-choice="${row.dataset.choice}"]`).forEach((node) => node.classList.toggle('on', node === row));
+    try {
+      if (row.dataset.choice === 'handling') {
+        const option = HANDLING.find((candidate) => candidate.id === row.dataset.value);
+        if (option.id === 'takeover') await runtimeCall('/runtime/takeover', { method: 'POST' });
+        else await runtimeCall('/runtime', { method: 'PATCH', body: option.patch });
+        toast(option.id === 'takeover' ? 'You’re in control' : `Now: ${option.title.toLowerCase()}`, option.id === 'takeover' ? 'person' : 'check', 'var(--blue)');
+      } else {
+        await runtimeCall('/runtime', { method: 'PATCH', body: { verbosity: row.dataset.value } });
+      }
+    } catch { /* runtimeCall already explained it */ }
+  });
   root.querySelectorAll('input[data-field]').forEach((input) => input.onchange = async () => {
     haptic();
-    try { await runtimeCall('/runtime', { method: 'PATCH', body: { [input.dataset.field]: input.checked } }); }
-    catch { input.checked = !input.checked; }
-  });
-  root.querySelectorAll('[data-seg]').forEach((seg) => seg.onclick = async (event) => {
-    const button = event.target.closest('button'); if (!button || button.classList.contains('on')) return;
-    haptic();
-    seg.querySelectorAll('button').forEach((node) => node.classList.toggle('on', node === button));
-    await runtimeCall('/runtime', { method: 'PATCH', body: { [seg.dataset.seg]: button.dataset.value } }).catch(() => {});
+    try {
+      await runtimeCall('/runtime', { method: 'PATCH', body: { [input.dataset.field]: input.checked } });
+      const label = { voiceEnabled: 'Voice', transcriptionEnabled: 'Transcription', smsTransitionEnabled: 'Offer to text' }[input.dataset.field];
+      toast(`${label} ${input.checked ? 'on' : 'off'}`, input.checked ? 'check' : 'xmark', input.checked ? 'var(--green)' : 'var(--gray)');
+    } catch { input.checked = !input.checked; }
   });
   const save = root.querySelector('[data-save-instructions]');
   if (save) save.onclick = async () => {
     const text = root.querySelector('[data-instructions]').value.trim();
-    await runtimeCall('/runtime', { method: 'PATCH', body: { customInstructions: text } }).then(() => toast('Instructions applied')).catch(() => {});
+    await runtimeCall('/runtime', { method: 'PATCH', body: { customInstructions: text } }).then(() => toast('Got it')).catch(() => {});
   };
 }
 
 let controlsSheet = null;
 function renderInspector() {
   const inspector = $('#inspectorBody');
-  if (getComputedStyle($('#inspector')).display !== 'none' && !inspector.contains(document.activeElement)) { inspector.innerHTML = controlsHTML(); bindControls(inspector); }
-  if (controlsSheet && !controlsSheet.body.contains(document.activeElement)) { controlsSheet.body.innerHTML = controlsHTML(); bindControls(controlsSheet.body); }
+  if (getComputedStyle($('#inspector')).display !== 'none' && !inspector.contains(document.activeElement)) { inspector.innerHTML = adjustHTML(); bindAdjust(inspector); }
+  if (controlsSheet && !controlsSheet.body.contains(document.activeElement)) { controlsSheet.body.innerHTML = adjustHTML(); bindAdjust(controlsSheet.body); }
 }
-$('#controlsBtn').onclick = () => {
+function openAdjust() {
   if (!state.detail) return;
   haptic();
-  const body = document.createElement('div'); body.innerHTML = controlsHTML(); bindControls(body);
-  const sheet = openSheet({ title: 'Assistant', body, onClose: () => { controlsSheet = null; } });
+  if (getComputedStyle($('#inspector')).display !== 'none') { $('#inspectorBody').scrollTop = 0; return; }
+  const body = document.createElement('div'); body.innerHTML = adjustHTML(); bindAdjust(body);
+  const sheet = openSheet({ title: 'This Conversation', body, onClose: () => { controlsSheet = null; } });
   controlsSheet = { body, ...sheet };
-};
+}
+$('#controlsBtn').onclick = openAdjust;
 
 /* ---------------- Live updates (SSE + polling) ---------------- */
 function closeStream() { if (state.stream) { state.stream.close(); state.stream = null; state.streamId = null; } }
@@ -1192,10 +1390,9 @@ function openStream(id) {
   state.stream = source; state.streamId = id;
 }
 
-/* ---------------- Devices ---------------- */
+/* ---------------- Mac Messages (owner channel) ---------------- */
 async function loadDevices() {
-  try { state.devices = await api('/owner/devices'); } catch (error) { if (error.status !== 401) errorToast(error); return; }
-  renderDevices();
+  try { state.devices = await api('/owner/devices'); } catch (error) { if (error.status !== 401) errorToast(error); }
 }
 function deviceStatus(device) {
   if (device.status === 'revoked') return ['Access Revoked', 'var(--gray)'];
@@ -1205,20 +1402,12 @@ function deviceStatus(device) {
   if (!health.authorizedChat) return ['Choose a Chat on the Mac', 'var(--orange)'];
   return [`Connected${device.lastSeenAt ? ` · seen ${relTime(device.lastSeenAt)}` : ''}`, 'var(--green)'];
 }
-function renderDevices() {
-  const body = $('#devicesBody');
-  const devices = state.devices.filter((device) => device.status !== 'revoked');
-  const rows = devices.map((device) => {
+function devicesHTML() {
+  return state.devices.filter((device) => device.status !== 'revoked').map((device) => {
     const [status, color] = deviceStatus(device);
     return `<button class="row" style="--inset:57px" data-device="${esc(device.id)}"><span class="tile" style="background:${device.status === 'active' ? 'var(--blue)' : 'var(--gray)'}">${I.laptop}</span>
       <span class="row-body"><span class="row-title">${esc(device.name)}${device.isPrimary ? ' <span style="color:var(--orange);display:inline-block;width:13px;vertical-align:-1px">' + I.star + '</span>' : ''}</span><div class="row-sub" style="color:${color}">${esc(status)}</div></span>${I.chevronRight}</button>`;
   }).join('');
-  body.innerHTML = `
-    <div class="group-header">Mac Messages</div>
-    <div class="group">${rows}<button class="row action" id="pairBtn" style="--inset:57px"><span class="tile" style="background:var(--green)">${I.plus}</span><span class="row-body">Pair a Mac…</span></button></div>
-    <div class="group-footer">Your Mac relays assistant updates to you in Messages, and your replies come straight back into the call.</div>`;
-  $('#pairBtn').onclick = pairMac;
-  body.querySelectorAll('[data-device]').forEach((node) => node.onclick = () => deviceActions(state.devices.find((device) => device.id === node.dataset.device)));
 }
 async function deviceActions(device) {
   const actions = [];
@@ -1229,20 +1418,20 @@ async function deviceActions(device) {
     if (choice === 'primary') { await api(`/owner/devices/${encodeURIComponent(device.id)}/primary`, { method: 'POST' }); toast(`${device.name} is now primary`, 'star', 'var(--orange)'); }
     if (choice === 'revoke') { await api(`/owner/devices/${encodeURIComponent(device.id)}/revoke`, { method: 'POST' }); toast('Access revoked', 'lock', 'var(--red)'); }
   } catch (error) { errorToast(error); }
-  if (choice) loadDevices();
+  if (choice) loadSettings();
 }
 async function pairMac() {
   haptic();
   const body = document.createElement('div');
   body.innerHTML = '<div class="empty-state" style="padding:60px 0"><p>Creating a secure code…</p></div>';
   let countdown;
-  const sheet = openSheet({ title: 'Pair a Mac', body, onClose: () => { clearInterval(countdown); loadDevices(); } });
+  const sheet = openSheet({ title: 'Pair a Mac', body, onClose: () => { clearInterval(countdown); loadSettings(); } });
   try {
     const pairing = await api('/owner/devices/pair/qr', { method: 'POST', body: { name: 'Mac Messages' } });
     body.innerHTML = `
       <div class="qr-card"><img alt="Pairing code for your Mac" src="${esc(pairing.qrDataUrl)}"></div>
       <div class="expires" id="expires"></div>
-      <ol class="steps"><li>Open the Text Me bridge on your Mac.</li><li>Choose <b>Pair with iPhone</b> and scan this code — or paste the link below.</li><li>Pick the Messages chat you want updates in.</li></ol>
+      <ol class="steps"><li>Open the Text Me bridge on your Mac.</li><li>Choose <b>Pair</b> and scan this code — or paste the link below.</li><li>Pick the Messages chat you want to hear from your assistant in.</li></ol>
       <div class="group" style="margin-top:18px"><button class="row action" id="copyLink" style="justify-content:center">Copy Pairing Link</button></div>`;
     const expiresAt = new Date(pairing.expiresAt).getTime();
     const tick = () => {
@@ -1250,50 +1439,86 @@ async function pairMac() {
       $('#expires', body).textContent = left > 0 ? `Code expires in ${duration(left)}` : 'Code expired — close and try again';
     };
     tick(); countdown = setInterval(tick, 1000);
-    $('#copyLink', body).onclick = async () => {
-      try { await navigator.clipboard.writeText(pairing.pairingUri); toast('Link copied', 'check'); } catch { toast(pairing.pairingUri, 'qr', 'var(--blue)'); }
-    };
+    $('#copyLink', body).onclick = () => copyText(pairing.pairingUri, 'Link copied');
   } catch (error) { sheet.close(); errorToast(error); }
 }
+async function copyText(text, done) {
+  try { await navigator.clipboard.writeText(text); toast(done, 'check'); } catch { toast(text, 'info', 'var(--blue)'); }
+}
+const webhookUrls = () => [
+  ['A call comes in', `${location.origin}/webhooks/twilio/voice`],
+  ['A message comes in', `${location.origin}/webhooks/twilio/sms`],
+  ['Call status changes', `${location.origin}/webhooks/twilio/status`],
+];
+function webhooksHTML() {
+  return webhookUrls().map(([label, url], index) => `<div class="hook"><div class="k">${esc(label)}</div><div class="v"><code>${esc(url)}</code><button type="button" data-copy="${index}">Copy</button></div></div>`).join('');
+}
+function bindWebhooks(root) {
+  root.querySelectorAll('[data-copy]').forEach((button) => button.onclick = () => copyText(webhookUrls()[Number(button.dataset.copy)][1], 'Copied'));
+}
+function openConnectNumber() {
+  const body = document.createElement('div');
+  body.style.padding = '0 16px';
+  body.innerHTML = `<p style="color:var(--label-2);font-size:15px;margin:4px 4px 16px">In your Twilio console, open your phone number and paste these under <b>Voice</b> and <b>Messaging</b> (HTTP POST).</p>${webhooksHTML()}`;
+  bindWebhooks(body);
+  openSheet({ title: 'Connect Your Number', body });
+}
 
-/* ---------------- Settings ---------------- */
+/* ---------------- Settings (defaults for every call) ---------------- */
+const BEHAVIORS = [
+  { id: 'automatic', title: 'Handle everything', sub: 'Asks you only when it has to.' },
+  { id: 'ask_when_unsure', title: 'Ask me when unsure' },
+  { id: 'ask_before_commitments', title: 'Ask me before commitments' },
+];
 async function loadSettings() {
-  try { state.config = await api('/owner/configuration'); } catch (error) { if (error.status !== 401) errorToast(error); return; }
+  try {
+    [state.config] = await Promise.all([api('/owner/configuration'), loadDevices()]);
+  } catch (error) { if (error.status !== 401) errorToast(error); return; }
   renderSettings();
 }
 function renderSettings() {
   const config = state.config; if (!config) return;
-  const sw = (section, key) => switchHTML(`${section}.${key}`, config[section][key]);
+  const sw = (path, value) => switchHTML(path, value);
   $('#settingsBody').innerHTML = `
-    <div class="group-header">Assistant</div>
-    <div class="group">
-      <label class="row"><span class="row-title" style="flex:none">Name</span><input type="text" data-text="assistant.assistantName" value="${esc(config.assistant.assistantName)}" maxlength="60"></label>
-      <div class="row-stack row-wrap" style="position:relative"><div class="row-title">Greeting</div><textarea data-text="assistant.greeting" maxlength="300">${esc(config.assistant.greeting)}</textarea></div>
-      <div class="row-stack row-wrap" style="position:relative"><div class="row-title">How to Introduce You</div><textarea data-text="assistant.ownerIntroduction" maxlength="300">${esc(config.assistant.ownerIntroduction)}</textarea></div>
-    </div>
-    <div class="group-header">Default Tone</div>
-    <div class="group"><div class="row-stack">${segHTML('assistant.tone', config.assistant.tone, [['friendly', 'Friendly'], ['warm', 'Warm'], ['professional', 'Professional']])}</div>
-      <div class="row-stack row-wrap" style="position:relative">${segHTML('assistant.responseStyle', config.assistant.responseStyle, [['concise', 'Concise'], ['detailed', 'Detailed']])}</div></div>
+    <div class="group-header">How should calls normally work?</div>
+    <div class="group">${choiceRows('assistant.behavior', config.assistant.behavior, BEHAVIORS)}</div>
+
+    <div class="group-header">Response style</div>
+    <div class="group">${choiceRows('assistant.responseStyle', config.assistant.responseStyle, [{ id: 'concise', title: 'Concise' }, { id: 'normal', title: 'Normal' }, { id: 'detailed', title: 'Detailed' }])}</div>
+
     <div class="group-header">Calls</div>
     <div class="group">
-      ${tileRow('phone', 'var(--green)', 'Answer Calls', sw('calls', 'answerCalls'))}
-      ${tileRow('person', 'var(--blue)', 'Ask for Caller’s Name', sw('calls', 'collectCallerName'))}
-      ${tileRow('bubbles', 'var(--indigo)', 'Ask Why They’re Calling', sw('calls', 'collectReason'))}
-      ${tileRow('message', 'var(--teal)', 'Offer to Continue by Text', sw('calls', 'offerSmsTransition'))}
-      ${tileRow('lock', 'var(--gray)', 'Require Texting Consent', sw('calls', 'requireSmsConsent'))}
-      ${tileRow('mic', 'var(--orange)', 'Voicemail Fallback', sw('calls', 'voicemailFallback'))}
+      ${tileRow('wave', 'var(--green)', 'Voice', sw('calls.voiceEnabled', config.calls.voiceEnabled))}
+      ${tileRow('mic', 'var(--orange)', 'Transcription', sw('calls.transcriptionEnabled', config.calls.transcriptionEnabled))}
     </div>
-    <div class="group-header">Notifications</div>
+
+    <div class="group-header">When should callers move to text?</div>
+    <div class="group">${choiceRows('calls.offerSmsTransition', config.calls.offerSmsTransition ? 'yes' : 'no', [{ id: 'yes', title: 'Assistant decides' }, { id: 'no', title: 'Never' }])}</div>
+    <div class="group-footer">Every conversation can be adjusted while it’s happening; these are your defaults.</div>
+
+    <div class="group-header">Assistant</div>
     <div class="group">
-      ${tileRow('laptop', 'var(--blue)', 'Mac Messages', sw('messages', 'macosMessagesEnabled'))}
-      ${tileRow('bell', 'var(--red)', 'Notify Me', sw('messages', 'notifyOwner'))}
-      ${tileRow('bolt', 'var(--orange)', 'Only When Needed', sw('messages', 'interruptOnlyWhenNeeded'))}
-      ${tileRow('bubbles', 'var(--indigo)', 'Include Summary', sw('messages', 'includeSummary'))}
-      ${tileRow('sparkles', 'var(--teal)', 'Suggest a Reply', sw('messages', 'includeSuggestedResponse'))}
+      <label class="row"><span class="row-title" style="flex:none">Your name</span><input type="text" data-text="assistant.ownerName" value="${esc(config.assistant.ownerName)}" maxlength="60"></label>
+      <div class="row-stack row-wrap" style="position:relative"><div class="row-title">Greeting</div><textarea data-text="assistant.greeting" maxlength="300">${esc(config.assistant.greeting)}</textarea></div>
     </div>
-    <div class="group-footer">Settings apply to new calls. Use the controls on a live call to change it right away.</div>
+    <div class="group-footer">Keep it short — callers get straight to the point.</div>
+
+    <div class="group-header">Phone</div>
+    <div class="group">
+      ${tileRow('phone', 'var(--green)', 'Answer my calls', sw('calls.answerCalls', config.calls.answerCalls))}
+      <button class="row" style="--inset:57px" id="connectNumber"><span class="tile" style="background:var(--blue)">${I.bolt}</span><span class="row-body"><span class="row-title">Connect your number</span></span>${I.chevronRight}</button>
+    </div>
+
+    <div class="group-header">Messages</div>
+    <div class="group">
+      ${tileRow('laptop', 'var(--blue)', 'Notify me in Messages', sw('messages.macosMessagesEnabled', config.messages.macosMessagesEnabled))}
+      ${devicesHTML()}
+      <button class="row action" id="pairBtn" style="--inset:57px"><span class="tile" style="background:var(--green)">${I.plus}</span><span class="row-body">Pair a Mac…</span></button>
+    </div>
+    <div class="group-footer">You’re only notified when your assistant needs you. Reply right from Messages.</div>
+
     ${state.token ? '<div class="group" style="margin-top:32px"><button class="row destructive" id="signOut">Sign Out</button></div>' : ''}
-    <div class="group-footer" style="text-align:center;margin:18px 0 8px">Configuration revision ${esc(config.revision)}</div>`;
+    <div style="height:24px"></div>`;
   const body = $('#settingsBody');
   const patch = async (path, value) => {
     const [section, key] = path.split('.');
@@ -1302,18 +1527,66 @@ function renderSettings() {
     renderSettings();
   };
   body.querySelectorAll('input[data-field]').forEach((input) => input.onchange = () => { haptic(); patch(input.dataset.field, input.checked); });
-  body.querySelectorAll('[data-seg]').forEach((seg) => seg.onclick = (event) => {
-    const button = event.target.closest('button'); if (!button || button.classList.contains('on')) return;
-    haptic(); patch(seg.dataset.seg, button.dataset.value);
+  body.querySelectorAll('[data-choice]').forEach((row) => row.onclick = () => {
+    if (row.classList.contains('on')) return;
+    haptic();
+    const value = row.dataset.choice === 'calls.offerSmsTransition' ? row.dataset.value === 'yes' : row.dataset.value;
+    patch(row.dataset.choice, value);
   });
   body.querySelectorAll('[data-text]').forEach((field) => field.onchange = () => {
     const value = field.value.trim(); if (value) patch(field.dataset.text, value);
   });
+  body.querySelectorAll('[data-device]').forEach((node) => node.onclick = () => deviceActions(state.devices.find((device) => device.id === node.dataset.device)));
+  $('#pairBtn').onclick = pairMac;
+  $('#connectNumber').onclick = openConnectNumber;
   const signOut = $('#signOut'); if (signOut) signOut.onclick = async () => {
     const confirmed = await actionSheet({ message: 'You’ll need your access token to sign back in.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
     if (!confirmed) return;
     store.set('ownerToken', null); state.token = ''; closeStream(); showSignIn();
   };
+}
+
+/* ---------------- First run ---------------- */
+function showOnboarding(step = 1) {
+  const node = $('#onboard'); node.hidden = false;
+  if (step === 1) {
+    node.innerHTML = `<div class="inner">
+      <img class="app-icon" src="/icon.svg" alt="">
+      <h1>Welcome</h1>
+      <p class="lede">Your phone is now a conversational inbox. Calls are answered by your assistant.</p>
+      <div class="feature"><span class="tile" style="background:var(--green)">${I.wave}</span><div><b>Watch what’s happening</b><span>See every call live, as it happens.</span></div></div>
+      <div class="feature"><span class="tile" style="background:var(--blue)">${I.person}</span><div><b>Step in anytime</b><span>Take over or answer a question in one tap.</span></div></div>
+      <div class="feature"><span class="tile" style="background:var(--teal)">${I.message}</span><div><b>Move to text</b><span>Conversations continue by message, naturally.</span></div></div>
+      <div class="feature"><span class="tile" style="background:var(--indigo)">${I.sliders}</span><div><b>Change how it behaves</b><span>Adjust any conversation while it’s going.</span></div></div>
+      <div class="grow"></div>
+      <button class="btn filled" id="obNext">Connect My Number</button></div>`;
+    $('#obNext').onclick = () => showOnboarding(2);
+  } else if (step === 2) {
+    node.innerHTML = `<div class="inner">
+      <h1 style="text-align:left;font-size:28px">Connect your number</h1>
+      <p class="lede" style="text-align:left">In your Twilio console, open your phone number and paste these (HTTP POST):</p>
+      ${webhooksHTML()}
+      <div class="grow"></div>
+      <button class="btn filled" id="obNext">Continue</button>
+      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">I’ll do this later</button></div>`;
+    bindWebhooks(node);
+    $('#obNext').onclick = () => showOnboarding(3);
+    $('#obSkip').onclick = () => showOnboarding(3);
+  } else {
+    node.innerHTML = `<div class="inner">
+      <h1 style="text-align:left;font-size:28px">How should I normally handle calls?</h1>
+      <p class="lede" style="text-align:left">You can change this anytime — even during a call.</p>
+      <button class="big-choice" data-behavior="automatic"><b>Handle everything</b><span>I’ll take care of callers and only ask you when I must.</span></button>
+      <button class="big-choice" data-behavior="ask_when_unsure"><b>Ask me when needed</b><span>I’ll keep talking, and check with you before deciding.</span></button></div>`;
+    node.querySelectorAll('[data-behavior]').forEach((button) => button.onclick = async () => {
+      haptic();
+      try {
+        state.config = await api('/owner/configuration', { method: 'PATCH', body: { assistant: { behavior: button.dataset.behavior }, onboarding: { completed: true } } });
+        node.hidden = true; toast('You’re all set', 'check');
+        try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch {}
+      } catch (error) { errorToast(error); }
+    });
+  }
 }
 
 /* ---------------- Boot ---------------- */
@@ -1322,6 +1595,10 @@ async function boot() {
   $('#signin').hidden = true; $('#app').hidden = false;
   go(state.tab);
   await loadList();
+  api('/owner/configuration').then((config) => {
+    state.config = config;
+    if (!config.onboarding || !config.onboarding.completed) showOnboarding();
+  }).catch(() => {});
   if (!booted) {
     booted = true;
     setInterval(loadList, 5000);
@@ -1331,7 +1608,10 @@ async function boot() {
     addEventListener('resize', () => renderInspector());
     const requested = new URL(location.href).searchParams.get('c');
     if (requested) openConversation(requested);
-    else if (!isPhone() && state.conversations[0]) openConversation(state.conversations[0].id);
+    else if (!isPhone()) {
+      const first = state.conversations.find(needsYou) || state.conversations.find(isActive) || state.conversations[0];
+      if (first) openConversation(first.id);
+    }
   }
 }
 boot();
