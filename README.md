@@ -21,7 +21,7 @@ fits. You watch it live and step in from your phone in one tap.
                          VERCEL (Fluid compute)
 ┌──────────────────────────────────────────────────────────────┐
 │  Control plane (public/index.html)  ──  REST + SSE           │
-│  Express app (src/app.ts)                                     │
+│  Express app (src/http-app.ts)                                │
 │   ├─ Conversation service / owner replies (one mediated path) │
 │   ├─ Runtime control: commands, overrides, revisions          │
 │   └─ Realtime voice: Twilio media stream ↔ AI Gateway         │

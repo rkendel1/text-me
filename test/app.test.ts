@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import request from 'supertest';
 
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/http-app.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
 import { InMemoryNotificationDeliveryStore, InMemoryOwnerAttentionStore } from '../src/attention/stores.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
