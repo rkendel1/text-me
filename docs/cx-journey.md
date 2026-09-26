@@ -10,17 +10,18 @@ the matrix at the end records what this PR proved against the full local stack
 (Postgres, signed Twilio webhooks and media stream, the real AI SDK code path
 against a Gateway stand-in). The production audit fills in the last column.
 
-## Setup (once)
+## Setup (once), on an iPhone, with no Mac
 
 1. Deploy to Vercel, add **Neon** from the Vercel Marketplace, and set the
-   environment variables from the README. Confirm `https://<project>.vercel.app`
-   loads the sign-in screen.
-2. Sign in with `OWNER_AUTH_TOKEN`. First run shows **Welcome → Connect your
-   number → How should I normally handle calls?**
-3. In Twilio, paste the three webhook URLs shown on the Connect screen
-   (Voice, Messaging, Status callback) into the phone number, HTTP POST.
-4. Keep two devices ready: the **caller's phone** and the **owner's phone**
-   (control plane open at `/`, optionally installed to the home screen).
+   environment variables from the README. No Mac, Photon or Messages settings
+   exist or are needed.
+2. On the iPhone, open `https://<project>.vercel.app` in Safari and sign in.
+   First run: **Welcome → Your number → Connect My Number** (the server points
+   the Twilio number at this deployment; nothing to paste) → **How should your
+   assistant handle calls?** → **Add to Home Screen** → open from the Home
+   Screen → **Turn On Notifications** → ready.
+3. **Settings → Notifications → Send a Test Notification** should arrive on
+   the lock screen.
 
 ### Evidence tools
 
@@ -61,8 +62,8 @@ SELECT field, value, expires_at FROM conversation_runtime_overrides WHERE conver
 | Step | Caller | Owner | Evidence |
 |---|---|---|---|
 | 1 | Asks something only Randy can decide (“Can we move to Friday at 2?”) | — | — |
-| 2 | Hears “Let me check with Randy” — never silence | **Owner Needed** card with the question and one-tap answers; banner if the app is open; Messages/SMS notification | `owner.attention.requested` (`requestId`, `suggestedReplies`), `assistant.activity` “Asked Randy: …”, runtime `status: owner_needed` |
-| 3 | — | Taps **Friday at 2 works** (or replies from Messages/SMS) | `owner.message` (`messageId`, `requestId`, `source`); command `answer_owner_request` |
+| 2 | Hears “Let me check with Randy” — never silence | Lock-screen notification **“Jordan needs you” / “Can you do Friday at 2?”** | `owner.attention.requested`; attention `assistant_needs_owner` → `delivered`; `notification.sent` (`surface: web_push`, `notificationId`, `attentionId`); runtime `status: owner_needed` |
+| 3 | — | Taps the notification → **that live call opens directly** (no inbox); taps **Friday at 2 works** | attention `opened`, then `owner.message` (`messageId`, `requestId`); command `answer_owner_request` |
 | 4 | Hears the answer relayed naturally (“Randy says Friday at 2 works…”) | Card clears | `runtime.owner_speech` (`commandId`), command `applied_live`; next `ai.response` contains the relay |
 
 Pass requires the notification to arrive **only** here, not for routine calls (see H).
@@ -123,6 +124,64 @@ Pass requires the notification to arrive **only** here, not for routine calls (s
 
 ---
 
+## Journey I — the whole product on an iPhone, no Mac
+
+This is the acceptance journey. Every step must work with **no Mac, no
+Photon and no Messages authorization** anywhere in the account.
+
+| # | Step | Evidence |
+|---|---|---|
+| 1–5 | iPhone owner with no Mac signs in, connects the number, chooses behavior, adds to Home Screen, turns on notifications | `owner_surface_devices` row (`platform: web`, capabilities `push, deep_link`); `owner_configurations.onboarding.completed` |
+| 6–9 | Someone calls; the assistant answers, transcribes, replies by voice; everything lands in Neon | `voice.started` (realtime), `speech.transcript`, `ai.response` |
+| 10 | **No unnecessary interruption** | attention `conversation_started` is `passive` and has **no** `notification_deliveries` row |
+| 11–12 | The assistant needs the owner; the iPhone gets a notification | attention `assistant_needs_owner` `delivered`; `notification.sent` via `web_push` |
+| 13–15 | Tap → the exact live conversation, with the transcript | URL `/conversations/<id>/live?attention=<id>`; attention `opened` |
+| 16–18 | **Reply** or **Take Over** from the live screen (or the notification's own action where the platform shows one) | `POST /owner/attention/:id/actions`; command `answer_owner_request` or `take_over` → `applied_live`; attention `acted` |
+| 19 | **Adjust** this call | one `adjust_interaction` command; the live screen shows *Temporary settings*; **Reset to defaults** clears it; Settings unchanged |
+| 20–21 | **Text**: the conversation moves to SMS and continues as the same conversation | `conversation.channel_transitioned`; same `conversation_id` for caller SMS |
+| 22 | Close the app, reopen it (or reload) | `/conversations/<id>/live` rebuilds everything from the API |
+| 23 | At no point is a Mac involved | no `owner.delivery.*` events; no `mac_messages` deliveries |
+
+## Journey J — connect a Mac by QR (optional integration)
+
+The Mac is an executor: it pairs by scanning a code and then follows the
+owner's settings. Nothing is typed on the Mac. Screenshots:
+[`docs/screenshots/qr-pairing`](screenshots/qr-pairing), captured by driving
+the real bridge process (`npm run bridge:macos`) whose camera saw the QR the
+iPhone displayed, against the local production stack.
+
+| # | Step | Expected, and where to verify it |
+|---|---|---|
+| 1 | Settings → Connected devices → **Connect a Mac…** | QR sheet, *Waiting for Mac…*, 5:00 countdown (06). `owner_pairing_credentials` row; QR payload is `attn://pair/<token>?s=<deployment>` only |
+| 2 | On the Mac run the bridge | **Connect this Mac** opens with the camera (07). Nothing to configure |
+| 3 | Hold the iPhone up to the Mac camera | Mac shows *Mac connected* (12); iPhone switches to *Mac connected ✓* within ~1.5 s (08) and continues into Messages setup (09). Credential row deleted; `device.connected` audit |
+| 4 | Pick your own thread as the assistant chat | Only the owner's own thread is offered (09); `assistant.chat.changed` audit; within one sync the Mac shows *Watching Messages* (10) |
+| 5 | **Test Connection** | Five checks pass, *Nothing was sent* (11); no message appears in Messages |
+| 6 | Turn **Apple Messages** off | Mac stops watching without restarting (14); iPhone shows *Connected · Apple Messages off* (15); `owner.channel.disabled` audit; Mac deliveries stop |
+| 7 | Scan the same QR again (another Mac) | Rejected: *That code has expired or was already used* |
+| 8 | Revoke the Mac | Confirm sheet (16); the Mac's next request is 401, it forgets its credential and returns to the scanner with *This Mac was disconnected* (17); `device.revoked` audit |
+| 9 | Connect again with a new code | Works; the Mac is a new active device |
+| 10 | A setting fails to save | *Unable to update setting. Try again.* and the control shows the stored value (05) |
+
+### Real-device acceptance (must be run on hardware)
+
+The automated run above uses a stand-in for Messages. Before release, run it on
+a real Mac and iPhone against the Vercel deployment:
+
+1. Mac with the bridge built (`npm install && npm run build && npm run bridge:macos`).
+   Grant **Full Disk Access** and **Automation → Messages** when macOS asks.
+2. Do steps 1–5 above. Confirm the chat list contains only your own thread.
+3. Place a test call; when the assistant asks you something, confirm the
+   question arrives in your own Messages thread on the Mac and on the iPhone.
+4. Reply in that thread from the iPhone. Confirm the caller hears the answer and
+   the reply appears once in the live conversation (not twice).
+5. Turn Apple Messages off, place another call that needs you: nothing arrives in
+   Messages; the push notification still arrives.
+6. Revoke the Mac. Confirm the bridge returns to the scanner within ~5 s and no
+   further messages are sent from the Mac.
+7. Quit and relaunch the bridge while connected: it reconnects without a new
+   code.
+
 ## Acceptance matrix
 
 | Capability | Required | Local evidence in this PR | Production audit |
@@ -147,10 +206,22 @@ Pass requires the notification to arrive **only** here, not for routine calls (s
 | Neon contains authoritative state | PASS | Postgres stores for conversations, runtime, overrides, commands, config, devices | ☐ |
 | No production in-memory authority | PASS | In-memory stores are test defaults only; bootstrap wires Postgres everywhere. Live call sockets are per-instance by nature and reload state from Postgres on every command | ☐ |
 | AI SDK is actual runtime path | PASS | `gateway.experimental_realtime` + `generateText` via `createGateway` (test drives the real SDK connector) | ☐ |
+| iPhone owner needs no Mac | PASS | Production composition starts and runs with no Mac config (Postgres test); no Mac delivery attempts (tests) | ☐ |
+| Owner attention is durable | PASS | `owner_attention` + `notification_deliveries` in Neon (Postgres test) | ☐ |
+| Push to the iPhone | PASS | Payload + deep link recorded exactly as sent to the push service (tests, harness); real APNs delivery needs the production audit | ☐ |
+| Notification → exact live conversation | PASS | Cold open of the push URL lands on the live call in ~270 ms (screenshot `iphone-default/07`) | ☐ |
+| Zero-navigation Take Over / Reply | PASS | Attention actions resolve the conversation server-side (tests, screenshot 08) | ☐ |
+| Quiet by default | PASS | Only `assistant_needs_owner`/`error` interrupt; opt-in for routine calls (tests) | ☐ |
 | Production Vercel deployment | PASS | Not done in this PR | ☐ |
 | Real Twilio path | PASS | Not done in this PR | ☐ |
 
 ## Known limits to check during the audit
+
+- **iOS web push needs the Home Screen app** (iOS 16.4+) and shows no action
+  buttons, so the tap opens the live conversation, where Reply and Take Over
+  are one tap away. Chrome and Android show the buttons.
+- There are no self-serve accounts yet: one deployment serves one owner,
+  signed in with `OWNER_AUTH_TOKEN`.
 
 - **Vercel WebSockets are in public beta.** Calls rely on the Function holding
   the Twilio media stream; `vercel.json` sets `maxDuration: 800` (raise it if

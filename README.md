@@ -6,11 +6,14 @@ fits. You watch it live and step in from your phone in one tap.
 
 - **Callers** just call. They hear a short greeting, explain what they need,
   and get help, with no menus, disclaimers or AI talk.
-- **The owner** opens **Now**. It shows what needs them, what's live, and
-  lets them take over, answer a question, adjust the assistant for this one
-  conversation, or move it to text.
+- **The owner** uses an **iPhone** (a Home Screen web app, no Mac needed).
+  They get a notification only when the assistant needs them. Tapping it
+  opens that live conversation, where they can answer in one tap, take over,
+  adjust the assistant for this one conversation, or move it to text.
 
-![Now](docs/screenshots/05-iphone-now-owner-needed.png)
+| Notification opens the live call | Take Over from the notification | Settings |
+|---|---|---|
+| ![](docs/screenshots/iphone-default/07-notification-opens-live-conversation.png) | ![](docs/screenshots/iphone-default/08-take-over-from-notification.png) | ![](docs/screenshots/iphone-default/11-settings-notifications-phone-integrations.png) |
 
 ## Architecture
 
@@ -40,6 +43,10 @@ fits. You watch it live and step in from your phone in one tap.
 - **Owner controls reach the live call from any instance.** Every command is
   recorded in `runtime_commands`, published over Postgres `LISTEN/NOTIFY`, and
   marked `applied_live` by the instance holding the call.
+- **Conversation is the product; devices are surfaces.** The assistant raises
+  durable **owner attention**; one router delivers it to the owner's surfaces:
+  iPhone push (default), Mac Messages (optional integration), or SMS to the
+  owner's phone (fallback). No surface is required for a call to work.
 - **Defaults → conversation override → live runtime.** Settings are defaults;
   Adjust changes only the conversation you're looking at.
 
@@ -69,9 +76,11 @@ and the audit checklist.
    | `PUBLIC_BASE_URL` *(optional)* | Defaults to `https://<project>.vercel.app` |
    | `REALTIME_VOICE=off` *(optional)* | Fall back to the non-realtime voice flow |
 
-5. **Open `https://<project>.vercel.app`**, sign in, and follow first run.
-   **Connect your number** shows the three webhook URLs to paste into your
-   Twilio number (Voice, Messaging, Status callback; HTTP POST).
+5. **On your iPhone, open `https://<project>.vercel.app` in Safari**, sign in,
+   and follow first run. **Connect My Number** points your Twilio number at
+   the deployment for you. Then add the app to your Home Screen and turn on
+   notifications. Web Push keys are generated once and stored in Neon;
+   `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are optional overrides.
 
 ## Run locally
 
@@ -88,7 +97,7 @@ calls outside production.
 ## Test
 
 ```bash
-npm test                                       # 44 tests (2 need Postgres and skip without it)
+npm test                                       # all tests; the Postgres ones skip without TEST_DATABASE_URL
 TEST_DATABASE_URL=postgres://… npm test        # + Postgres LISTEN/NOTIFY and command store
 ```
 
@@ -107,20 +116,43 @@ connector against a local stand-in for the Gateway wire protocol.
 | `POST /conversations/:id/messages` | Owner reply, relayed by the assistant on the call or by text |
 | `GET /conversations/:id/runtime/commands`, `GET /conversations/:id/audit` | Command history and full id-linked timeline |
 | `GET/PATCH /owner/configuration` | Defaults for new calls |
+| `GET /owner/attention`, `POST /owner/attention/:id/{opened,dismiss,actions}` | What needs the owner; one-tap Reply / Take Over from a notification |
+| `GET /owner/push/config`, `GET/POST /owner/push/devices`, `DELETE /owner/push/devices/:id`, `POST /owner/push/test` | Notification devices (web today; iOS/macOS-ready schema) |
+| `GET /owner/phone`, `POST /owner/phone/connect` | The owner's number, connected without a provider console |
+| `GET /owner/events` | Owner-wide live stream |
+| `/conversations/:id/live` | Deep link straight into one live conversation |
+
+The full client contract, which a future native iOS app would also use, is in
+[`docs/owner-api.md`](docs/owner-api.md).
 
 Twilio webhooks: `POST /webhooks/twilio/voice`, `/webhooks/twilio/status`,
 `/webhooks/twilio/sms`, `/webhooks/twilio/voice/continue`, and the media
 stream WebSocket at `/media-stream`.
 
-## Mac Messages bridge
+## Mac Messages bridge (optional)
 
-An optional owner channel: the assistant's questions arrive in Messages and
-your replies go straight back into the conversation. Pair it from
-**Settings → Messages → Pair a Mac**, then run:
+An optional integration; nothing in the product depends on it. With it, the
+assistant's questions arrive in Apple Messages and your replies go straight back
+into the conversation. There is nothing to configure on the Mac:
 
-```bash
-BACKEND_URL=https://<project>.vercel.app \
-PAIRING_CREDENTIAL='attn://pair/...' \
-PHOTON_CLIENT_MODULE=/absolute/path/to/photon-client.js \
-npm run bridge:macos
-```
+1. On the Mac: `npm install && npm run build && npm run bridge:macos`.
+   A **Connect this Mac** window opens with a camera viewfinder.
+2. On your iPhone: **Settings → Connected Devices → Connect a Mac** shows a QR code.
+   Hold it up to the Mac's camera. The iPhone goes from *Waiting for Mac…* to
+   *Mac connected ✓* and continues to Messages setup.
+3. Pick the assistant chat (your own thread) on the iPhone, and use
+   **Test connection** to check it end to end without sending anything.
+
+The QR carries only a single-use code that expires in five minutes and the
+address of your deployment. The Mac stores only its own device credential and
+that address (`~/Library/Application Support/Attn Bridge`). Everything else is
+your configuration on the server, which the Mac follows by revision: turning
+**Apple Messages** off on the iPhone stops the Messages watcher without
+restarting anything. Revoking the Mac on the iPhone disconnects it immediately,
+and the bridge reopens the scanner so it can be reconnected with a new code.
+
+The bridge reads Messages through [Photon iMessage Kit](https://www.npmjs.com/package/@photon-ai/imessage-kit)
+(an optional dependency, never loaded by the server). macOS asks for **Full
+Disk Access** (to read Messages) and **Automation → Messages** (to send) the
+first time. Only your own thread is ever offered to the server as the assistant
+chat; other chats, contacts and message history stay on the Mac.

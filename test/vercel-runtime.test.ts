@@ -173,10 +173,130 @@ test('runtime commands persist in Postgres and never regress from applied_live',
     provider: 'fake', providerCallId: `cmd-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: 'owner',
   });
   const id = `cmd_${Date.now()}`;
-  await store.record({ id, conversationId: conversation.id, ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
+  await store.record({ id, conversationId: conversation.id, runtimeId: 'rt_test', ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
   await store.update(id, { status: 'applied_live', appliedLiveAt: new Date() });
   await store.update(id, { status: 'applied', processedAt: new Date() });
   const [stored] = await store.list(conversation.id);
   assert.equal(stored.status, 'applied_live');
   assert.ok(stored.processedAt && stored.appliedLiveAt);
+});
+
+test('owner attention, deliveries, surface devices and push keys persist in Neon', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { PostgresOwnerAttentionStore, PostgresNotificationDeliveryStore, PostgresOwnerSurfaceDeviceStore, PostgresAppSecretStore } =
+    await import('../src/attention/postgres.js');
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 3 });
+  t.after(() => pool.end());
+  const conversations = new PostgresConversationRepository(pool);
+  await conversations.initialize();
+  const attention = new PostgresOwnerAttentionStore(pool);
+  const deliveries = new PostgresNotificationDeliveryStore(pool);
+  const devices = new PostgresOwnerSurfaceDeviceStore(pool);
+  const secrets = new PostgresAppSecretStore(pool);
+  for (const store of [attention, deliveries, devices, secrets]) await store.initialize();
+  const owner = `owner-${Date.now()}`;
+  const { conversation } = await conversations.createIfAbsent({
+    provider: 'fake', providerCallId: `att-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: owner,
+  });
+  const now = new Date();
+  const base = {
+    ownerId: owner, conversationId: conversation.id, type: 'assistant_needs_owner' as const, priority: 'interrupt' as const,
+    title: 'Sam needs you', body: '“Friday?”', actions: ['reply' as const, 'take_over' as const], status: 'pending' as const,
+    dedupeKey: 'owner-request:req_1', metadata: { requestId: 'req_1' }, createdAt: now, updatedAt: now,
+  };
+  const first = await attention.create({ ...base, id: `att_${Date.now()}a` });
+  const duplicate = await attention.create({ ...base, id: `att_${Date.now()}b` });
+  assert.equal(duplicate.id, first.id, 'dedupe key makes raising idempotent');
+  await deliveries.record({ id: `ntf_${Date.now()}`, attentionId: first.id, ownerId: owner, surface: 'web_push', deviceId: 'dev_1', status: 'sent', providerId: '201', createdAt: now });
+  await attention.update(first.id, { status: 'acted', resolvedAt: new Date(), metadata: { action: 'take_over' } });
+  const stored = (await attention.get(first.id))!;
+  assert.equal(stored.status, 'acted');
+  assert.deepEqual(stored.metadata, { requestId: 'req_1', action: 'take_over' });
+  assert.deepEqual(stored.actions, ['reply', 'take_over']);
+  assert.equal((await attention.list(owner, { open: true })).length, 0);
+  assert.equal((await deliveries.listForConversation(conversation.id))[0].surface, 'web_push');
+
+  const token = JSON.stringify({ endpoint: `https://push.example/${owner}`, keys: { p256dh: 'k', auth: 'a' } });
+  const device = await devices.upsert({ id: `dev_${Date.now()}`, ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push'], status: 'active', createdAt: now, lastSeenAt: now });
+  const again = await devices.upsert({ id: 'dev_other', ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push', 'deep_link'], status: 'active', createdAt: now, lastSeenAt: new Date() });
+  assert.equal(again.id, device.id, 'same subscription = same device');
+  assert.deepEqual(again.capabilities, ['push', 'deep_link']);
+
+  const key = `vapid-${Date.now()}`;
+  const [a, b] = await Promise.all([secrets.getOrCreate(key, () => 'first'), secrets.getOrCreate(key, () => 'second')]);
+  assert.equal(a, b, 'concurrent cold starts agree on one key');
+});
+
+test('production composition starts with no Mac at all, and a fresh instance recovers live state from Neon', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { buildServer } = await import('../src/bootstrap.js');
+  const request = (await import('supertest')).default;
+  // No Mac, no Photon, no Messages authorization, no AI Gateway key: just Neon + Twilio + owner token.
+  const env = {
+    DATABASE_URL: databaseUrl, TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'twilio-test', TWILIO_PHONE_NUMBER: '+15550000000',
+    OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'owner-test', PUBLIC_BASE_URL: 'http://localhost', REALTIME_VOICE: 'off',
+  };
+  assert.ok(!Object.keys(env).some((key) => /MAC|PHOTON|PAIRING/i.test(key)));
+  const first = buildServer(getConfig(env));
+  const second = buildServer(getConfig(env));
+  t.after(() => { first.server.close(); second.server.close(); });
+  await Promise.all([first.ready, second.ready]);
+  const auth = { Authorization: 'Bearer owner-test' };
+
+  assert.equal((await request(first.server).get('/')).status, 200);
+  assert.equal((await request(first.server).get('/conversations')).status, 401);
+  const conversation = await request(first.server).post('/webhooks/fake/voice').send({ callId: `nomac-${Date.now()}`, callerPhone: '+15553334444' });
+  assert.equal(conversation.status, 200);
+  const listed = (await request(first.server).get('/conversations').set(auth)).body;
+  const id = listed.find((item: { caller: string; status: string }) => item.caller === '+15553334444' && item.status === 'answered').id;
+  const takeover = await request(first.server).post(`/conversations/${id}/runtime/takeover`).set(auth).send({});
+  assert.equal(takeover.status, 200);
+  const adjusted = await request(first.server).patch(`/conversations/${id}/runtime`).set(auth).send({ verbosity: 'detailed' });
+  assert.equal(adjusted.status, 200);
+
+  // A different instance (or the same app after a reload/restart) sees exactly the same state.
+  const recovered = (await request(second.server).get(`/conversations/${id}`).set(auth)).body;
+  assert.equal(recovered.runtime.status, 'takeover');
+  assert.equal(recovered.runtime.verbosity, 'detailed');
+  assert.equal(recovered.runtime.temporarySettings, true);
+  const commands = (await request(second.server).get(`/conversations/${id}/runtime/commands`).set(auth)).body;
+  assert.deepEqual(commands.map((command: { type: string }) => command.type), ['take_over', 'adjust_interaction']);
+  const attention = (await request(second.server).get(`/owner/attention?conversationId=${id}`).set(auth)).body;
+  assert.equal(attention[0].type, 'conversation_started');
+  assert.equal((await request(second.server).get(`/conversations/${id}/live`)).status, 200);
+});
+
+test('Neon: a pairing credential can be redeemed exactly once, even by two simultaneous scans', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { PostgresOwnerDeviceStore, PostgresOwnerPairingCredentialStore, PostgresOwnerDeviceSessionStore, PostgresOwnerConfigurationStore } =
+    await import('../src/repositories/postgres-owner-runtime-repository.js');
+  const { OwnerDeviceService } = await import('../src/owner/device.js');
+  const { OwnerConfigurationService } = await import('../src/owner/configuration.js');
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+  t.after(() => pool.end());
+  const devices = new PostgresOwnerDeviceStore(pool);
+  const pairings = new PostgresOwnerPairingCredentialStore(pool);
+  const sessions = new PostgresOwnerDeviceSessionStore(pool);
+  const configurations = new PostgresOwnerConfigurationStore(pool);
+  for (const store of [devices, pairings, sessions, configurations]) await store.initialize();
+  const service = new OwnerDeviceService(devices, Date.now, pairings, sessions);
+  const owner = `owner-${Date.now()}`;
+  const paired = await service.pair(owner, 'MacBook Pro');
+  const results = await Promise.allSettled([service.activatePairing(paired.pairingUri), service.activatePairing(paired.pairingUri)]);
+  assert.deepEqual(results.map((result) => result.status).sort(), ['fulfilled', 'rejected']);
+  const probed = await service.requestProbe(owner, paired.device.id);
+  assert.equal((await devices.get(paired.device.id))!.probe!.id, probed.probe!.id, 'probe persists');
+
+  // Concurrent settings edits: the second writer on a stale revision gets a conflict, not a silent overwrite.
+  const settings = new OwnerConfigurationService(configurations);
+  const start = await settings.get(owner);
+  const outcomes = await Promise.allSettled([
+    settings.update(owner, { assistant: { tone: 'warm' } }, 'web', start.revision),
+    settings.update(owner, { assistant: { tone: 'professional' } }, 'web', start.revision),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+  assert.equal((await settings.get(owner)).revision, start.revision + 1);
 });

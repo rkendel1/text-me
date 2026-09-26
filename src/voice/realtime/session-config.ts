@@ -90,15 +90,22 @@ export function buildInstructions(
   configuration: OwnerConfiguration,
   channel: 'voice' | 'text' = 'voice',
 ): string {
-  const { assistant } = configuration;
+  const { assistant, calls } = configuration;
   const owner = assistant.ownerName || 'the owner';
+  const identity = [
+    calls.collectCallerName ? 'who you are speaking with ("Who am I speaking with?")' : '',
+    calls.collectReason ? 'why they are calling' : '',
+  ].filter(Boolean);
   const lines = [
+    assistant.assistantName && assistant.assistantName !== 'Assistant' ? `Your name is ${assistant.assistantName}.` : '',
     channel === 'voice'
       ? `You are ${owner}'s assistant, answering ${owner}'s phone. Open with exactly: "${assistant.greeting}" and then listen.`
       : `You are ${owner}'s assistant, continuing a conversation with the caller by text message (SMS).`,
     assistant.ownerIntroduction,
     'Your job is to understand, resolve, and escalate — in that order, in as few turns as possible.',
-    'Find out who you are speaking with ("Who am I speaking with?") and why, and record both with note_caller.',
+    identity.length
+      ? `Find out ${identity.join(' and ')}, and record it with note_caller.`
+      : 'Don\'t ask for the caller\'s name or reason unless they offer it; if they do, record it with note_caller.',
     'If you can handle the request yourself, do it. If the caller refers to an earlier conversation, use lookup_conversation.',
     `When ${owner} needs to decide, say "Let me check with ${owner}" and call ask_owner. ` +
       'Never leave the caller waiting in silence; when the answer comes, relay it naturally.',
@@ -113,7 +120,10 @@ export function buildInstructions(
         'and never mention transcripts, models, tools or system status.'
       : 'Write plain, friendly text messages under 300 characters. No markdown.',
     channel === 'voice' && runtime.smsTransitionEnabled
-      ? `${owner} prefers text. When it fits, offer to continue by text at this number; only after the caller agrees, ` +
+      ? `${owner} prefers text. When it fits, offer to continue by text at this number; ` +
+        (calls.requireSmsConsent
+          ? 'only after the caller clearly says yes, '
+          : 'if the caller would rather text, ') +
         'call transition_to_text, tell them a text is on its way, and say goodbye.'
       : '',
     runtime.customInstructions ? `Instructions from ${owner} for this conversation: ${runtime.customInstructions}` : '',

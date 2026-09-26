@@ -30,6 +30,20 @@ export interface OwnerDeviceHealth extends MessagesCapabilities {
   authorizedChat: boolean;
 }
 
+/** "Test connection": the bridge checks everything end to end without sending a visible message. */
+export interface OwnerDeviceProbe {
+  id: string;
+  requestedAt: string;
+  completedAt?: string;
+  result?: {
+    bridgeReachable: boolean;
+    messagesAccess: boolean;
+    sendCapability: boolean;
+    watcher: boolean;
+    assistantChatFound: boolean;
+  };
+}
+
 export interface OwnerDevice {
   id: string;
   ownerId: string;
@@ -43,6 +57,7 @@ export interface OwnerDevice {
   discoveredChats: MessagesChat[];
   isPrimary: boolean;
   bridgeVersion?: string;
+  probe?: OwnerDeviceProbe | null;
   createdAt: Date;
   updatedAt: Date;
   lastSeenAt: Date | null;
@@ -64,6 +79,8 @@ export interface OwnerPairingCredentialRecord {
 
 export interface OwnerPairingCredentialStore {
   save(record: OwnerPairingCredentialRecord): Promise<void>;
+  /** Atomically take a live credential so it can be used exactly once, even by two simultaneous scans. */
+  consume(code: string, now: number): Promise<OwnerPairingCredentialRecord | null>;
   getByDeviceId(deviceId: string): Promise<OwnerPairingCredentialRecord | null>;
   getByCode(code: string): Promise<OwnerPairingCredentialRecord | null>;
   delete(deviceId: string): Promise<void>;
@@ -83,6 +100,24 @@ export interface OwnerDeviceSessionStore {
   delete(token: string): Promise<void>;
   deleteByDeviceId(deviceId: string): Promise<void>;
   touch(token: string, lastSeenAt: number): Promise<void>;
+}
+
+export const PAIRING_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * The QR payload: attn://pair/<one-time token>?s=<server origin>. Only an opaque
+ * single-use token and where to redeem it — no owner or device credentials.
+ */
+export function pairingQrPayload(pairingCode: string, serverOrigin: string): string {
+  return `attn://pair/${pairingCode}?s=${encodeURIComponent(serverOrigin)}`;
+}
+
+export function parsePairingCredential(credential: string): { code: string; server?: string } {
+  const trimmed = credential.trim();
+  const match = trimmed.match(/^attn:\/\/pair\/([A-Za-z0-9_-]+)(?:\?(.*))?$/);
+  if (!match) return { code: trimmed };
+  const server = new URLSearchParams(match[2] ?? '').get('s') ?? undefined;
+  return { code: match[1], ...(server ? { server } : {}) };
 }
 
 export class InMemoryOwnerDeviceStore implements OwnerDeviceStore {
@@ -112,6 +147,13 @@ export class InMemoryOwnerPairingCredentialStore implements OwnerPairingCredenti
 
   async getByDeviceId(deviceId: string): Promise<OwnerPairingCredentialRecord | null> {
     return structuredClone(this.credentials.get(deviceId) ?? null);
+  }
+
+  async consume(code: string, now: number): Promise<OwnerPairingCredentialRecord | null> {
+    const record = [...this.credentials.values()].find((candidate) => candidate.code === code);
+    if (!record) return null;
+    this.credentials.delete(record.deviceId);
+    return record.expiresAt > now ? structuredClone(record) : null;
   }
 
   async getByCode(code: string): Promise<OwnerPairingCredentialRecord | null> {
@@ -185,7 +227,8 @@ export class OwnerDeviceService {
       lastSeenAt: null,
       revokedAt: null,
     };
-    const expiresAt = this.now() + 10 * 60 * 1000;
+    // Short-lived: long enough to scan from across the room, not long enough to linger.
+    const expiresAt = this.now() + PAIRING_TTL_MS;
     const pairingCode = randomBytes(18).toString('base64url');
     // The device row must exist before its pairing credential (FK in Postgres).
     await this.store.save(device);
@@ -199,10 +242,10 @@ export class OwnerDeviceService {
   }
 
   async activate(deviceId: string, pairingCode: string): Promise<{ device: OwnerDevice; sessionToken: string }> {
-    pairingCode = pairingCode.replace(/^attn:\/\/pair\//, '');
+    const code = parsePairingCredential(pairingCode).code;
+    const pairing = await this.pairings.consume(code, this.now());
     const device = await this.store.get(deviceId);
-    const pairing = await this.pairings.getByDeviceId(deviceId);
-    if (!device || device.status !== 'pending' || !pairing || pairing.expiresAt <= this.now() || pairing.code !== pairingCode) {
+    if (!pairing || pairing.deviceId !== deviceId || !device || device.status !== 'pending' || device.ownerId !== pairing.ownerId) {
       throw new Error('Invalid or expired pairing code');
     }
 
@@ -211,7 +254,6 @@ export class OwnerDeviceService {
     device.lastSeenAt = new Date(this.now());
     device.updatedAt = new Date(this.now());
     await this.store.save(device);
-    await this.pairings.delete(deviceId);
     const sessionToken = randomBytes(32).toString('base64url');
     await this.sessions.save({
       token: sessionToken,
@@ -224,10 +266,58 @@ export class OwnerDeviceService {
   }
 
   async activatePairing(pairingCredential: string): Promise<{ device: OwnerDevice; sessionToken: string }> {
-    const code = pairingCredential.replace(/^attn:\/\/pair\//, '');
+    const { code } = parsePairingCredential(pairingCredential);
     const pairing = await this.pairings.getByCode(code);
     if (!pairing) throw new Error('Invalid or expired pairing code');
     return this.activate(pairing.deviceId, code);
+  }
+
+  /** Capabilities as measured by the bridge on the Mac itself. */
+  async reportHealth(sessionToken: string, capabilities: MessagesCapabilities, bridgeVersion?: string): Promise<OwnerDevice> {
+    const device = await this.heartbeat(sessionToken, capabilities);
+    if (bridgeVersion && device.bridgeVersion !== bridgeVersion) {
+      device.bridgeVersion = bridgeVersion;
+      await this.store.save(device);
+    }
+    return device;
+  }
+
+  /** The bridge reports candidate assistant chats it discovered locally (the owner's own threads only). */
+  async reportChats(sessionToken: string, chats: MessagesChat[]): Promise<OwnerDevice> {
+    const device = await this.requireSession(sessionToken);
+    device.discoveredChats = chats
+      .filter((chat) => !chat.isGroup)
+      .slice(0, 20)
+      .map((chat) => ({ id: chat.id, service: chat.service, displayName: chat.displayName, address: chat.address, isGroup: false }));
+    if (device.assistantChat && !device.discoveredChats.some((chat) => chat.id === device.assistantChat!.chatId)) {
+      device.discoveredChats.push({
+        id: device.assistantChat.chatId, service: device.assistantChat.service,
+        displayName: device.assistantChat.displayName, address: device.assistantChat.address, isGroup: false,
+      });
+    }
+    device.updatedAt = new Date(this.now());
+    this.updateSetupStatus(device);
+    await this.store.save(device);
+    return device;
+  }
+
+  async requestProbe(ownerId: string, deviceId: string): Promise<OwnerDevice> {
+    const device = await this.store.get(deviceId);
+    if (!device || device.ownerId !== ownerId || device.status !== 'active') throw new Error('Device not found');
+    device.probe = { id: `probe_${randomBytes(8).toString('hex')}`, requestedAt: new Date(this.now()).toISOString() };
+    device.updatedAt = new Date(this.now());
+    await this.store.save(device);
+    return device;
+  }
+
+  async completeProbe(sessionToken: string, probeId: string, result: Omit<NonNullable<OwnerDeviceProbe['result']>, 'bridgeReachable'>): Promise<OwnerDevice> {
+    const device = await this.requireSession(sessionToken);
+    if (!device.probe || device.probe.id !== probeId) throw new Error('No such connection test');
+    device.probe = { ...device.probe, completedAt: new Date(this.now()).toISOString(), result: { bridgeReachable: true, ...result } };
+    device.lastSeenAt = new Date(this.now());
+    device.updatedAt = new Date(this.now());
+    await this.store.save(device);
+    return device;
   }
 
   async list(ownerId: string): Promise<OwnerDevice[]> {

@@ -56,7 +56,9 @@ export type ConversationEventType =
   | 'owner.read'
   | 'owner.attention.requested'
   | 'caller.identified'
-  | 'assistant.activity';
+  | 'assistant.activity'
+  | 'call.declined'
+  | 'voicemail.recorded';
 
 export interface ConversationEvent {
   id: string;

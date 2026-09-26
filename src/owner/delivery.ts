@@ -128,6 +128,12 @@ export class QueuedMacMessagesOwnerChannel implements OwnerChannel {
     private readonly settings?: { isChannelEnabled(ownerId: string, channel: OwnerChannel['type']): boolean | Promise<boolean> },
   ) {}
 
+  /** An optional surface: only usable once the owner has paired a ready Mac and left the channel on. */
+  async isAvailable(ownerId: string): Promise<boolean> {
+    if (this.settings && !(await this.settings.isChannelEnabled(ownerId, this.type))) return false;
+    return Boolean(await this.devices.primary(ownerId));
+  }
+
   async sendMessage(input: Parameters<OwnerChannel['sendMessage']>[0]): Promise<{ deliveryId: string }> {
     if (!input.ownerId || !input.conversationId || !input.messageId || !input.body.trim()) {
       throw new Error('Owner message delivery is incomplete');

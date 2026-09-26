@@ -449,6 +449,12 @@ export class RealtimeCallBridge {
     if (this.closing) return;
     console.error(`[realtime ${this.conversationId}] model session closed: ${reason}`);
     this.shutdown('failed');
+    void this.services.conversations.raiseAttention(this.conversationId, {
+      type: 'error',
+      title: () => 'Your assistant needs attention',
+      body: 'A call was cut off. The caller was asked to text instead.',
+      dedupeKey: `error:voice:${this.conversationId}`,
+    });
     try {
       this.socket.close();
     } catch {

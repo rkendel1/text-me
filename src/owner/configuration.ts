@@ -82,7 +82,10 @@ export class InMemoryOwnerConfigurationStore implements OwnerConfigurationStore 
     }
   }
 
-  async update(configuration: OwnerConfiguration, _previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
+  async update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
+    if (this.configurations.get(configuration.ownerId)?.revision !== previousRevision) {
+      throw new ConfigurationConflictError();
+    }
     this.configurations.set(configuration.ownerId, structuredClone(configuration));
     this.record(event);
   }
@@ -165,6 +168,18 @@ function validatePatch(patch: OwnerConfigurationPatch): void {
   }
 }
 
+export class ConfigurationConflictError extends Error {
+  constructor() {
+    super('Settings changed somewhere else. Refresh and try again.');
+  }
+}
+
+function channelEventType(patch: OwnerConfigurationPatch): string | undefined {
+  const toggles = [patch.messages?.macosMessagesEnabled, patch.messages?.webEnabled].filter((value) => value !== undefined);
+  if (!toggles.length) return undefined;
+  return toggles[0] ? 'owner.channel.enabled' : 'owner.channel.disabled';
+}
+
 export class OwnerConfigurationService {
   constructor(private readonly store: OwnerConfigurationStore = new InMemoryOwnerConfigurationStore()) {}
 
@@ -182,9 +197,12 @@ export class OwnerConfigurationService {
     return structuredClone(configuration);
   }
 
-  async update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web'): Promise<OwnerConfiguration> {
+  async update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web', expectedRevision?: number): Promise<OwnerConfiguration> {
     validatePatch(patch);
     const current = await this.get(ownerId);
+    if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+      throw new ConfigurationConflictError();
+    }
     const next: OwnerConfiguration = {
       ...current,
       revision: current.revision + 1,
@@ -194,10 +212,9 @@ export class OwnerConfigurationService {
       onboarding: { ...current.onboarding, ...patch.onboarding },
     };
     await this.store.update(next, current.revision, {
-      type: patch.messages?.macosMessagesEnabled === true ? 'owner.channel.enabled'
-        : patch.messages?.macosMessagesEnabled === false ? 'owner.channel.disabled'
-        : patch.assistant ? 'assistant.settings.updated'
-          : patch.calls ? 'call.settings.updated' : 'message.settings.updated',
+      type: channelEventType(patch) ?? (patch.assistant ? 'assistant.settings.updated'
+        : patch.calls ? 'call.settings.updated'
+          : patch.messages ? 'message.settings.updated' : 'onboarding.updated'),
       ownerId,
       revision: next.revision,
       source,
@@ -208,6 +225,18 @@ export class OwnerConfigurationService {
 
   async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
     return this.store.events(ownerId);
+  }
+
+  /**
+   * Record a control-plane change that lives outside the typed settings
+   * (device connected/revoked, assistant chat chosen) and bump the revision,
+   * so bridges following the revision pick it up.
+   */
+  async recordChange(ownerId: string, type: string, source = 'web'): Promise<OwnerConfiguration> {
+    const current = await this.get(ownerId);
+    const next = { ...current, revision: current.revision + 1 };
+    await this.store.update(next, current.revision, { type, ownerId, revision: next.revision, source, occurredAt: new Date() });
+    return structuredClone(next);
   }
 
   async isChannelEnabled(ownerId: string, channel: 'web' | 'macos_messages'): Promise<boolean> {

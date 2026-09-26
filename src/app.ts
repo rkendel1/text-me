@@ -22,9 +22,10 @@ import type { VoiceProvider } from './voice/provider.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
 import type { OwnerChannel } from './owner/channel.js';
-import { OwnerDeviceService } from './owner/device.js';
+import { OwnerDeviceService, pairingQrPayload } from './owner/device.js';
+import type { MessagesCapabilities } from './owner/mac-messages-adapter.js';
 import type { MacMessagesAdapter } from './owner/mac-messages-adapter.js';
-import { OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
+import { ConfigurationConflictError, OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
 import { InMemoryOwnerMessageDeliveryStore, type OwnerMessageDeliveryStore } from './owner/delivery.js';
 import { InProcessConversationRuntimeController, type ConversationRuntimeController } from './runtime/controller.js';
 import { RuntimeControlService, type RuntimeConfigurationPatch } from './runtime/service.js';
@@ -38,7 +39,22 @@ import {
 } from './runtime/store.js';
 import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
-import type { RuntimeCommand, RuntimeCommandStore } from './runtime/commands.js';
+import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from './runtime/commands.js';
+import { OwnerAttentionService } from './attention/service.js';
+import type { PhoneNumberService } from './telephony/phone-number.js';
+import { attentionUrl, createSurfaceDeviceId, type OwnerDeviceCapability } from './attention/model.js';
+import { NotificationRouter } from './attention/router.js';
+import { MacMessagesSurface, OwnerSmsSurface, VapidPushSender, WebPushSurface, type PushSender } from './attention/surfaces.js';
+import {
+  InMemoryAppSecretStore,
+  InMemoryNotificationDeliveryStore,
+  InMemoryOwnerAttentionStore,
+  InMemoryOwnerSurfaceDeviceStore,
+  type AppSecretStore,
+  type NotificationDeliveryStore,
+  type OwnerAttentionStore,
+  type OwnerSurfaceDeviceStore,
+} from './attention/stores.js';
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 import { buildInstructions } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
@@ -68,6 +84,15 @@ export interface AppOptions {
   runtimeControlService?: RuntimeControlService;
   runtimeEventBus?: RuntimeEventBus;
   runtimeCommandStore?: RuntimeCommandStore;
+  attentionStore?: OwnerAttentionStore;
+  notificationDeliveryStore?: NotificationDeliveryStore;
+  surfaceDeviceStore?: OwnerSurfaceDeviceStore;
+  appSecretStore?: AppSecretStore;
+  pushSender?: PushSender;
+  /** Lets the owner connect their number from the app (no provider console). */
+  phoneNumbers?: PhoneNumberService;
+  /** Public origin put in pairing QR codes so the Mac bridge needs no server address typed in. */
+  publicBaseUrl?: string;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
@@ -87,13 +112,42 @@ function registerIncomingCallRoute(
   path: string,
   provider: TelephonyProvider,
   service: ConversationService,
+  configuration: OwnerConfigurationService,
+  defaultOwnerId: string,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
       const incomingCall = provider.parseIncomingCall(request.body);
       const conversation = await service.incomingCall(incomingCall);
+      const settings = await configuration.get(conversation.ownerId ?? defaultOwnerId);
+      if (!settings.calls.answerCalls) {
+        // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
+        const twiml = new twilio.twiml.VoiceResponse();
+        const owner = settings.assistant.ownerName || 'The person you called';
+        if (settings.calls.voicemailFallback) {
+          twiml.say(`${owner} can't take your call right now. Please leave a message after the tone.`);
+          twiml.record({
+            maxLength: 120, playBeep: true, trim: 'trim-silence', method: 'POST',
+            action: `/webhooks/twilio/voicemail?conversationId=${encodeURIComponent(conversation.id)}`,
+          });
+        } else {
+          twiml.say(`${owner} can't take calls right now. Please send a text message to this number instead.`);
+        }
+        twiml.hangup();
+        await service.answerCall(conversation.id, incomingCall.payload);
+        await service.recordEvent(conversation.id, 'call.declined', { voicemail: settings.calls.voicemailFallback });
+        response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
       const providerResponse = provider.answerCall(conversation);
       await service.answerCall(conversation.id, incomingCall.payload);
+      // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
+      await service.raiseAttention(conversation.id, {
+        type: 'conversation_started',
+        title: (name) => `${name} is calling`,
+        body: 'Your assistant is answering',
+        dedupeKey: `started:${conversation.id}`,
+      });
       response
         .status(200)
         .type(providerResponse.contentType)
@@ -114,6 +168,15 @@ function registerStatusRoute(
     try {
       const statusUpdate = provider.parseStatusUpdate(request.body);
       const conversation = await service.updateCallStatus(statusUpdate);
+      if (statusUpdate.status === 'completed') {
+        await service.resolveAttention(conversation.id, ['conversation_started'], 'call ended');
+        await service.raiseAttention(conversation.id, {
+          type: 'conversation_completed',
+          title: (name) => `${name.split(' ')[0]}'s ${conversation.state === 'text_active' ? 'call' : 'conversation'} is complete`,
+          body: conversation.state === 'text_active' ? 'The conversation continues by text' : 'Handled by your assistant',
+          dedupeKey: `completed:${conversation.id}`,
+        });
+      }
       response.status(200).json(presentConversation(conversation));
     } catch (error) {
       next(error);
@@ -135,7 +198,10 @@ function presentRuntime(
   return {
     ...runtime,
     status,
+    runtimeId: runtimeIdFor(runtime.conversationId),
     mode: runtime.aiMode === 'owner_assist' ? 'ask_owner' : runtime.aiMode,
+    overriddenFields: runtime.overriddenFields ?? [],
+    temporarySettings: (runtime.overriddenFields ?? []).length > 0,
     revision: runtime.configurationRevision,
     startedAt: runtime.startedAt?.toISOString() ?? null,
     pausedAt: runtime.pausedAt?.toISOString() ?? null,
@@ -186,8 +252,32 @@ export function createApp(options: AppOptions): express.Express {
     standardHeaders: 'draft-8',
     legacyHeaders: false,
   });
+  // Owner attention: surfaces are optional add-ons; none of them is required for a conversation to work.
+  const attentionStore = options.attentionStore ?? new InMemoryOwnerAttentionStore();
+  const surfaceDevices = options.surfaceDeviceStore ?? new InMemoryOwnerSurfaceDeviceStore();
+  const pushSender = options.pushSender ?? new VapidPushSender(options.appSecretStore ?? new InMemoryAppSecretStore());
+  const attention = new OwnerAttentionService(
+    attentionStore,
+    options.notificationDeliveryStore ?? new InMemoryNotificationDeliveryStore(attentionStore),
+    new NotificationRouter({
+      push: new WebPushSurface(surfaceDevices, pushSender),
+      mac: options.ownerChannel ? new MacMessagesSurface(options.ownerChannel, options.repository) : undefined,
+      sms: new OwnerSmsSurface(messaging, options.ownerPhone),
+    }),
+    async (owner) => {
+      const { messages } = await ownerConfiguration.get(owner);
+      return {
+        notifyOwner: messages.notifyOwner, interruptOnlyWhenNeeded: messages.interruptOnlyWhenNeeded,
+        webEnabled: messages.webEnabled, macosMessagesEnabled: messages.macosMessagesEnabled,
+        includeSummary: messages.includeSummary, includeSuggestedResponse: messages.includeSuggestedResponse,
+      };
+    },
+    (raised) => runtime.publishAttention(raised.conversationId, {
+      attentionId: raised.id, attentionType: raised.type, status: raised.status, priority: raised.priority,
+    }),
+  );
   const service = new ConversationService(
-    options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
+    options.repository, messaging, options.ownerPhone, ownerId, attention,
   );
   const engine = new ConversationEngine(
     options.repository,
@@ -282,8 +372,34 @@ export function createApp(options: AppOptions): express.Express {
     throw new Error('Twilio provider is required');
   }
 
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, ownerId);
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
+
+  // A caller left a voicemail (only offered when the owner turned off answering calls).
+  app.post('/webhooks/twilio/voicemail', async (request, response, next) => {
+    try {
+      const conversationId = typeof request.query.conversationId === 'string' ? request.query.conversationId : '';
+      const recordingUrl = typeof request.body?.RecordingUrl === 'string' ? request.body.RecordingUrl : '';
+      if (!conversationId || !recordingUrl) throw new HttpError(400, 'conversationId and RecordingUrl are required');
+      const duration = Number(request.body?.RecordingDuration ?? 0);
+      await service.recordEvent(conversationId, 'voicemail.recorded', {
+        recordingUrl, recordingSid: request.body?.RecordingSid, durationSeconds: Number.isFinite(duration) ? duration : null,
+      });
+      await service.raiseAttention(conversationId, {
+        type: 'voicemail',
+        title: (name) => `${name} left a voicemail`,
+        body: Number.isFinite(duration) && duration > 0 ? `${duration} second message` : 'New voicemail',
+        dedupeKey: `voicemail:${conversationId}:${request.body?.RecordingSid ?? recordingUrl}`,
+        actions: ['open'],
+      });
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say('Thanks. Goodbye.');
+      twiml.hangup();
+      response.type('text/xml; charset=utf-8').send(twiml.toString());
+    } catch (error) {
+      next(error);
+    }
+  });
 
   // Twilio continues here once a realtime media stream ends.
   app.post('/webhooks/twilio/voice/continue', async (request, response, next) => {
@@ -339,7 +455,7 @@ export function createApp(options: AppOptions): express.Express {
   if (fakeRoutesEnabled) {
     const fake = providers.get('fake');
     if (fake) {
-      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service);
+      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, ownerId);
       registerStatusRoute(app, '/webhooks/fake/status', fake, service);
     }
   }
@@ -371,12 +487,26 @@ export function createApp(options: AppOptions): express.Express {
         (request as Request & { ownerId?: string }).ownerId!,
         typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
       );
+      // The QR holds only a single-use token and the server to redeem it at.
+      const origin = options.publicBaseUrl ?? `${request.protocol}://${request.get('host')}`;
+      const payload = pairingQrPayload(result.pairingCode, origin);
       response.status(201).json({
         deviceId: result.device.id,
-        pairingUri: result.pairingUri,
-        qrDataUrl: await renderQrCode(result.pairingUri),
+        pairingUri: payload,
+        qrDataUrl: await renderQrCode(payload),
         expiresAt: result.expiresAt.toISOString(),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // The iPhone polls this while it shows the QR: "Waiting for Mac…" → "Mac connected".
+  app.get('/owner/devices/pair/:id', ownerAuth, async (request, response, next) => {
+    try {
+      const device = await ownerDevices.get(String(request.params.id));
+      if (!device || device.ownerId !== runtimeOwner(request)) throw new HttpError(404, 'Device not found');
+      response.json({ deviceId: device.id, name: device.name, status: device.status });
     } catch (error) {
       next(error);
     }
@@ -406,6 +536,7 @@ export function createApp(options: AppOptions): express.Express {
     try {
       const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
       const result = await ownerDevices.activatePairing(credential);
+      await ownerConfiguration.recordChange(result.device.ownerId, 'device.connected', 'macos_bridge').catch(() => undefined);
       response.json({
         ...result,
         device: {
@@ -448,11 +579,25 @@ export function createApp(options: AppOptions): express.Express {
   app.post('/owner/devices/:id/heartbeat', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { token } = await deviceAuth(request);
-      if (!options.ownerMessagesAdapter?.checkCapabilities) throw new HttpError(501, 'Messages capability checks are unavailable');
-      response.json(await ownerDevices.heartbeat(
-        token,
-        await options.ownerMessagesAdapter.checkCapabilities(),
-      ));
+      // The bridge measures capabilities on the Mac and reports them; there is no Messages access on the server.
+      const reported = request.body?.capabilities;
+      let capabilities: MessagesCapabilities;
+      if (reported && typeof reported === 'object') {
+        const identity = reported.authorizedIdentity;
+        capabilities = {
+          messagesAccess: reported.messagesAccess === true,
+          sendCapability: reported.sendCapability === true,
+          watcher: reported.watcher === true,
+          ...(identity && (identity.service === 'imessage' || identity.service === 'sms') && typeof identity.address === 'string'
+            ? { authorizedIdentity: { service: identity.service, address: identity.address.slice(0, 200) } } : {}),
+        };
+      } else if (options.ownerMessagesAdapter?.checkCapabilities) {
+        capabilities = await options.ownerMessagesAdapter.checkCapabilities();
+      } else {
+        throw new HttpError(400, 'capabilities are required');
+      }
+      const version = typeof request.body?.bridgeVersion === 'string' ? request.body.bridgeVersion.slice(0, 40) : undefined;
+      response.json(await ownerDevices.reportHealth(token, capabilities, version));
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Device authentication required'));
     }
@@ -469,6 +614,53 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // The bridge reports candidate assistant chats it found on the Mac (its owner's own threads only).
+  app.post('/owner/devices/:id/messages/chats', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      const { token } = await deviceAuth(request);
+      const chats = Array.isArray(request.body?.chats) ? request.body.chats : null;
+      if (!chats) throw new HttpError(400, 'chats are required');
+      const valid = chats.filter((chat: Record<string, unknown>) => typeof chat?.id === 'string' &&
+        (chat.service === 'imessage' || chat.service === 'sms'))
+        .map((chat: Record<string, unknown>) => ({
+          id: String(chat.id).slice(0, 200), service: chat.service as 'imessage' | 'sms',
+          displayName: typeof chat.displayName === 'string' ? chat.displayName.slice(0, 120) : undefined,
+          address: typeof chat.address === 'string' ? chat.address.slice(0, 200) : undefined,
+          isGroup: chat.isGroup === true,
+        }));
+      const device = await ownerDevices.reportChats(token, valid);
+      response.json({ discoveredChats: device.discoveredChats.length });
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Device authentication required'));
+    }
+  });
+
+  // Test connection: the owner asks, the bridge checks and answers; nothing visible is sent.
+  app.post('/owner/devices/:id/test', ownerAuth, async (request, response, next) => {
+    try {
+      const device = await ownerDevices.requestProbe(runtimeOwner(request), String(request.params.id));
+      response.status(202).json({ probe: device.probe });
+    } catch (error) {
+      next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
+    }
+  });
+
+  app.post('/owner/devices/:id/probe/:probeId', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      const { token } = await deviceAuth(request);
+      const body = request.body ?? {};
+      const device = await ownerDevices.completeProbe(token, String(request.params.probeId), {
+        messagesAccess: body.messagesAccess === true,
+        sendCapability: body.sendCapability === true,
+        watcher: body.watcher === true,
+        assistantChatFound: body.assistantChatFound === true,
+      });
+      response.json({ probe: device.probe });
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Connection test failed'));
+    }
+  });
+
   app.post('/owner/devices/:id/messages/chat', ownerDeviceRateLimit, ownerAuth, async (request, response, next) => {
     try {
       const service = request.body?.service;
@@ -476,9 +668,11 @@ export function createApp(options: AppOptions): express.Express {
       if ((service !== 'imessage' && service !== 'sms') || typeof chatId !== 'string' || !chatId.trim()) {
         throw new HttpError(400, 'chatId and service are required');
       }
-      response.json(await ownerDevices.authorizeChat(
+      const device = await ownerDevices.authorizeChat(
         (request as Request & { ownerId?: string }).ownerId!, String(request.params.id), chatId, service,
-      ));
+      );
+      await ownerConfiguration.recordChange(device.ownerId, 'assistant.chat.changed');
+      response.json(device);
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Chat authorization failed'));
     }
@@ -575,28 +769,243 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // ---- Owner surfaces: push registration (web now; ios/macos later use the same records) ----
+  const presentSurfaceDevice = (device: Awaited<ReturnType<OwnerSurfaceDeviceStore['list']>>[number]) => ({
+    id: device.id, platform: device.platform, capabilities: device.capabilities, label: device.label ?? null,
+    status: device.status, createdAt: device.createdAt.toISOString(), lastSeenAt: device.lastSeenAt.toISOString(),
+  });
+
+  app.get('/owner/push/config', ownerAuth, async (_request, response, next) => {
+    try {
+      response.json({ publicKey: await pushSender.publicKey() });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/owner/push/devices', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await surfaceDevices.list(runtimeOwner(request))).map(presentSurfaceDevice));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/push/devices', ownerAuth, async (request, response, next) => {
+    try {
+      const subscription = request.body?.subscription;
+      const endpoint = subscription?.endpoint;
+      if (typeof endpoint !== 'string' || !/^https:\/\//.test(endpoint) ||
+        typeof subscription?.keys?.p256dh !== 'string' || typeof subscription?.keys?.auth !== 'string') {
+        throw new HttpError(400, 'A valid push subscription is required');
+      }
+      // Capabilities are what we can actually do for a web push device; action buttons only where the browser shows them.
+      const capabilities: OwnerDeviceCapability[] = ['push', 'deep_link'];
+      if (request.body?.supportsActions === true) capabilities.push('interactive_notification');
+      const now = new Date();
+      const device = await surfaceDevices.upsert({
+        id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'web',
+        deviceToken: JSON.stringify({ endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } }),
+        capabilities, label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : undefined,
+        status: 'active', createdAt: now, lastSeenAt: now,
+      });
+      response.status(201).json(presentSurfaceDevice(device));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/owner/push/devices/:id', ownerAuth, async (request, response, next) => {
+    try {
+      const device = (await surfaceDevices.list(runtimeOwner(request))).find((candidate) => candidate.id === String(request.params.id));
+      if (!device) throw new HttpError(404, 'Device not found');
+      await surfaceDevices.setStatus(device.id, 'revoked');
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/push/test', ownerAuth, async (request, response, next) => {
+    try {
+      const devices = (await surfaceDevices.list(runtimeOwner(request))).filter((device) => device.status === 'active' && device.platform === 'web');
+      if (!devices.length) throw new HttpError(409, 'Turn on notifications on this device first');
+      const payload = JSON.stringify({ title: 'Notifications are on', body: 'You’ll hear from your assistant only when it needs you.', url: '/', tag: 'test' });
+      const results = await Promise.all(devices.map((device) => pushSender.send(JSON.parse(device.deviceToken), payload, { ttlSeconds: 60, urgency: 'normal' })
+        .then(() => 'sent', () => 'failed')));
+      response.json({ sent: results.filter((result) => result === 'sent').length, failed: results.filter((result) => result === 'failed').length });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // ---- Owner attention: what needs the owner, and one-tap actions from a notification ----
+  const presentAttention = (item: Awaited<ReturnType<OwnerAttentionService['list']>>[number]) => ({
+    id: item.id, conversationId: item.conversationId, type: item.type, priority: item.priority, title: item.title,
+    body: item.body, actions: item.actions, status: item.status, url: attentionUrl(item),
+    createdAt: item.createdAt.toISOString(), resolvedAt: item.resolvedAt?.toISOString() ?? null,
+  });
+
+  app.get('/owner/attention', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await attention.list(runtimeOwner(request), {
+        open: request.query.open === 'true',
+        conversationId: typeof request.query.conversationId === 'string' ? request.query.conversationId : undefined,
+        limit: 50,
+      })).map(presentAttention));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  const requireAttention = async (request: Request) => {
+    const item = await attention.get(String(request.params.id), runtimeOwner(request));
+    if (!item) throw new HttpError(404, 'Not found');
+    return item;
+  };
+
+  app.post('/owner/attention/:id/opened', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      await attention.markOpened(item);
+      response.json(presentAttention((await attention.get(item.id, runtimeOwner(request)))!));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/attention/:id/dismiss', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      await attention.dismiss(item);
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * Act on a notification. The conversation comes from the stored attention,
+   * never from the client, and the action runs as a durable runtime command.
+   */
+  app.post('/owner/attention/:id/actions', ownerAuth, async (request, response, next) => {
+    try {
+      const item = await requireAttention(request);
+      const action = request.body?.action;
+      const commandId = typeof request.body?.commandId === 'string' ? request.body.commandId : `attention:${item.id}:${action}`;
+      if (action === 'take_over') {
+        const snapshot = await runtime.takeOver(item.conversationId, item.ownerId, { commandId });
+        await attention.markActed(item, 'take_over', commandId);
+        response.json({ conversationId: item.conversationId, runtime: presentRuntime(snapshot) });
+        return;
+      }
+      if (action === 'reply') {
+        const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
+        if (!body || body.length > 2000) throw new HttpError(400, 'Reply must be between 1 and 2000 characters');
+        const conversation = await ownerReplies.reply({
+          conversationId: item.conversationId, ownerId: item.ownerId, body, idempotencyKey: commandId, source: 'web',
+        });
+        await attention.markActed(item, 'reply', commandId);
+        response.json({ conversationId: item.conversationId, conversation: presentConversation(conversation) });
+        return;
+      }
+      throw new HttpError(400, 'Unknown action');
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Owner-wide live stream: every change in any of the owner's conversations, including new attention.
+  app.get('/owner/events', ownerAuth, (request, response) => {
+    response.status(200);
+    response.setHeader('Content-Type', 'text/event-stream');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders?.();
+    response.write(`event: ready\ndata: {}\n\n`);
+    const unsubscribe = runtime.subscribeOwner(runtimeOwner(request), (event) => {
+      response.write(`event: ${event.type}\n`);
+      response.write(`data: ${JSON.stringify({ ...event, occurredAt: event.occurredAt.toISOString() })}\n\n`);
+    });
+    const keepAlive = setInterval(() => response.write(': ping\n\n'), 25_000);
+    request.on('close', () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  });
+
+  // ---- The owner's phone number ----
+  app.get('/owner/phone', ownerAuth, async (_request, response, next) => {
+    try {
+      if (!options.phoneNumbers) {
+        response.json({ available: false, phoneNumber: null, connected: false });
+        return;
+      }
+      response.json({ available: true, ...(await options.phoneNumbers.status()) });
+    } catch (error) {
+      next(new HttpError(502, 'Couldn’t reach your phone provider. Try again in a moment.'));
+    }
+  });
+
+  app.post('/owner/phone/connect', ownerAuth, async (_request, response, next) => {
+    try {
+      if (!options.phoneNumbers) throw new HttpError(409, 'No phone number is set up for this account yet');
+      response.json(await options.phoneNumbers.connect());
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t connect your number'));
+    }
+  });
+
   app.get('/owner/configuration', ownerAuth, async (request, response) => {
     response.json(await ownerConfiguration.get((request as Request & { ownerId?: string }).ownerId!));
   });
 
   app.patch('/owner/configuration', ownerAuth, async (request, response, next) => {
     try {
+      const { expectedRevision, ...patch } = (request.body ?? {}) as OwnerConfigurationPatch & { expectedRevision?: unknown };
+      for (const key of Object.keys(patch)) {
+        if (!['assistant', 'calls', 'messages', 'onboarding'].includes(key)) throw new HttpError(400, `Unknown settings section: ${key}`);
+      }
       response.json(await ownerConfiguration.update(
         (request as Request & { ownerId?: string }).ownerId!,
-        request.body as OwnerConfigurationPatch,
+        patch as OwnerConfigurationPatch,
+        'web',
+        typeof expectedRevision === 'number' ? expectedRevision : undefined,
       ));
     } catch (error) {
-      next(new HttpError(400, error instanceof Error ? error.message : 'Invalid configuration'));
+      if (error instanceof ConfigurationConflictError) next(new HttpError(409, error.message));
+      else next(error instanceof HttpError ? error : new HttpError(400, error instanceof Error ? error.message : 'Invalid configuration'));
+    }
+  });
+
+  // Who changed what, when (no message contents).
+  app.get('/owner/configuration/events', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await ownerConfiguration.events(runtimeOwner(request))).map((event) => ({
+        ...event, occurredAt: event.occurredAt.toISOString(),
+      })));
+    } catch (error) {
+      next(error);
     }
   });
 
   app.get('/owner/devices/:id/configuration', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { device } = await deviceAuth(request);
+      const configuration = await ownerConfiguration.get(device.ownerId);
       response.json({
         deviceId: device.id,
         ownerId: device.ownerId,
-        configuration: await ownerConfiguration.get(device.ownerId),
+        revision: configuration.revision,
+        // What the Mac executes; it never edits any of this.
+        bridge: {
+          messagesChannelEnabled: configuration.messages.macosMessagesEnabled,
+          assistantChat: device.assistantChat,
+          ownerIdentity: device.messagesIdentity?.address ?? null,
+          needsChatDiscovery: !device.assistantChat,
+          pendingProbe: device.probe && !device.probe.completedAt ? { id: device.probe.id } : null,
+        },
+        configuration,
       });
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(401, 'Device authentication required'));
@@ -606,7 +1015,12 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/owner/devices', ownerAuth, async (request, response, next) => {
     try {
       const devices = await ownerDevices.list((request as Request & { ownerId?: string }).ownerId!);
-      response.json(devices);
+      // Online = the bridge checked in recently; health itself is what the bridge measured on the Mac.
+      response.json(devices.map((device) => ({
+        ...device,
+        online: device.status === 'active' && Boolean(device.lastSeenAt) && Date.now() - new Date(device.lastSeenAt!).getTime() < 120_000,
+        ready: ownerDevices.isReady(device),
+      })));
     } catch (error) {
       next(error);
     }
@@ -618,6 +1032,7 @@ export function createApp(options: AppOptions): express.Express {
         (request as Request & { ownerId?: string }).ownerId!,
         String(request.params.id),
       );
+      await ownerConfiguration.recordChange(runtimeOwner(request), 'device.revoked').catch(() => undefined);
       response.status(204).send();
     } catch (error) {
       next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
@@ -744,34 +1159,29 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // adjust_interaction: one command, one revision, this conversation only.
   app.patch('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
     try {
-      const patch = request.body as RuntimeConfigurationPatch & { expiresAt?: string };
-      const fields = Object.entries(patch).filter(([field]) =>
-        !['commandId', 'expectedRevision', 'expiresAt'].includes(field),
-      ) as [keyof RuntimeConfigurationPatch, unknown][];
-      if (fields.length === 0) throw new HttpError(400, 'At least one runtime field is required');
-      if (patch.expiresAt !== undefined &&
-        (typeof patch.expiresAt !== 'string' || !Number.isFinite(new Date(patch.expiresAt).getTime()))) {
+      const patch = { ...(request.body ?? {}) } as Record<string, unknown>;
+      const expiresAt = patch.expiresAt;
+      if (expiresAt !== undefined && (typeof expiresAt !== 'string' || !Number.isFinite(new Date(expiresAt).getTime()))) {
         throw new HttpError(400, 'expiresAt must be a valid date');
       }
-      let snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
-      const commandInput = runtimeInput(request);
-      for (const [index, [field, value]] of fields.entries()) {
-        snapshot = await runtime.setTemporaryOverride(
-          String(request.params.id),
-          runtimeOwner(request),
-          field as Parameters<RuntimeControlService['setTemporaryOverride']>[2],
-          value,
-          {
-            ...commandInput,
-            commandId: index === 0 ? commandInput.commandId : undefined,
-            expectedRevision: snapshot.configurationRevision,
-          },
-          typeof patch.expiresAt === 'string' ? new Date(patch.expiresAt) : undefined,
-        );
-      }
-      response.json(presentRuntime(snapshot));
+      for (const key of ['commandId', 'expectedRevision', 'expiresAt']) delete patch[key];
+      const conversationId = String(request.params.id);
+      const conversation = await service.getConversation(conversationId);
+      const snapshot = await runtime.adjust(conversationId, runtimeOwner(request), patch as Parameters<RuntimeControlService['adjust']>[2],
+        runtimeInput(request), typeof expiresAt === 'string' ? new Date(expiresAt) : undefined);
+      response.json(presentRuntime(snapshot, conversation ?? undefined));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Reset this conversation to the owner's defaults.
+  app.delete('/conversations/:id/runtime/overrides', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.resetOverrides(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
@@ -817,10 +1227,12 @@ export function createApp(options: AppOptions): express.Express {
           if (!found) throw error;
           return found;
         });
-      const [runtimeEvents, commands, snapshot] = await Promise.all([
+      const [runtimeEvents, commands, snapshot, attentionItems, notifications] = await Promise.all([
         runtime.listEvents(conversationId, runtimeOwner(request)),
         runtime.listCommands(conversationId, runtimeOwner(request)),
         runtime.getRuntimeForConversation(conversation),
+        attention.list(conversation.ownerId ?? runtimeOwner(request), { conversationId }),
+        attention.deliveriesForConversation(conversationId),
       ]);
       const idKeys = ['callbackId', 'responseId', 'commandId', 'messageId', 'requestId', 'providerMessageId',
         'idempotencyKey', 'deliveryId', 'externalId', 'streamSid', 'callSid', 'callId', 'revision'] as const;
@@ -837,6 +1249,17 @@ export function createApp(options: AppOptions): express.Express {
         ...runtimeEvents.filter((event) => event.durable || event.type !== 'runtime.state_changed').map((event) => ({
           at: event.occurredAt, source: 'runtime', type: event.type, eventId: event.id, ids: ids(event.payload),
           summary: typeof event.payload.state === 'string' ? `state: ${event.payload.state}` : undefined,
+        })),
+        ...attentionItems.map((item) => ({
+          at: item.createdAt, source: 'attention', type: `attention.${item.type}`, eventId: item.id,
+          ids: { attentionId: item.id, ...(item.metadata.requestId ? { requestId: item.metadata.requestId } : {}), status: item.status },
+          summary: item.title,
+        })),
+        ...notifications.map((delivery) => ({
+          at: delivery.createdAt, source: 'notification', type: `notification.${delivery.status}`, eventId: delivery.id,
+          ids: { notificationId: delivery.id, attentionId: delivery.attentionId, surface: delivery.surface,
+            ...(delivery.deviceId ? { deviceId: delivery.deviceId } : {}), ...(delivery.providerId ? { providerId: delivery.providerId } : {}) },
+          summary: delivery.error,
         })),
       ].sort((left, right) => left.at.getTime() - right.at.getTime())
         .map((entry) => ({ ...entry, at: entry.at.toISOString() }));
@@ -931,6 +1354,19 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/', (_request, response) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.sendFile('index.html', { root: publicDir });
+  });
+  // Deep link from a notification straight into one live conversation (the app loads it, no inbox step).
+  app.get('/conversations/:id/live', (_request, response) => {
+    response.setHeader('Cache-Control', 'no-cache');
+    response.sendFile('index.html', { root: publicDir });
+  });
+  app.get('/sw.js', (_request, response) => {
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Service-Worker-Allowed', '/');
+    response.type('application/javascript').sendFile('sw.js', { root: publicDir });
+  });
+  app.get(/^\/icon-(180|192|512)\.png$/, (request, response) => {
+    response.sendFile(request.path.slice(1), { root: publicDir });
   });
   app.get('/manifest.webmanifest', (_request, response) => {
     response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir });

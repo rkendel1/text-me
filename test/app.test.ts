@@ -5,6 +5,7 @@ import request from 'supertest';
 
 import { createApp } from '../src/app.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
+import { InMemoryNotificationDeliveryStore, InMemoryOwnerAttentionStore } from '../src/attention/stores.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
 import { FakeConversationModel } from '../src/conversation/fake-model.js';
 import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
@@ -814,21 +815,18 @@ test('SMS transition runtime request preserves caller consent and can stream SSE
   assert.equal(messaging.sentMessages.length, 2);
 });
 
-test('moving to text still works when no Mac is paired, notifying the owner by SMS instead', async () => {
+test('with no Mac anywhere, moving to text works and the owner is reached by SMS, with no Mac traces', async () => {
   const repository = new InMemoryConversationRepository();
   const messaging = new FakeMessagingProvider();
-  const ownerDevices = new OwnerDeviceService();
-  const ownerConfiguration = new OwnerConfigurationService();
-  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const attentionStore = new InMemoryOwnerAttentionStore();
+  const deliveries = new InMemoryNotificationDeliveryStore(attentionStore);
   const app = createApp({
     repository,
     ownerId: 'randy',
     ownerPhone: '+15550009999',
     messagingProvider: messaging,
-    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
-    ownerDeviceService: ownerDevices,
-    ownerConfigurationService: ownerConfiguration,
-    ownerDeliveryStore: ownerDeliveries,
+    attentionStore,
+    notificationDeliveryStore: deliveries,
   });
   await request(app).post('/webhooks/fake/voice').send({ callId: 'no-mac', callerPhone: '+15553334444' });
   const [conversation] = await repository.list();
@@ -839,5 +837,9 @@ test('moving to text still works when no Mac is paired, notifying the owner by S
   assert.equal(converted.status, 200, JSON.stringify(converted.body));
   assert.equal(converted.body.state, 'text_active');
   assert.deepEqual(messaging.sentMessages.map((message) => message.to), ['+15553334444', '+15550009999']);
-  assert.ok(converted.body.events.includes('owner.delivery.failed'));
+  assert.ok(!converted.body.events.some((type: string) => type.startsWith('owner.delivery')), 'no Mac delivery attempted');
+  const transferred = (await attentionStore.list('randy')).find((item) => item.type === 'conversation_transferred')!;
+  assert.equal(transferred.title, 'Jordan is now texting');
+  assert.equal(transferred.status, 'delivered');
+  assert.deepEqual((await deliveries.list(transferred.id)).map((delivery) => [delivery.surface, delivery.status]), [['owner_sms', 'sent']]);
 });

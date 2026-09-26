@@ -16,6 +16,8 @@ export type RuntimeEventListener = (event: ConversationRuntimeEvent) => void;
 export interface RuntimeEventBus {
   publish(event: ConversationRuntimeEvent): Promise<void>;
   subscribe(conversationId: string, listener: RuntimeEventListener): () => void;
+  /** Every conversation's events (owner-wide live screens filter by ownership). */
+  subscribeAll(listener: RuntimeEventListener): () => void;
 }
 
 export class InMemoryRuntimeEventBus implements RuntimeEventBus {
@@ -23,6 +25,12 @@ export class InMemoryRuntimeEventBus implements RuntimeEventBus {
 
   async publish(event: ConversationRuntimeEvent): Promise<void> {
     this.emitter.emit(`runtime:${event.conversationId}`, event);
+    this.emitter.emit('runtime:*', event);
+  }
+
+  subscribeAll(listener: RuntimeEventListener): () => void {
+    this.emitter.on('runtime:*', listener);
+    return () => this.emitter.off('runtime:*', listener);
   }
 
   subscribe(conversationId: string, listener: RuntimeEventListener): () => void {
@@ -75,6 +83,16 @@ export class PostgresRuntimeEventBus implements RuntimeEventBus {
     this.subscribers += 1;
     void this.ensureListening();
     const unsubscribe = this.local.subscribe(conversationId, listener);
+    return () => {
+      unsubscribe();
+      this.subscribers -= 1;
+    };
+  }
+
+  subscribeAll(listener: RuntimeEventListener): () => void {
+    this.subscribers += 1;
+    void this.ensureListening();
+    const unsubscribe = this.local.subscribeAll(listener);
     return () => {
       unsubscribe();
       this.subscribers -= 1;

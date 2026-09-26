@@ -23,6 +23,14 @@ import {
   PostgresOwnerPairingCredentialStore,
 } from './repositories/postgres-owner-runtime-repository.js';
 import { PostgresRuntimeEventBus } from './runtime/event-bus.js';
+import {
+  PostgresAppSecretStore,
+  PostgresNotificationDeliveryStore,
+  PostgresOwnerAttentionStore,
+  PostgresOwnerSurfaceDeviceStore,
+} from './attention/postgres.js';
+import { VapidPushSender } from './attention/surfaces.js';
+import { PhoneNumberService, TwilioPhoneNumberClient } from './telephony/phone-number.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
 import { createGateway } from 'ai';
@@ -51,6 +59,10 @@ export function buildServer(
   const runtimeEvents = new PostgresConversationRuntimeEventStore(pool);
   const runtimeOverrides = new PostgresRuntimeOverrideStore(pool);
   const runtimeCommands = new PostgresRuntimeCommandStore(pool);
+  const attentionStore = new PostgresOwnerAttentionStore(pool);
+  const notificationDeliveries = new PostgresNotificationDeliveryStore(pool);
+  const surfaceDevices = new PostgresOwnerSurfaceDeviceStore(pool);
+  const appSecrets = new PostgresAppSecretStore(pool);
   const runtimeEventBus = new PostgresRuntimeEventBus(pool, config.databaseListenUrl);
 
   const ready = (async () => {
@@ -64,6 +76,10 @@ export function buildServer(
     await runtimeEvents.initialize();
     await runtimeOverrides.initialize();
     await runtimeCommands.initialize();
+    await attentionStore.initialize();
+    await notificationDeliveries.initialize();
+    await surfaceDevices.initialize();
+    await appSecrets.initialize();
   })();
   ready.catch((error) => console.error('Database initialization failed', error));
 
@@ -112,6 +128,21 @@ export function buildServer(
     runtimeOverrideStore: runtimeOverrides,
     runtimeEventBus,
     runtimeCommandStore: runtimeCommands,
+    publicBaseUrl: config.publicBaseUrl,
+    phoneNumbers: new PhoneNumberService(
+      new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
+      config.twilioPhoneNumber,
+      config.publicBaseUrl,
+    ),
+    attentionStore,
+    notificationDeliveryStore: notificationDeliveries,
+    surfaceDeviceStore: surfaceDevices,
+    // VAPID keys are generated once and kept in Neon, so push works with zero configuration.
+    pushSender: new VapidPushSender(appSecrets, {
+      subject: process.env.VAPID_SUBJECT,
+      publicKey: process.env.VAPID_PUBLIC_KEY,
+      privateKey: process.env.VAPID_PRIVATE_KEY,
+    }),
     realtimeVoice,
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),

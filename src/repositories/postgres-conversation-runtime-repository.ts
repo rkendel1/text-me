@@ -10,7 +10,8 @@ import type {
   ConversationRuntimeStore,
   RuntimeOverrideStore,
 } from '../runtime/store.js';
-import type { RuntimeCommand, RuntimeCommandStore } from '../runtime/commands.js';
+import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from '../runtime/commands.js';
+import { migrate } from './schema-lock.js';
 
 interface ConversationRuntimeRow {
   conversation_id: string;
@@ -85,32 +86,34 @@ export class PostgresConversationRuntimeStore implements ConversationRuntimeStor
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversation_runtimes (
-        conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
-        state TEXT NOT NULL,
-        assistant_enabled BOOLEAN NOT NULL,
-        voice_enabled BOOLEAN NOT NULL,
-        transcription_enabled BOOLEAN NOT NULL,
-        ai_mode TEXT NOT NULL,
-        response_style TEXT NOT NULL,
-        verbosity TEXT NOT NULL,
-        ask_owner_when TEXT NOT NULL,
-        allow_commitments BOOLEAN NOT NULL,
-        allow_scheduling BOOLEAN NOT NULL,
-        allow_caller_followups BOOLEAN NOT NULL,
-        custom_instructions TEXT,
-        sms_transition_enabled BOOLEAN NOT NULL,
-        started_at TIMESTAMPTZ,
-        paused_at TIMESTAMPTZ,
-        stopped_at TIMESTAMPTZ,
-        current_turn_id TEXT,
-        current_activity TEXT,
-        configuration_revision INTEGER NOT NULL,
-        applied_revision INTEGER NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS conversation_runtimes (
+          conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+          state TEXT NOT NULL,
+          assistant_enabled BOOLEAN NOT NULL,
+          voice_enabled BOOLEAN NOT NULL,
+          transcription_enabled BOOLEAN NOT NULL,
+          ai_mode TEXT NOT NULL,
+          response_style TEXT NOT NULL,
+          verbosity TEXT NOT NULL,
+          ask_owner_when TEXT NOT NULL,
+          allow_commitments BOOLEAN NOT NULL,
+          allow_scheduling BOOLEAN NOT NULL,
+          allow_caller_followups BOOLEAN NOT NULL,
+          custom_instructions TEXT,
+          sms_transition_enabled BOOLEAN NOT NULL,
+          started_at TIMESTAMPTZ,
+          paused_at TIMESTAMPTZ,
+          stopped_at TIMESTAMPTZ,
+          current_turn_id TEXT,
+          current_activity TEXT,
+          configuration_revision INTEGER NOT NULL,
+          applied_revision INTEGER NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    });
   }
 
   async get(conversationId: string): Promise<ConversationRuntime | null> {
@@ -206,17 +209,19 @@ export class PostgresConversationRuntimeEventStore implements ConversationRuntim
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversation_runtime_events (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        occurred_at TIMESTAMPTZ NOT NULL,
-        durable BOOLEAN NOT NULL DEFAULT FALSE
-      )
-    `);
-    await this.pool.query('CREATE INDEX IF NOT EXISTS idx_conversation_runtime_events_conversation ON conversation_runtime_events (conversation_id, occurred_at DESC)');
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS conversation_runtime_events (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          occurred_at TIMESTAMPTZ NOT NULL,
+          durable BOOLEAN NOT NULL DEFAULT FALSE
+        )
+      `);
+      await db.query('CREATE INDEX IF NOT EXISTS idx_conversation_runtime_events_conversation ON conversation_runtime_events (conversation_id, occurred_at DESC)');
+    });
   }
 
   async append(event: ConversationRuntimeEvent): Promise<void> {
@@ -271,16 +276,18 @@ export class PostgresRuntimeOverrideStore implements RuntimeOverrideStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversation_runtime_overrides (
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        field TEXT NOT NULL,
-        value JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL,
-        expires_at TIMESTAMPTZ,
-        PRIMARY KEY (conversation_id, field)
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS conversation_runtime_overrides (
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          field TEXT NOT NULL,
+          value JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          expires_at TIMESTAMPTZ,
+          PRIMARY KEY (conversation_id, field)
+        )
+      `);
+    });
   }
 
   async list(conversationId: string): Promise<RuntimeOverride[]> {
@@ -337,39 +344,57 @@ interface RuntimeCommandRow {
   created_at: Date;
   processed_at: Date | null;
   applied_live_at: Date | null;
+  runtime_id: string | null;
 }
+
+const toCommand = (row: RuntimeCommandRow): RuntimeCommand => ({
+  id: row.id,
+  conversationId: row.conversation_id,
+  runtimeId: row.runtime_id ?? runtimeIdFor(row.conversation_id),
+  ownerId: row.owner_id,
+  type: row.type,
+  payload: row.payload,
+  status: row.status,
+  ...(row.error ? { error: row.error } : {}),
+  createdAt: row.created_at,
+  ...(row.processed_at ? { processedAt: row.processed_at } : {}),
+  ...(row.applied_live_at ? { appliedLiveAt: row.applied_live_at } : {}),
+});
 
 /** Auditable history of every owner command sent to a conversation's runtime. */
 export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS runtime_commands (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        processed_at TIMESTAMPTZ,
-        applied_live_at TIMESTAMPTZ
-      )
-    `);
-    await this.pool.query('CREATE INDEX IF NOT EXISTS idx_runtime_commands_conversation ON runtime_commands (conversation_id, created_at)');
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS runtime_commands (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          processed_at TIMESTAMPTZ,
+          applied_live_at TIMESTAMPTZ
+        )
+      `);
+      await db.query('CREATE INDEX IF NOT EXISTS idx_runtime_commands_conversation ON runtime_commands (conversation_id, created_at)');
+      await db.query('ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS runtime_id TEXT');
+    });
   }
 
   async record(command: RuntimeCommand): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO runtime_commands (id, conversation_id, owner_id, type, payload, status, error, created_at, processed_at, applied_live_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        INSERT INTO runtime_commands (id, conversation_id, owner_id, type, payload, status, error, created_at, processed_at, applied_live_at, runtime_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (id) DO NOTHING
       `,
       [command.id, command.conversationId, command.ownerId, command.type, command.payload, command.status,
-        command.error ?? null, command.createdAt, command.processedAt ?? null, command.appliedLiveAt ?? null],
+        command.error ?? null, command.createdAt, command.processedAt ?? null, command.appliedLiveAt ?? null, command.runtimeId],
     );
   }
 
@@ -392,17 +417,11 @@ export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
       'SELECT * FROM runtime_commands WHERE conversation_id = $1 ORDER BY created_at ASC, id ASC',
       [conversationId],
     );
-    return result.rows.map((row) => ({
-      id: row.id,
-      conversationId: row.conversation_id,
-      ownerId: row.owner_id,
-      type: row.type,
-      payload: row.payload,
-      status: row.status,
-      ...(row.error ? { error: row.error } : {}),
-      createdAt: row.created_at,
-      ...(row.processed_at ? { processedAt: row.processed_at } : {}),
-      ...(row.applied_live_at ? { appliedLiveAt: row.applied_live_at } : {}),
-    }));
+    return result.rows.map(toCommand);
+  }
+
+  async get(id: string): Promise<RuntimeCommand | null> {
+    const result = await this.pool.query<RuntimeCommandRow>('SELECT * FROM runtime_commands WHERE id = $1', [id]);
+    return result.rows[0] ? toCommand(result.rows[0]) : null;
   }
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 
+import { ConfigurationConflictError } from '../owner/configuration.js';
 import type {
   OwnerConfiguration,
   OwnerConfigurationAuditEvent,
@@ -19,6 +20,7 @@ import type {
   OwnerMessageDeliveryStore,
 } from '../owner/delivery.js';
 import type { MessagesChat } from '../owner/mac-messages-adapter.js';
+import { migrate } from './schema-lock.js';
 
 interface OwnerDeviceRow {
   id: string;
@@ -35,6 +37,7 @@ interface OwnerDeviceRow {
   updated_at: Date;
   last_seen_at: Date | null;
   revoked_at: Date | null;
+  probe: OwnerDevice['probe'];
 }
 
 interface OwnerMessageChatRow {
@@ -131,6 +134,7 @@ function hydrateDevice(row: OwnerDeviceRow, chats: OwnerMessageChatRow[]): Owner
     updatedAt: new Date(row.updated_at),
     lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at) : null,
     revokedAt: row.revoked_at ? new Date(row.revoked_at) : null,
+    probe: row.probe ?? null,
   };
 }
 
@@ -160,36 +164,39 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_devices (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        setup_status TEXT NOT NULL,
-        health JSONB NOT NULL,
-        messages_identity JSONB,
-        is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-        bridge_version TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ,
-        revoked_at TIMESTAMPTZ
-      )
-    `);
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_messages_chats (
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        chat_id TEXT NOT NULL,
-        service TEXT NOT NULL,
-        display_name TEXT,
-        address TEXT,
-        is_group BOOLEAN NOT NULL DEFAULT FALSE,
-        is_authorized BOOLEAN NOT NULL DEFAULT FALSE,
-        PRIMARY KEY (device_id, chat_id, service)
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_devices (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          setup_status TEXT NOT NULL,
+          health JSONB NOT NULL,
+          messages_identity JSONB,
+          is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+          bridge_version TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ,
+          revoked_at TIMESTAMPTZ
+        )
+      `);
+      await db.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS probe JSONB');
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_messages_chats (
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL,
+          service TEXT NOT NULL,
+          display_name TEXT,
+          address TEXT,
+          is_group BOOLEAN NOT NULL DEFAULT FALSE,
+          is_authorized BOOLEAN NOT NULL DEFAULT FALSE,
+          PRIMARY KEY (device_id, chat_id, service)
+        )
+      `);
+    });
   }
 
   async save(device: OwnerDevice): Promise<void> {
@@ -201,11 +208,11 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           INSERT INTO owner_devices (
             id, owner_id, type, name, status, setup_status, health,
             messages_identity, is_primary, bridge_version,
-            created_at, updated_at, last_seen_at, revoked_at
+            created_at, updated_at, last_seen_at, revoked_at, probe
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10,
-            $11, $12, $13, $14
+            $11, $12, $13, $14, $15
           )
           ON CONFLICT (id) DO UPDATE SET
             owner_id = EXCLUDED.owner_id,
@@ -219,7 +226,8 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
             bridge_version = EXCLUDED.bridge_version,
             updated_at = EXCLUDED.updated_at,
             last_seen_at = EXCLUDED.last_seen_at,
-            revoked_at = EXCLUDED.revoked_at
+            revoked_at = EXCLUDED.revoked_at,
+            probe = EXCLUDED.probe
         `,
         [
           device.id,
@@ -236,6 +244,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           device.updatedAt,
           device.lastSeenAt,
           device.revokedAt,
+          device.probe ? JSON.stringify(device.probe) : null,
         ],
       );
       await client.query('DELETE FROM owner_messages_chats WHERE device_id = $1', [device.id]);
@@ -316,15 +325,17 @@ export class PostgresOwnerPairingCredentialStore implements OwnerPairingCredenti
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_pairing_credentials (
-        device_id TEXT PRIMARY KEY REFERENCES owner_devices(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        credential TEXT NOT NULL UNIQUE,
-        expires_at TIMESTAMPTZ NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_pairing_credentials (
+          device_id TEXT PRIMARY KEY REFERENCES owner_devices(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          credential TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+    });
   }
 
   async save(record: OwnerPairingCredentialRecord): Promise<void> {
@@ -351,6 +362,17 @@ export class PostgresOwnerPairingCredentialStore implements OwnerPairingCredenti
     return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
   }
 
+  async consume(code: string, now: number): Promise<OwnerPairingCredentialRecord | null> {
+    // DELETE … RETURNING is atomic: of two simultaneous scans, exactly one gets the row.
+    const result = await this.pool.query<OwnerPairingRow>(
+      'DELETE FROM owner_pairing_credentials WHERE credential = $1 RETURNING device_id, owner_id, credential, expires_at',
+      [code],
+    );
+    const row = result.rows[0];
+    if (!row || new Date(row.expires_at).getTime() <= now) return null;
+    return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
+  }
+
   async getByCode(code: string): Promise<OwnerPairingCredentialRecord | null> {
     const result = await this.pool.query<OwnerPairingRow>(
       'SELECT device_id, owner_id, credential, expires_at FROM owner_pairing_credentials WHERE credential = $1',
@@ -370,15 +392,17 @@ export class PostgresOwnerDeviceSessionStore implements OwnerDeviceSessionStore 
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_device_sessions (
-        token TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ NOT NULL
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_device_sessions (
+          token TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    });
   }
 
   async save(record: OwnerDeviceSessionRecord): Promise<void> {
@@ -426,39 +450,41 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configurations (
-        owner_id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        assistant JSONB NOT NULL,
-        calls JSONB NOT NULL,
-        messages JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await this.pool.query(
-      "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
-    );
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
-        owner_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        assistant JSONB NOT NULL,
-        calls JSONB NOT NULL,
-        messages JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (owner_id, revision)
-      )
-    `);
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configuration_audit (
-        owner_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        occurred_at TIMESTAMPTZ NOT NULL
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configurations (
+          owner_id TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL,
+          assistant JSONB NOT NULL,
+          calls JSONB NOT NULL,
+          messages JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(
+        "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
+      );
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
+          owner_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          assistant JSONB NOT NULL,
+          calls JSONB NOT NULL,
+          messages JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (owner_id, revision)
+        )
+      `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configuration_audit (
+          owner_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          source TEXT NOT NULL,
+          occurred_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    });
   }
 
   async get(ownerId: string): Promise<OwnerConfiguration | null> {
@@ -550,7 +576,7 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
         ],
       );
       if (current.rowCount !== 1) {
-        throw new Error('Owner configuration update conflict');
+        throw new ConfigurationConflictError();
       }
       await client.query(
         `
@@ -597,27 +623,29 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_message_deliveries (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL,
-        body TEXT NOT NULL,
-        correlation_key TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        provider_request_id TEXT,
-        observed_external_id TEXT,
-        replied_external_id TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL,
-        observed_at TIMESTAMPTZ,
-        replied_at TIMESTAMPTZ,
-        failed_at TIMESTAMPTZ,
-        error TEXT
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_message_deliveries (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          message_id TEXT NOT NULL,
+          body TEXT NOT NULL,
+          correlation_key TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          provider_request_id TEXT,
+          observed_external_id TEXT,
+          replied_external_id TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          observed_at TIMESTAMPTZ,
+          replied_at TIMESTAMPTZ,
+          failed_at TIMESTAMPTZ,
+          error TEXT
+        )
+      `);
+    });
   }
 
   async create(input: Omit<OwnerMessageDeliveryRecord, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'correlationKey'> & {
