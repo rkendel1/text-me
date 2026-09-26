@@ -116,6 +116,7 @@ export class ConversationEngine {
     conversationId: string,
     body: string,
     idempotencyKey: string,
+    source: 'web' | 'macos_messages' = 'web',
   ): Promise<Conversation> {
     const conversation = await this.requireConversation(conversationId);
     const existing = conversation.events.find(
@@ -123,7 +124,7 @@ export class ConversationEngine {
     );
     if (!existing) {
       await this.repository.appendEvent(conversationId, 'owner.message', {
-        text: body, speaker: 'owner', channel: 'web', source: 'web', idempotencyKey,
+        text: body, speaker: 'owner', channel: 'web', source, idempotencyKey,
       }, new Date());
     } else if (conversation.events.some(
       (event) => event.type === 'assistant.message' && event.payload.idempotencyKey === idempotencyKey,
@@ -145,7 +146,7 @@ export class ConversationEngine {
         to: consent.payload.phoneNumber, body: text, idempotencyKey: `${idempotencyKey}:sms`,
       });
       await this.repository.appendEvent(conversationId, 'assistant.message', {
-        text, speaker: 'assistant', channel: 'sms', source: 'web', idempotencyKey,
+        text, speaker: 'assistant', channel: 'sms', source, idempotencyKey,
         providerMessageId: result.providerMessageId,
       }, new Date());
       await this.repository.appendEvent(conversationId, 'sms.sent', {

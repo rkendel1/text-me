@@ -180,24 +180,26 @@ export class ConversationService {
     body: string,
   ): Promise<void> {
     const conversation = await this.requireConversation(conversationId);
+    const channel = this.ownerChannel;
+    if (!channel) throw new Error('Owner channel is not configured');
     if (conversation.events.some((event) =>
       event.type === 'owner.delivery.requested' && event.payload.messageId === messageId)) return;
     await this.repository.appendEvent(conversationId, 'owner.message.created', {
-      messageId, body, source: this.ownerChannel!.type,
+      messageId, body, source: channel.type,
     }, new Date());
     try {
-      const delivery = await this.ownerChannel!.sendMessage({
+      const delivery = await channel.sendMessage({
         ownerId: this.ownerId,
         conversationId,
         messageId,
         body,
       });
       await this.repository.appendEvent(conversationId, 'owner.delivery.requested', {
-        messageId, deliveryId: delivery.deliveryId, source: this.ownerChannel.type,
+        messageId, deliveryId: delivery.deliveryId, source: channel.type,
       }, new Date());
     } catch (error) {
       await this.repository.appendEvent(conversationId, 'owner.delivery.failed', {
-        messageId, source: this.ownerChannel.type,
+        messageId, source: channel.type,
         error: error instanceof Error ? error.message : 'unknown',
       }, new Date());
       throw error;
