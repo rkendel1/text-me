@@ -1,0 +1,385 @@
+import assert from 'node:assert/strict';
+import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
+import { createServer as createHttp2Server, type Http2Server, type IncomingHttpHeaders } from 'node:http2';
+import type { AddressInfo } from 'node:net';
+import test from 'node:test';
+
+import request from 'supertest';
+import twilio from 'twilio';
+import WebSocket from 'ws';
+
+import { apnsJwt, HttpApnsSender } from '../src/attention/apns.js';
+import {
+  InMemoryNotificationDeliveryStore,
+  InMemoryOwnerAttentionStore,
+  InMemoryOwnerSurfaceDeviceStore,
+} from '../src/attention/stores.js';
+import type { PushSender } from '../src/attention/surfaces.js';
+import { InMemoryOwnerAuthSessionStore, OwnerAuthService, SESSION_TTL_MS } from '../src/auth/sessions.js';
+import { getConfig } from '../src/config.js';
+import { assertProductionComposition, createApp } from '../src/http-app.js';
+import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
+import { OwnerConfigurationService } from '../src/owner/configuration.js';
+import { InMemoryRuntimeCommandStore } from '../src/runtime/commands.js';
+import { FakeTelephonyProvider } from '../src/telephony/fake-provider.js';
+import { TwilioProvider } from '../src/telephony/twilio-provider.js';
+import type {
+  RealtimeConnection,
+  RealtimeConnectionHandlers,
+  RealtimeConnector,
+  RealtimeServerEvent,
+} from '../src/voice/realtime/connector.js';
+import { MEDIA_STREAM_PATH, RealtimeVoiceService } from '../src/voice/realtime/realtime-voice.js';
+import { InMemoryConversationRepository } from './support/in-memory-repository.js';
+
+const ACCESS_KEY = 'owner-access-key';
+
+class Connector implements RealtimeConnector {
+  readonly modelId = 'openai/gpt-realtime-2';
+  private handlers?: RealtimeConnectionHandlers;
+  async connect(_config: unknown, handlers: RealtimeConnectionHandlers): Promise<RealtimeConnection> {
+    this.handlers = handlers;
+    return { send: async () => undefined, close: () => undefined };
+  }
+  emit(event: Record<string, unknown>) { this.handlers!.onEvent({ raw: {}, ...event } as RealtimeServerEvent); }
+  get connected() { return Boolean(this.handlers); }
+}
+
+class NoWebPush implements PushSender {
+  async publicKey() { return 'BKey'; }
+  async send() { return { statusCode: 201 }; }
+}
+
+/** Stands in for Apple: a real HTTP/2 server that checks what APNs checks. */
+async function fakeApns(publicKeyPem: string) {
+  const received: Array<{ headers: IncomingHttpHeaders; body: Record<string, unknown> }> = [];
+  let reply: { status: number; reason?: string } = { status: 200 };
+  const server: Http2Server = createHttp2Server();
+  server.on('stream', (stream, headers) => {
+    let raw = '';
+    stream.setEncoding('utf8');
+    stream.on('data', (chunk) => { raw += chunk; });
+    stream.on('end', () => {
+      const [header, claims, signature] = String(headers.authorization ?? '').replace(/^bearer /, '').split('.');
+      const validJwt = Boolean(signature) && verify('sha256', Buffer.from(`${header}.${claims}`),
+        { key: createPublicKey(publicKeyPem), dsaEncoding: 'ieee-p1363' }, Buffer.from(signature, 'base64url'));
+      received.push({ headers, body: JSON.parse(raw) });
+      if (!validJwt) {
+        stream.respond({ ':status': 403 });
+        stream.end(JSON.stringify({ reason: 'InvalidProviderToken' }));
+        return;
+      }
+      stream.respond({ ':status': reply.status, 'apns-id': 'apns-1' });
+      stream.end(reply.reason ? JSON.stringify({ reason: reply.reason }) : '');
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    received,
+    respondWith(next: { status: number; reason?: string }) { reply = next; },
+    close: () => server.close(),
+  };
+}
+
+async function plane(options: { apns?: HttpApnsSender; twilioAuthToken?: string; publicBaseUrl?: string } = {}) {
+  const repository = new InMemoryConversationRepository();
+  const connector = new Connector();
+  const voice = new RealtimeVoiceService(connector);
+  const attentionStore = new InMemoryOwnerAttentionStore();
+  const surfaceDevices = new InMemoryOwnerSurfaceDeviceStore();
+  const commands = new InMemoryRuntimeCommandStore();
+  const configuration = new OwnerConfigurationService();
+  const app = createApp({
+    repository,
+    ownerAuthToken: ACCESS_KEY,
+    ownerPhone: '+15550009999',
+    messagingProvider: new FakeMessagingProvider(),
+    ownerConfigurationService: configuration,
+    realtimeVoice: voice,
+    pushSender: new NoWebPush(),
+    apnsSender: options.apns,
+    appleTeamId: 'TEAM123456',
+    attentionStore,
+    notificationDeliveryStore: new InMemoryNotificationDeliveryStore(attentionStore),
+    surfaceDeviceStore: surfaceDevices,
+    runtimeCommandStore: commands,
+    authSessionStore: new InMemoryOwnerAuthSessionStore(),
+    twilioAuthToken: options.twilioAuthToken,
+    publicBaseUrl: options.publicBaseUrl,
+    providers: [new TwilioProvider({ mediaStreamUrl: `wss://example.test${MEDIA_STREAM_PATH}` }), new FakeTelephonyProvider()],
+  });
+  const server: Server = createServer(app);
+  voice.attach(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
+  const sockets: WebSocket[] = [];
+  return {
+    app, repository, connector, attentionStore, surfaceDevices, commands, configuration, port,
+    close: () => { sockets.forEach((socket) => socket.close()); server.close(); },
+    async signIn(platform: 'web' | 'ios' = 'web') {
+      const response = await request(app).post('/auth/sessions').send({ accessKey: ACCESS_KEY, platform });
+      assert.equal(response.status, 201, JSON.stringify(response.body));
+      return { token: response.body.token as string, headers: { Authorization: `Bearer ${response.body.token}` }, session: response.body.session };
+    },
+    async call(callId = 'call-1') {
+      await request(app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444' });
+      const conversation = (await repository.list()).find((candidate) => candidate.providerCallId === callId)!;
+      const socket = new WebSocket(`ws://127.0.0.1:${port}${MEDIA_STREAM_PATH}`);
+      sockets.push(socket);
+      await new Promise((resolve) => socket.once('open', resolve));
+      socket.send(JSON.stringify({ event: 'start', start: { streamSid: 'MZ1', customParameters: { conversationId: conversation.id } } }));
+      await eventually(() => connector.connected, 'realtime session');
+      return conversation.id;
+    },
+    askOwner(callId = 'ask-1') {
+      connector.emit({
+        type: 'function-call-arguments-done', responseId: 'r', itemId: 'i', callId, name: 'ask_owner',
+        arguments: JSON.stringify({ question: 'Can you do Friday at 2?', suggestedReplies: ['Friday at 2 works'] }),
+      });
+    },
+  };
+}
+
+async function eventually(check: () => boolean | Promise<boolean>, what: string) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`Timed out waiting for ${what}`);
+}
+
+test('one sign-in model for every surface: the access key becomes a session, never stored by the device', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  const wrong = await request(p.app).post('/auth/sessions').send({ accessKey: 'nope', platform: 'web' });
+  assert.equal(wrong.status, 401);
+  assert.equal(wrong.body.code, 'invalid_access_key');
+  assert.equal((await request(p.app).get('/owner/control-plane')).status, 401, 'no anonymous access');
+
+  const web = await p.signIn('web');
+  const ios = await p.signIn('ios');
+  assert.match(web.token, /^ses_[A-Za-z0-9_-]{40,}$/);
+  assert.notEqual(web.token, ACCESS_KEY);
+  assert.equal(web.session.platform, 'web');
+  assert.equal(ios.session.platform, 'ios');
+  const me = await request(p.app).get('/owner/me').set(ios.headers);
+  assert.deepEqual({ ownerId: me.body.ownerId, name: me.body.name, platform: me.body.session.platform }, { ownerId: 'owner', name: 'Randy', platform: 'ios' });
+  const current = await request(p.app).get('/auth/session').set(web.headers);
+  assert.equal(current.body.credential, 'session');
+  // The access key still works for scripts and the smoke test; devices use sessions.
+  assert.equal((await request(p.app).get('/auth/session').set({ Authorization: `Bearer ${ACCESS_KEY}` })).body.credential, 'access_key');
+  const listed = (await request(p.app).get('/auth/sessions').set(web.headers)).body as Array<{ platform: string; current: boolean }>;
+  assert.deepEqual(listed.map((session) => [session.platform, session.current]).sort(), [['ios', false], ['web', true]]);
+
+  // Tokens in URLs are accepted only by the live streams (EventSource can't set headers).
+  assert.equal((await request(p.app).get(`/owner/control-plane?token=${web.token}`)).status, 401);
+  const stream = await fetch(`http://127.0.0.1:${p.port}/owner/events?token=${web.token}`);
+  assert.equal(stream.status, 200);
+  assert.match(stream.headers.get('content-type') ?? '', /text\/event-stream/);
+  await stream.body?.cancel();
+});
+
+test('sessions expire, slide while used, and a revoked device is out immediately and stops getting notifications', async (t) => {
+  let clock = Date.parse('2026-09-26T12:00:00Z');
+  const auth = new OwnerAuthService(new InMemoryOwnerAuthSessionStore(), ACCESS_KEY, 'owner', () => clock);
+  const { token } = (await auth.signIn(ACCESS_KEY, { platform: 'ios' }))!;
+  clock += SESSION_TTL_MS - 60_000;
+  assert.equal((await auth.authenticate(token)).ok, true, 'used just before expiry: extended');
+  clock += SESSION_TTL_MS - 60_000;
+  assert.equal((await auth.authenticate(token)).ok, true, 'still valid because it was used');
+  clock += SESSION_TTL_MS + 1;
+  assert.deepEqual(await auth.authenticate(token), { ok: false, reason: 'expired' });
+  assert.deepEqual(await auth.authenticate('ses_forged'), { ok: false, reason: 'invalid' });
+
+  const p = await plane();
+  t.after(p.close);
+  const phone = await p.signIn('ios');
+  const laptop = await p.signIn('web');
+  await request(p.app).post('/owner/push/devices').set(laptop.headers)
+    .send({ subscription: { endpoint: 'https://web.push.apple.com/laptop', keys: { p256dh: 'k', auth: 'a' } } });
+  assert.equal((await request(p.app).delete(`/auth/sessions/${laptop.session.id}`).set(phone.headers)).status, 204);
+  const revoked = await request(p.app).get('/owner/control-plane').set(laptop.headers);
+  assert.equal(revoked.status, 401);
+  assert.equal(revoked.body.code, 'session_revoked');
+  assert.deepEqual((await p.surfaceDevices.list('owner')).map((device) => device.status), ['revoked'],
+    'signing a device out stops its notifications');
+  // Signing yourself out.
+  assert.equal((await request(p.app).delete('/auth/session').set(phone.headers)).status, 204);
+  assert.equal((await request(p.app).get('/owner/me').set(phone.headers)).status, 401);
+});
+
+test('the control-plane snapshot: identity, plane status through its lifecycle, live work and pending attention', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  const { headers } = await p.signIn();
+  const snapshot = async () => (await request(p.app).get('/owner/control-plane').set(headers)).body;
+
+  const idle = await snapshot();
+  assert.equal(idle.owner.id, 'owner');
+  assert.equal(idle.plane.status, 'online');
+  assert.deepEqual(idle.plane.voice, { realtime: true, model: 'openai/gpt-realtime-2' });
+  assert.deepEqual([idle.live.length, idle.attention.length], [0, 0]);
+
+  const conversationId = await p.call();
+  const working = await snapshot();
+  assert.equal(working.plane.status, 'working');
+  assert.equal(working.live[0].id, conversationId);
+
+  p.askOwner();
+  await eventually(async () => (await snapshot()).plane.status === 'awaiting_attention', 'attention');
+  const needs = await snapshot();
+  const item = needs.attention.find((entry: { type: string }) => entry.type === 'assistant_needs_owner');
+  assert.equal(item.url, `/conversations/${conversationId}/live?attention=${item.id}`);
+
+  // Command → acknowledgement → resulting state, all on the same contract.
+  const takeOver = await request(p.app).post(`/conversations/${conversationId}/runtime/takeover`).set(headers).send({ commandId: 'cmd-1' });
+  assert.equal(takeOver.status, 200);
+  assert.equal(takeOver.body.status, 'takeover');
+  const replay = await request(p.app).post(`/conversations/${conversationId}/runtime/takeover`).set(headers).send({ commandId: 'cmd-1' });
+  assert.equal(replay.status, 200, 'retrying after a lost response is safe');
+  assert.equal((await p.commands.list(conversationId)).filter((command) => command.id === 'cmd-1').length, 1);
+  const commands = (await request(p.app).get(`/conversations/${conversationId}/runtime/commands`).set(headers)).body;
+  assert.ok(commands.some((command: { id: string; status: string }) => command.id === 'cmd-1' &&
+    ['applied', 'applied_live'].includes(command.status)));
+
+  await p.configuration.update('owner', { calls: { answerCalls: false } });
+  assert.equal((await snapshot()).plane.status, 'offline');
+});
+
+test('stale notifications never act: already handled elsewhere, dismissed, or replayed', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  const web = await p.signIn('web');
+  const ios = await p.signIn('ios');
+  const conversationId = await p.call();
+  p.askOwner();
+  await eventually(async () => (await p.attentionStore.list('owner')).some((item) => item.type === 'assistant_needs_owner'), 'attention');
+  const item = (await p.attentionStore.list('owner')).find((entry) => entry.type === 'assistant_needs_owner')!;
+
+  // Answered from the iPhone's lock screen...
+  const answered = await request(p.app).post(`/owner/attention/${item.id}/actions`).set(ios.headers)
+    .send({ action: 'reply', body: 'Friday at 2 works', commandId: `ios:${item.id}:reply` });
+  assert.equal(answered.status, 200);
+  // ...then iOS retries the same action (lost response): the same result, sent once.
+  const retried = await request(p.app).post(`/owner/attention/${item.id}/actions`).set(ios.headers)
+    .send({ action: 'reply', body: 'Friday at 2 works', commandId: `ios:${item.id}:reply` });
+  assert.equal(retried.status, 200);
+  const detail = (await request(p.app).get(`/conversations/${conversationId}`).set(ios.headers)).body;
+  const ownerReplies = detail.messages.filter((message: { role: string; body: string }) => message.role === 'owner' && message.body === 'Friday at 2 works');
+  assert.equal(ownerReplies.length, 1);
+  // ...and the browser's stale notification tap does nothing but show where it stands.
+  const stale = await request(p.app).post(`/owner/attention/${item.id}/actions`).set(web.headers).send({ action: 'take_over' });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, 'attention_resolved');
+  assert.equal((await request(p.app).get(`/owner/attention/${item.id}`).set(web.headers)).body.status, 'acted');
+  assert.notEqual((await request(p.app).get(`/conversations/${conversationId}`).set(web.headers)).body.runtime.status, 'takeover');
+  // The same state, whichever surface asks.
+  const fromWeb = (await request(p.app).get('/owner/control-plane').set(web.headers)).body;
+  const fromIos = (await request(p.app).get('/owner/control-plane').set(ios.headers)).body;
+  assert.deepEqual({ ...fromWeb, session: null, serverTime: null }, { ...fromIos, session: null, serverTime: null });
+});
+
+test('native iOS notifications go to APNs with the same attention and deep link; dead tokens are retired', async (t) => {
+  const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const apns = await fakeApns(publicKey.export({ type: 'spki', format: 'pem' }).toString());
+  t.after(apns.close);
+  const sender = new HttpApnsSender({
+    keyId: 'KEY1234567', teamId: 'TEAM123456', bundleId: 'app.textme.owner', environment: 'production', origin: apns.origin,
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+  });
+  t.after(() => sender.close());
+  const p = await plane({ apns: sender });
+  t.after(p.close);
+  const ios = await p.signIn('ios');
+  assert.equal((await request(p.app).get('/owner/push/config').set(ios.headers)).body.nativePush, true);
+  assert.equal((await request(p.app).post('/owner/push/devices').set(ios.headers).send({ platform: 'ios', apnsToken: 'not-hex' })).status, 400);
+  const token = 'a1'.repeat(32);
+  const registered = await request(p.app).post('/owner/push/devices').set(ios.headers).send({ platform: 'ios', apnsToken: token, label: 'Randy’s iPhone' });
+  assert.equal(registered.status, 201);
+  assert.deepEqual(registered.body.capabilities, ['push', 'deep_link', 'interactive_notification']);
+
+  const conversationId = await p.call();
+  p.askOwner();
+  await eventually(() => apns.received.length === 1, 'APNs delivery');
+  const [sent] = apns.received;
+  const item = (await p.attentionStore.list('owner')).find((entry) => entry.type === 'assistant_needs_owner')!;
+  assert.equal(sent.headers[':path'], `/3/device/${token}`);
+  assert.equal(sent.headers['apns-topic'], 'app.textme.owner');
+  assert.equal(sent.headers['apns-push-type'], 'alert');
+  assert.equal(sent.headers['apns-priority'], '10');
+  assert.equal(sent.headers['apns-collapse-id'], item.id, 'a repeat of the same attention replaces, never duplicates');
+  const aps = sent.body.aps as Record<string, unknown>;
+  assert.deepEqual(aps.alert, { title: '+15553334444 needs you', body: '“Can you do Friday at 2?”' });
+  assert.equal(aps.category, 'OWNER_ATTENTION');
+  assert.equal(aps['interruption-level'], 'time-sensitive');
+  assert.equal(sent.body.url, `/conversations/${conversationId}/live?attention=${item.id}`);
+  assert.equal(sent.body.attentionId, item.id);
+  const audit = (await request(p.app).get(`/conversations/${conversationId}/audit`).set(ios.headers)).body;
+  assert.ok(audit.timeline.some((entry: { type: string; ids: { surface?: string } }) => entry.type === 'notification.sent' && entry.ids.surface === 'apns'));
+
+  // The app was deleted: Apple says 410, and the device stops being a target.
+  apns.respondWith({ status: 410, reason: 'Unregistered' });
+  p.askOwner('ask-2');
+  await eventually(async () => (await p.surfaceDevices.list('owner'))[0].status === 'expired', 'token retired');
+
+  // Universal links for the app's domain.
+  const association = await request(p.app).get('/.well-known/apple-app-site-association');
+  assert.deepEqual(association.body.applinks.details[0].appIDs, ['TEAM123456.app.textme.owner']);
+  assert.ok(association.body.applinks.details[0].components.some((component: Record<string, string>) => component['/'] === '/conversations/*/live'));
+  assert.match(apnsJwt({ keyId: 'K', teamId: 'T', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, 0), /^[\w-]+\.[\w-]+\.[\w-]+$/);
+});
+
+test('without APNs configured, iOS registration is refused clearly instead of silently dropping notifications', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  const ios = await p.signIn('ios');
+  const refused = await request(p.app).post('/owner/push/devices').set(ios.headers).send({ platform: 'ios', apnsToken: 'b2'.repeat(32) });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, 'apns_not_configured');
+  assert.equal((await request(p.app).get('/.well-known/apple-app-site-association')).status, 404);
+});
+
+test('production never falls back to in-memory state, fake providers or a fake model', () => {
+  assert.throws(() => assertProductionComposition({ repository: new InMemoryConversationRepository(), includeFakeProviderRoutes: false }),
+    /Refusing to start in production without: runtime state store, .*AI text model/);
+  assert.throws(() => createApp({ repository: new InMemoryConversationRepository(), production: true }), /Refusing to start in production/);
+  const env = {
+    DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', TWILIO_PHONE_NUMBER: '+1',
+    OWNER_PHONE_NUMBER: '+2', OWNER_AUTH_TOKEN: 'k',
+  };
+  assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', PUBLIC_BASE_URL: 'https://x.test' }), /AI Gateway credential is required in production/);
+  assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'http://x.test' }), /must be an https URL/);
+  const vercel = getConfig({ ...env, VERCEL: '1', VERCEL_ENV: 'production', VERCEL_PROJECT_PRODUCTION_URL: 'text-me.vercel.app', VERCEL_GIT_COMMIT_SHA: 'abc123' });
+  assert.equal(vercel.production, true);
+  assert.equal(vercel.enableFakeProviderRoutes, false);
+  assert.deepEqual(vercel.release, { environment: 'production', commit: 'abc123' });
+  assert.equal(getConfig({ ...env, REALTIME_VOICE: 'off', AI_GATEWAY_API_KEY: 'k' }).aiGateway?.textModelId, 'anthropic/claude-haiku-4.5',
+    'turning realtime voice off keeps the real text model');
+});
+
+test('Twilio webhooks verify behind Vercel’s proxy (signed for the public https URL)', async (t) => {
+  const p = await plane({ twilioAuthToken: 'twilio-secret', publicBaseUrl: 'https://text-me.vercel.app' });
+  t.after(p.close);
+  const params = { CallSid: 'CA1', From: '+15553334444', To: '+15550000000' };
+  const signature = twilio.getExpectedTwilioSignature('twilio-secret', 'https://text-me.vercel.app/webhooks/twilio/voice', params);
+  const accepted = await request(p.app).post('/webhooks/twilio/voice').set('X-Twilio-Signature', signature).type('form').send(params);
+  assert.equal(accepted.status, 200, 'the request arrives as http://127.0.0.1 but was signed for the public URL');
+  const forged = await request(p.app).post('/webhooks/twilio/voice').set('X-Twilio-Signature', 'forged').type('form').send(params);
+  assert.equal(forged.status, 403);
+});
+
+test('health: liveness always answers; readiness says exactly what a deployment is missing', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  const live = await request(p.app).get('/health');
+  assert.equal(live.status, 200);
+  assert.equal(live.body.status, 'ok');
+  const ready = await request(p.app).get('/health/ready');
+  assert.equal(ready.status, 503, 'a development composition is not production-ready');
+  assert.equal(ready.body.checks.authentication.ok, true);
+  assert.equal(ready.body.checks.productionComposition.ok, false);
+  assert.equal(ready.body.checks.webhookSignatures.ok, false);
+  assert.ok(!JSON.stringify(ready.body).includes(ACCESS_KEY), 'no secrets');
+});

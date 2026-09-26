@@ -1,0 +1,6 @@
+// Production: the Vercel production domain. Must match the server's APNS_BUNDLE_ID / APNS_TEAM_ID.
+ATTN_HOST = text-me.vercel.app
+ATTN_BASE_URL = https:/$()/$(ATTN_HOST)
+ATTN_BUNDLE_ID = app.textme.owner
+ATTN_TEAM_ID = YOURTEAMID
+APS_ENVIRONMENT = production

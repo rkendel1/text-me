@@ -58,6 +58,8 @@ import {
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 import { buildInstructions } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
+import type { ApnsSender } from './attention/apns.js';
+import { InMemoryOwnerAuthSessionStore, OwnerAuthService, type OwnerAuthSession, type OwnerAuthSessionStore } from './auth/sessions.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -99,6 +101,52 @@ export interface AppOptions {
   beforeRequest?: Promise<void>;
   /** Let the assistant answer caller texts itself (production, with the AI SDK text agent). */
   autoReplyToCallerTexts?: boolean;
+  /** Owner sign-in sessions (web and iOS share them). */
+  authSessionStore?: OwnerAuthSessionStore;
+  /**
+   * Production composition: every authoritative store and the AI model must be
+   * supplied, and fake provider routes must be off. Missing pieces fail startup
+   * instead of silently falling back to in-memory or fake implementations.
+   */
+  production?: boolean;
+  /** Native iOS notifications (APNs). Without it, iOS app registrations are refused. */
+  apnsSender?: ApnsSender;
+  /** Apple Team ID, for the app-site-association file that lets links open the iOS app. */
+  appleTeamId?: string;
+  /** Readiness probe for /health/ready (e.g. a database round trip). */
+  healthCheck?: () => Promise<void>;
+  /** Shown by /health: which build is running. */
+  release?: { environment: string; commit?: string };
+}
+
+/** What production must be given explicitly; the in-memory defaults exist only for tests and local demos. */
+const PRODUCTION_REQUIREMENTS: Array<[keyof AppOptions, string]> = [
+  ['runtimeStore', 'runtime state store'],
+  ['runtimeEventStore', 'runtime event store'],
+  ['runtimeOverrideStore', 'runtime override store'],
+  ['runtimeCommandStore', 'runtime command store'],
+  ['runtimeEventBus', 'cross-instance event bus'],
+  ['attentionStore', 'owner attention store'],
+  ['notificationDeliveryStore', 'notification delivery store'],
+  ['surfaceDeviceStore', 'notification device store'],
+  ['ownerDeviceService', 'owner device service'],
+  ['ownerConfigurationService', 'owner configuration service'],
+  ['ownerDeliveryStore', 'owner delivery store'],
+  ['authSessionStore', 'sign-in session store'],
+  ['messagingProvider', 'SMS provider'],
+  ['conversationModel', 'AI text model'],
+  ['pushSender', 'push sender'],
+  ['ownerAuthToken', 'OWNER_AUTH_TOKEN'],
+  ['twilioAuthToken', 'TWILIO_AUTH_TOKEN'],
+];
+
+export function assertProductionComposition(options: AppOptions): void {
+  const missing = PRODUCTION_REQUIREMENTS.filter(([key]) => !options[key]).map(([, label]) => label);
+  if (options.includeFakeProviderRoutes !== false) missing.push('fake provider routes must be disabled');
+  if ((options.providers ?? []).some((provider) => provider.name === 'fake')) missing.push('the fake telephony provider must not be registered');
+  if (missing.length) {
+    throw new Error(`Refusing to start in production without: ${missing.join(', ')}`);
+  }
 }
 
 function createProviderMap(
@@ -222,6 +270,7 @@ function presentRuntime(
 }
 
 export function createApp(options: AppOptions): express.Express {
+  if (options.production) assertProductionComposition(options);
   const app = express();
   const providers = createProviderMap(
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
@@ -260,7 +309,7 @@ export function createApp(options: AppOptions): express.Express {
     attentionStore,
     options.notificationDeliveryStore ?? new InMemoryNotificationDeliveryStore(attentionStore),
     new NotificationRouter({
-      push: new WebPushSurface(surfaceDevices, pushSender),
+      push: new WebPushSurface(surfaceDevices, pushSender, options.apnsSender),
       mac: options.ownerChannel ? new MacMessagesSurface(options.ownerChannel, options.repository) : undefined,
       sms: new OwnerSmsSurface(messaging, options.ownerPhone),
     }),
@@ -329,6 +378,49 @@ export function createApp(options: AppOptions): express.Express {
     ...realtimeVoiceStatus(conversation),
   });
 
+  // Liveness: answers even while the database is still being prepared.
+  app.get('/health', (_request, response) => {
+    response.json({
+      status: 'ok',
+      environment: options.release?.environment ?? 'development',
+      commit: options.release?.commit ?? null,
+      time: new Date().toISOString(),
+    });
+  });
+  // Universal links: https://<domain>/conversations/<id>/live opens the iOS app when it's installed.
+  app.get('/.well-known/apple-app-site-association', (_request, response) => {
+    if (!options.appleTeamId || !options.apnsSender) {
+      response.status(404).json({ error: 'The iOS app isn’t configured for this deployment' });
+      return;
+    }
+    const appId = `${options.appleTeamId}.${options.apnsSender.bundleId}`;
+    response.type('application/json').json({
+      applinks: { details: [{ appIDs: [appId], components: [{ '/': '/conversations/*/live' }, { '/': '/' }] }] },
+      webcredentials: { apps: [appId] },
+    });
+  });
+
+  // Readiness / smoke: the checks a production deployment must pass. No secrets are returned.
+  app.get('/health/ready', async (_request, response) => {
+    const checks: Record<string, { ok: boolean; detail?: string }> = {};
+    try {
+      await options.beforeRequest;
+      await options.healthCheck?.();
+      checks.database = { ok: true, ...(options.healthCheck ? {} : { detail: 'in-memory (not production)' }) };
+    } catch (error) {
+      checks.database = { ok: false, detail: error instanceof Error ? error.message.slice(0, 120) : 'unavailable' };
+    }
+    checks.authentication = { ok: Boolean(options.ownerAuthToken), ...(options.ownerAuthToken ? {} : { detail: 'OWNER_AUTH_TOKEN is not set' }) };
+    checks.webhookSignatures = { ok: Boolean(options.twilioAuthToken) };
+    checks.realtimeVoice = { ok: Boolean(options.realtimeVoice), ...(options.realtimeVoice ? { detail: options.realtimeVoice.modelId } : { detail: 'not configured' }) };
+    checks.publicUrl = { ok: Boolean(options.publicBaseUrl && /^https:\/\//.test(options.publicBaseUrl)), detail: options.publicBaseUrl ?? 'unset' };
+    checks.productionComposition = { ok: Boolean(options.production), ...(options.production ? {} : { detail: 'development composition' }) };
+    // Needed only for the native iOS app; the browser and Home Screen app use Web Push.
+    const optional = { nativePush: { ok: Boolean(options.apnsSender), detail: options.apnsSender ? options.apnsSender.bundleId : 'APNs not configured' } };
+    const ok = Object.values(checks).every((check) => check.ok);
+    response.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not_ready', environment: options.release?.environment ?? 'development', checks, optional });
+  });
+
   if (options.beforeRequest) {
     const ready = options.beforeRequest;
     app.use((_request, _response, next) => {
@@ -338,28 +430,41 @@ export function createApp(options: AppOptions): express.Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
+  const auth = new OwnerAuthService(options.authSessionStore ?? new InMemoryOwnerAuthSessionStore(), options.ownerAuthToken, ownerId);
+  const authMessages = {
+    missing: 'Authentication required', invalid: 'Authentication required',
+    expired: 'Your session expired. Sign in again.', revoked: 'This device was signed out. Sign in again.',
+  } as const;
   const ownerAuth = (request: Request, _response: Response, next: NextFunction): void => {
-    if (!options.ownerAuthToken) {
-      (request as Request & { ownerId?: string }).ownerId = ownerId;
+    const header = request.header('Authorization') ?? '';
+    // EventSource can't set headers, so live streams (and only they) accept ?token=.
+    const streamToken = request.method === 'GET' && request.path.endsWith('/events') && typeof request.query?.token === 'string'
+      ? request.query.token : undefined;
+    const token = header.startsWith('Bearer ') ? header.slice(7) : streamToken;
+    auth.authenticate(token).then((result) => {
+      if (!result.ok) {
+        next(new HttpError(401, authMessages[result.reason], result.reason === 'expired' || result.reason === 'revoked' ? `session_${result.reason}` : 'unauthenticated'));
+        return;
+      }
+      Object.assign(request, { ownerId: result.ownerId, authSession: result.session, credential: result.credential });
       next();
-      return;
-    }
-    const authorization = request.header('Authorization');
-    const queryToken = typeof request.query?.token === 'string' ? request.query.token : undefined;
-    if (authorization !== 'Bearer ' + options.ownerAuthToken && queryToken !== options.ownerAuthToken) {
-      next(new HttpError(401, 'Authentication required'));
-      return;
-    }
-    (request as Request & { ownerId?: string }).ownerId = ownerId;
-    next();
+    }, next);
   };
+  const currentSession = (request: Request) => (request as Request & { authSession?: OwnerAuthSession }).authSession;
 
   if (options.twilioAuthToken) {
     app.use((request, _response, next) => {
       if (!request.path.startsWith('/webhooks/twilio/')) return next();
       const signature = request.header('X-Twilio-Signature');
-      const url = `${request.protocol}://${request.get('host')}${request.originalUrl}`;
-      if (!signature || !twilio.validateRequest(options.twilioAuthToken!, signature, url, request.body)) {
+      // Twilio signs the URL it was configured with. Behind Vercel's proxy request.protocol is http,
+      // so check the public URL and the forwarded one, not just what Express sees.
+      const forwardedProto = (request.header('X-Forwarded-Proto') ?? request.protocol).split(',')[0].trim();
+      const urls = new Set([
+        ...(options.publicBaseUrl ? [`${options.publicBaseUrl}${request.originalUrl}`] : []),
+        `${forwardedProto}://${request.get('host')}${request.originalUrl}`,
+        `${request.protocol}://${request.get('host')}${request.originalUrl}`,
+      ]);
+      if (!signature || ![...urls].some((url) => twilio.validateRequest(options.twilioAuthToken!, signature, url, request.body))) {
         next(new HttpError(403, 'Invalid webhook signature'));
         return;
       }
@@ -777,7 +882,7 @@ export function createApp(options: AppOptions): express.Express {
 
   app.get('/owner/push/config', ownerAuth, async (_request, response, next) => {
     try {
-      response.json({ publicKey: await pushSender.publicKey() });
+      response.json({ publicKey: await pushSender.publicKey(), nativePush: Boolean(options.apnsSender) });
     } catch (error) {
       next(error);
     }
@@ -793,6 +898,21 @@ export function createApp(options: AppOptions): express.Express {
 
   app.post('/owner/push/devices', ownerAuth, async (request, response, next) => {
     try {
+      // The native iOS app registers its APNs token here too: same devices, same attention, same deep links.
+      if (request.body?.platform === 'ios') {
+        const apnsToken = typeof request.body?.apnsToken === 'string' ? request.body.apnsToken.trim().toLowerCase() : '';
+        if (!/^[0-9a-f]{64,200}$/.test(apnsToken)) throw new HttpError(400, 'A valid APNs device token is required');
+        if (!options.apnsSender) throw new HttpError(409, 'Native notifications aren’t set up on this server (APNs)', 'apns_not_configured');
+        const now = new Date();
+        const device = await surfaceDevices.upsert({
+          id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'ios', deviceToken: apnsToken,
+          capabilities: ['push', 'deep_link', 'interactive_notification'],
+          label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : 'iPhone app',
+          sessionId: currentSession(request)?.id, status: 'active', createdAt: now, lastSeenAt: now,
+        });
+        response.status(201).json(presentSurfaceDevice(device));
+        return;
+      }
       const subscription = request.body?.subscription;
       const endpoint = subscription?.endpoint;
       if (typeof endpoint !== 'string' || !/^https:\/\//.test(endpoint) ||
@@ -807,6 +927,7 @@ export function createApp(options: AppOptions): express.Express {
         id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'web',
         deviceToken: JSON.stringify({ endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } }),
         capabilities, label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : undefined,
+        sessionId: currentSession(request)?.id,
         status: 'active', createdAt: now, lastSeenAt: now,
       });
       response.status(201).json(presentSurfaceDevice(device));
@@ -864,6 +985,14 @@ export function createApp(options: AppOptions): express.Express {
     return item;
   };
 
+  app.get('/owner/attention/:id', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentAttention(await requireAttention(request)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/owner/attention/:id/opened', ownerAuth, async (request, response, next) => {
     try {
       const item = await requireAttention(request);
@@ -893,6 +1022,12 @@ export function createApp(options: AppOptions): express.Express {
       const item = await requireAttention(request);
       const action = request.body?.action;
       const commandId = typeof request.body?.commandId === 'string' ? request.body.commandId : `attention:${item.id}:${action}`;
+      // A stale notification (answered elsewhere, dismissed, or no longer relevant) never acts;
+      // the surface shows the conversation's current state instead. Replaying the same command is fine.
+      const replay = item.status === 'acted' && item.metadata?.commandId === commandId;
+      if (['acted', 'dismissed', 'resolved'].includes(item.status) && !replay) {
+        throw new HttpError(409, item.status === 'acted' ? 'Already handled on another device.' : 'This no longer needs you.', 'attention_resolved');
+      }
       if (action === 'take_over') {
         const snapshot = await runtime.takeOver(item.conversationId, item.ownerId, { commandId });
         await attention.markActed(item, 'take_over', commandId);
@@ -935,6 +1070,128 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // ---- The owner's phone number ----
+  // ---- The control-plane contract: the browser and the iOS app use exactly these routes ----
+  const signInLimit = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+  const presentSession = (session: OwnerAuthSession, current?: OwnerAuthSession) => ({
+    id: session.id, platform: session.platform, label: session.label,
+    createdAt: session.createdAt.toISOString(), lastUsedAt: session.lastUsedAt.toISOString(),
+    expiresAt: session.expiresAt.toISOString(), current: session.id === current?.id,
+  });
+  // Signing a device out also stops its notifications.
+  const revokeSession = async (ownerIdValue: string, sessionId: string) => {
+    if (!(await auth.revoke(ownerIdValue, sessionId))) return false;
+    for (const device of await surfaceDevices.list(ownerIdValue)) {
+      if (device.sessionId === sessionId && device.status === 'active') await surfaceDevices.setStatus(device.id, 'revoked');
+    }
+    return true;
+  };
+
+  app.post('/auth/sessions', signInLimit, async (request, response, next) => {
+    try {
+      const accessKey = typeof request.body?.accessKey === 'string' ? request.body.accessKey.trim() : '';
+      const platform = request.body?.platform === 'ios' ? 'ios' : 'web';
+      const label = typeof request.body?.label === 'string' ? request.body.label : undefined;
+      const result = await auth.signIn(accessKey, { platform, label });
+      if (!result) throw new HttpError(401, 'That access key isn’t right.', 'invalid_access_key');
+      response.status(201).json({ token: result.token, session: presentSession(result.session, result.session) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/auth/session', ownerAuth, (request, response) => {
+    const session = currentSession(request);
+    response.json({
+      ownerId: runtimeOwner(request),
+      credential: (request as Request & { credential?: string }).credential,
+      session: session ? presentSession(session, session) : null,
+    });
+  });
+
+  app.delete('/auth/session', ownerAuth, async (request, response, next) => {
+    try {
+      const session = currentSession(request);
+      if (session) await revokeSession(runtimeOwner(request), session.id);
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/auth/sessions', ownerAuth, async (request, response, next) => {
+    try {
+      const current = currentSession(request);
+      response.json((await auth.list(runtimeOwner(request))).map((session) => presentSession(session, current)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/auth/sessions/:id', ownerAuth, async (request, response, next) => {
+    try {
+      if (!(await revokeSession(runtimeOwner(request), String(request.params.id)))) throw new HttpError(404, 'Session not found');
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/owner/me', ownerAuth, async (request, response, next) => {
+    try {
+      const owner = runtimeOwner(request);
+      const configuration = await ownerConfiguration.get(owner);
+      const session = currentSession(request);
+      response.json({ ownerId: owner, name: configuration.assistant.ownerName, session: session ? presentSession(session, session) : null });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /**
+   * One snapshot to bootstrap any surface: who you are, the plane (the assistant
+   * answering your line) and its status, what's live, and what needs you. Live
+   * updates then arrive on /owner/events; after any event, re-read this.
+   */
+  app.get('/owner/control-plane', ownerAuth, async (request, response, next) => {
+    try {
+      const owner = runtimeOwner(request);
+      const configuration = await ownerConfiguration.get(owner);
+      const conversations = (await service.listConversations())
+        .filter((conversation) => !conversation.ownerId || conversation.ownerId === owner);
+      const summaries = await Promise.all(conversations.map(async (conversation) => ({
+        ...presentConversationSummary(conversation),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
+        voice: presentVoice(conversation),
+      })));
+      const live = summaries.filter((item) => item.voice.live ||
+        ['active', 'paused', 'owner_needed', 'takeover', 'text_active'].includes(item.runtime.status));
+      const open = (await attention.list(owner, { open: true, limit: 50 })).map(presentAttention);
+      const needsOwner = open.some((item) => item.priority === 'interrupt') || live.some((item) => item.runtime.status === 'owner_needed');
+      const status = !configuration.calls.answerCalls ? 'offline'
+        : needsOwner ? 'awaiting_attention'
+          : live.length ? 'working' : 'online';
+      const session = currentSession(request);
+      response.json({
+        owner: { id: owner, name: configuration.assistant.ownerName },
+        session: session ? presentSession(session, session) : null,
+        plane: {
+          id: `plane_${owner}`,
+          status,
+          answering: configuration.calls.answerCalls,
+          voice: { realtime: Boolean(realtimeVoice), model: realtimeVoice?.modelId ?? null },
+          liveConversations: live.length,
+          openAttention: open.length,
+        },
+        live,
+        attention: open,
+        configuration: { revision: configuration.revision },
+        serverTime: new Date().toISOString(),
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/owner/phone', ownerAuth, async (_request, response, next) => {
     try {
       if (!options.phoneNumbers) {
@@ -1445,7 +1702,7 @@ export function createApp(options: AppOptions): express.Express {
       _next: NextFunction,
     ) => {
       if (error instanceof HttpError) {
-        response.status(error.statusCode).json({ error: error.message });
+        response.status(error.statusCode).json({ error: error.message, ...(error.code ? { code: error.code } : {}) });
         return;
       }
 

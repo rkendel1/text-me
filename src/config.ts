@@ -8,7 +8,27 @@ export interface RealtimeVoiceConfig {
   teamIdOrSlug?: string;
 }
 
+import { apnsConfigFromEnv, type ApnsConfig } from './attention/apns.js';
+
+export interface AiGatewayConfig {
+  textModelId: string;
+  apiKey?: string;
+  baseURL?: string;
+  teamIdOrSlug?: string;
+}
+
 export interface AppConfig {
+  /**
+   * Production composition (NODE_ENV=production, or any Vercel deployment):
+   * durable stores only, no fake providers, and missing pieces fail startup.
+   */
+  production: boolean;
+  release: { environment: string; commit?: string };
+  /** Native iOS push; optional (the web app uses Web Push). */
+  apns?: ApnsConfig;
+  appleTeamId?: string;
+  /** The text model for SMS and relays; required in production. */
+  aiGateway?: AiGatewayConfig;
   databaseUrl: string;
   /** Direct (non-pooled) connection for LISTEN/NOTIFY; Neon's DATABASE_URL_UNPOOLED. */
   databaseListenUrl: string;
@@ -40,18 +60,32 @@ export function resolvePublicBaseUrl(env: NodeJS.ProcessEnv): string {
   return `http://localhost:${env.PORT ?? '3000'}`;
 }
 
-function resolveRealtimeVoice(env: NodeJS.ProcessEnv): RealtimeVoiceConfig | undefined {
-  if (env.REALTIME_VOICE === 'off') return undefined;
+function hasGatewayCredential(env: NodeJS.ProcessEnv): boolean {
   // Vercel deployments authenticate to AI Gateway with OIDC automatically; elsewhere use an API key.
-  const hasCredential = Boolean(env.AI_GATEWAY_API_KEY || env.VERCEL_OIDC_TOKEN || env.VERCEL);
-  if (!hasCredential) return undefined;
+  return Boolean(env.AI_GATEWAY_API_KEY || env.VERCEL_OIDC_TOKEN || env.VERCEL);
+}
+
+function resolveAiGateway(env: NodeJS.ProcessEnv): AiGatewayConfig | undefined {
+  if (!hasGatewayCredential(env)) return undefined;
   return {
-    modelId: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
     textModelId: env.TEXT_MODEL || DEFAULT_TEXT_MODEL,
-    voice: env.REALTIME_VOICE_NAME || undefined,
     apiKey: env.AI_GATEWAY_API_KEY || undefined,
     baseURL: env.AI_GATEWAY_BASE_URL || undefined,
     teamIdOrSlug: env.AI_GATEWAY_TEAM || undefined,
+  };
+}
+
+function resolveRealtimeVoice(env: NodeJS.ProcessEnv): RealtimeVoiceConfig | undefined {
+  if (env.REALTIME_VOICE === 'off') return undefined;
+  const gateway = resolveAiGateway(env);
+  if (!gateway) return undefined;
+  return {
+    modelId: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
+    textModelId: gateway.textModelId,
+    voice: env.REALTIME_VOICE_NAME || undefined,
+    apiKey: gateway.apiKey,
+    baseURL: gateway.baseURL,
+    teamIdOrSlug: gateway.teamIdOrSlug,
   };
 }
 
@@ -67,10 +101,24 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     if (!env[key]) throw new Error(`${key} is required`);
   }
 
+  const production = env.NODE_ENV === 'production' || Boolean(env.VERCEL);
+  const aiGateway = resolveAiGateway(env);
+  if (production && !aiGateway) {
+    throw new Error('An AI Gateway credential is required in production: set AI_GATEWAY_API_KEY (Vercel deployments use OIDC automatically)');
+  }
+  if (production && !/^https:\/\//.test(resolvePublicBaseUrl(env))) {
+    throw new Error('PUBLIC_BASE_URL must be an https URL in production (Twilio calls back to it)');
+  }
+
   return {
+    production,
+    release: { environment: env.VERCEL_ENV ?? env.NODE_ENV ?? 'development', commit: env.VERCEL_GIT_COMMIT_SHA || undefined },
+    aiGateway,
+    apns: apnsConfigFromEnv(env),
+    appleTeamId: env.APNS_TEAM_ID || undefined,
     databaseUrl,
     databaseListenUrl: env.DATABASE_URL_UNPOOLED ?? env.POSTGRES_URL_NON_POOLING ?? databaseUrl,
-    enableFakeProviderRoutes: env.NODE_ENV !== 'production' && !env.VERCEL,
+    enableFakeProviderRoutes: !production,
     port: Number(env.PORT ?? '3000'),
     publicBaseUrl: resolvePublicBaseUrl(env),
     twilioAccountSid: env.TWILIO_ACCOUNT_SID!,

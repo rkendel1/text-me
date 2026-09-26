@@ -215,6 +215,7 @@ interface SurfaceDeviceRow {
   status: OwnerSurfaceDevice['status'];
   created_at: Date;
   last_seen_at: Date;
+  session_id: string | null;
 }
 
 const toSurfaceDevice = (row: SurfaceDeviceRow): OwnerSurfaceDevice => ({
@@ -227,6 +228,7 @@ const toSurfaceDevice = (row: SurfaceDeviceRow): OwnerSurfaceDevice => ({
   createdAt: row.created_at,
   lastSeenAt: row.last_seen_at,
   ...(row.label ? { label: row.label } : {}),
+  ...(row.session_id ? { sessionId: row.session_id } : {}),
 });
 
 export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore {
@@ -248,23 +250,25 @@ export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
           UNIQUE (owner_id, device_token)
         )
       `);
+      await db.query('ALTER TABLE owner_surface_devices ADD COLUMN IF NOT EXISTS session_id TEXT');
     });
   }
 
   async upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice> {
     const result = await this.pool.query<SurfaceDeviceRow>(
       `
-        INSERT INTO owner_surface_devices (id, owner_id, platform, device_token, capabilities, label, status, created_at, last_seen_at)
-        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8)
+        INSERT INTO owner_surface_devices (id, owner_id, platform, device_token, capabilities, label, status, created_at, last_seen_at, session_id)
+        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
         ON CONFLICT (owner_id, device_token) DO UPDATE
           SET capabilities = EXCLUDED.capabilities,
               label = COALESCE(EXCLUDED.label, owner_surface_devices.label),
               status = 'active',
-              last_seen_at = EXCLUDED.last_seen_at
+              last_seen_at = EXCLUDED.last_seen_at,
+              session_id = EXCLUDED.session_id
         RETURNING *
       `,
       [device.id, device.ownerId, device.platform, device.deviceToken, JSON.stringify(device.capabilities),
-        device.label ?? null, device.createdAt, device.lastSeenAt],
+        device.label ?? null, device.createdAt, device.lastSeenAt, device.sessionId ?? null],
     );
     return toSurfaceDevice(result.rows[0]);
   }

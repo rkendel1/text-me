@@ -66,7 +66,7 @@ export class NotificationRouter {
     ].filter((surface): surface is OwnerSurface => Boolean(surface));
     for (const surface of primary) {
       if (!(await surface.available(attention.ownerId))) continue;
-      for (const result of await surface.deliver(attention, preferences)) deliveries.push({ ...result, surface: surface.kind });
+      for (const result of await surface.deliver(attention, preferences)) deliveries.push({ ...result, surface: result.surface ?? surface.kind });
     }
     const sms = this.surfaces.sms;
     if (sms && plan.sms !== 'never' && await sms.available(attention.ownerId)) {

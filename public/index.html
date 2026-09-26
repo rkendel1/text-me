@@ -119,6 +119,14 @@ svg { display: block; }
 .nav-btn svg { width: 22px; height: 22px; }
 .nav-btn.back svg { width: 13px; height: 21px; margin-right: 4px; }
 .nav-btn.icon { width: 44px; justify-content: center; padding: 0; }
+.plane-status { display: flex; align-items: center; gap: 7px; padding: 0 20px 10px; margin-top: -4px; font-size: 15px; color: var(--label-2); }
+.plane-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); flex: none; }
+.plane-status[data-status=online] .dot { background: var(--green); }
+.plane-status[data-status=working] .dot { background: var(--blue); animation: pulse 1.6s ease-in-out infinite; }
+.plane-status[data-status=awaiting_attention] .dot { background: var(--orange); }
+.plane-status[data-status=awaiting_attention] { color: var(--orange); font-weight: 600; }
+@keyframes pulse { 50% { opacity: .35; } }
+.outbox { margin: 0 16px 12px; padding: 10px 14px; border-radius: 12px; background: rgba(255,149,0,.14); color: var(--label); font-size: 15px; }
 .large-title { font-size: 34px; line-height: 41px; font-weight: 700; letter-spacing: .37px; padding: 0 20px 8px; margin: 0; }
 .nav-sub { font-size: 12px; font-weight: 400; color: var(--label-2); text-align: center; margin-top: -2px; }
 
@@ -554,11 +562,11 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 <div class="signin" id="signin" hidden>
   <img class="app-icon" src="/icon.svg" alt="">
   <h1>Text Me</h1>
-  <p>Enter your owner access token to see and control live calls.</p>
+  <p>Enter your access key to see and control live calls. This device stays signed in; the key isn’t stored.</p>
   <form id="signinForm" autocomplete="on">
     <div class="group">
-      <label class="row"><span class="sr">Access token</span>
-        <input id="tokenInput" type="password" name="password" autocomplete="current-password" placeholder="Access Token" required>
+      <label class="row"><span class="sr">Access key</span>
+        <input id="tokenInput" type="password" name="password" autocomplete="current-password" placeholder="Access Key" required>
       </label>
     </div>
     <button class="btn-primary" type="submit" id="signinButton">Continue</button>
@@ -587,6 +595,8 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
         </header>
         <div class="scroll with-tabbar" id="listScroll">
           <h1 class="large-title">Now</h1>
+          <div class="plane-status" id="planeStatus" hidden><span class="dot"></span><span id="planeText"></span></div>
+          <div class="outbox" id="outbox" hidden></div>
           <div id="list" role="list"></div>
         </div>
       </div>
@@ -761,23 +771,52 @@ function callerName(conversation) {
 const displayName = (conversation) => callerName(conversation) || formatPhone(conversation.caller);
 
 /* ---------------- API ---------------- */
+// Inside the iOS app this page runs in a native frame; the native side owns push and the Keychain.
+const NATIVE = (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.attn) || null;
+const postNative = (message) => { try { NATIVE && NATIVE.postMessage(message); } catch {} };
+const PLATFORM = NATIVE ? 'ios' : 'web';
 const state = {
-  token: store.get('ownerToken') || '',
+  token: store.get('ownerSession') || '',
   conversations: [], selectedId: null, detail: null,
-  filter: 'all', search: '', tab: 'live', config: null, devices: [],
-  stream: null, streamId: null, sending: false,
+  filter: 'all', search: '', tab: 'live', config: null, devices: [], plane: null,
+  stream: null, streamId: null, sending: false, outbox: [],
 };
-(() => {
+
+class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
+
+/** Every surface signs in the same way: the access key is exchanged for a session, and only the session is kept. */
+async function createSession(accessKey) {
+  const response = await fetch('/auth/sessions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accessKey, platform: PLATFORM, label: NATIVE ? 'iPhone app' : isIOS() ? 'iPhone (Safari)' : 'Browser' }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 400) throw new Error("That access key didn't work. Check it and try again.");
+  if (response.status === 429) throw new Error('Too many attempts. Try again in a few minutes.');
+  if (!response.ok) throw new Error("Couldn't reach the server. Try again.");
+  setSession(data.token);
+  return data;
+}
+function setSession(token) {
+  state.token = token || '';
+  store.set('ownerSession', token || null);
+  store.set('ownerToken', null);
+  postNative({ type: 'session', token: token || null });
+}
+const sessionReady = (async () => {
   const url = new URL(location.href);
-  const token = url.searchParams.get('token');
-  if (token) {
-    state.token = token; store.set('ownerToken', token);
-    url.searchParams.delete('token'); history.replaceState(null, '', url.pathname + url.search + url.hash);
-  }
+  const fromUrl = url.searchParams.get('token');
+  if (fromUrl) { url.searchParams.delete('token'); history.replaceState(null, '', url.pathname + url.search + url.hash); }
+  // The iOS app hands over its Keychain session; older installs kept the raw access key, which is exchanged once.
+  const handedOver = window.__ATTN_SESSION__;
+  const legacy = fromUrl || store.get('ownerToken');
+  if (handedOver) { state.token = handedOver; store.set('ownerSession', handedOver); }
+  else if (legacy && !legacy.startsWith('ses_')) { try { await createSession(legacy); } catch { store.set('ownerToken', null); } }
+  else if (legacy) setSession(legacy);
 })();
 
-class ApiError extends Error { constructor(message, status) { super(message); this.status = status; } }
 async function api(path, { method = 'GET', body } = {}) {
+  await sessionReady;
   const headers = {};
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -786,15 +825,61 @@ async function api(path, { method = 'GET', body } = {}) {
     response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   } catch {
     setConnection(false);
-    throw new ApiError("You're offline. Check your connection.", 0);
+    throw new ApiError("You're offline. Check your connection.", 0, 'offline');
   }
   setConnection(true);
-  if (response.status === 401) { showSignIn(); throw new ApiError('Please sign in again.', 401); }
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new ApiError(data.error || 'Something went wrong.', response.status);
+  if (response.status === 401) {
+    const message = data.code === 'session_expired' ? 'Your session expired. Sign in again.'
+      : data.code === 'session_revoked' ? 'This device was signed out. Sign in again.' : '';
+    if (state.token) setSession(null);
+    showSignIn(message);
+    throw new ApiError(message || 'Please sign in again.', 401, data.code);
+  }
+  if (!response.ok) throw new ApiError(data.error || 'Something went wrong.', response.status, data.code);
   return data;
 }
+const newCommandId = () => `cmd_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * Commands made while offline wait here and are sent, with the same command id,
+ * as soon as the connection is back. The server runs each command id once, so a
+ * retry after a lost response can't apply anything twice.
+ */
+function queueCommand(entry) {
+  state.outbox.push(entry);
+  renderOutbox();
+}
+async function flushOutbox() {
+  if (!state.outbox.length || flushOutbox.running) return;
+  flushOutbox.running = true;
+  try {
+    while (state.outbox.length) {
+      const entry = state.outbox[0];
+      try {
+        await api(entry.path, { method: entry.method, body: entry.body });
+        state.outbox.shift();
+        toast(`${entry.label} — sent`);
+      } catch (error) {
+        if (error.status === 0) break;
+        state.outbox.shift();
+        toast(`${entry.label} couldn't be sent: ${error.message}`, 'exclamation', 'var(--red)');
+      }
+      renderOutbox();
+    }
+  } finally {
+    flushOutbox.running = false;
+    renderOutbox();
+    loadList(); if (state.selectedId) loadDetail(state.selectedId);
+  }
+}
+function renderOutbox() {
+  const node = $('#outbox'); if (!node) return;
+  node.hidden = !state.outbox.length;
+  node.textContent = state.outbox.length === 1 ? `Waiting to send: ${state.outbox[0].label}` : `Waiting to send ${state.outbox.length} actions`;
+}
+addEventListener('online', () => flushOutbox());
 function setConnection(ok) {
   $('#connDot').style.background = ok ? 'var(--green)' : 'var(--red)';
   $('#connLabel').textContent = ok ? 'Connected' : 'Offline';
@@ -906,19 +991,20 @@ $('#backBtn').onclick = popDetail;
 })();
 
 /* ---------------- Sign in ---------------- */
-function showSignIn() {
+function showSignIn(message) {
   $('#signin').hidden = false; $('#app').hidden = true;
+  $('#signinError').textContent = message || '';
+  closeStream(); if (ownerStream) { ownerStream.close(); ownerStream = null; }
+  postNative({ type: 'signedOut' });
   setTimeout(() => $('#tokenInput').focus(), 50);
 }
 $('#signinForm').onsubmit = async (event) => {
   event.preventDefault();
-  const token = $('#tokenInput').value.trim();
+  const accessKey = $('#tokenInput').value.trim();
   const button = $('#signinButton'); button.disabled = true; $('#signinError').textContent = '';
   try {
-    const response = await fetch('/conversations', { headers: { Authorization: `Bearer ${token}` } });
-    if (response.status === 401) throw new Error("That token didn't work. Check it and try again.");
-    if (!response.ok) throw new Error("Couldn't reach the server. Try again.");
-    state.token = token; store.set('ownerToken', token);
+    await createSession(accessKey);
+    $('#tokenInput').value = '';
     $('#signin').hidden = true; $('#app').hidden = false;
     boot();
   } catch (error) {
@@ -950,6 +1036,21 @@ function recentSubtitle(conversation) {
   return conversation.preview || 'Conversation';
 }
 
+/** The plane: the assistant answering the owner's line. Same snapshot the iOS app bootstraps from. */
+async function loadPlane() {
+  try {
+    const snapshot = await api('/owner/control-plane');
+    state.plane = snapshot.plane;
+    const text = {
+      online: 'Online · answering your calls',
+      working: `Working · ${snapshot.plane.liveConversations} live ${snapshot.plane.liveConversations === 1 ? 'conversation' : 'conversations'}`,
+      awaiting_attention: 'Needs you',
+      offline: 'Off · not answering calls',
+    }[snapshot.plane.status] || snapshot.plane.status;
+    const node = $('#planeStatus'); node.hidden = false; node.dataset.status = snapshot.plane.status;
+    $('#planeText').textContent = text;
+  } catch { /* the list still renders; status returns with the next refresh */ }
+}
 async function loadList() {
   try {
     const previous = new Map(state.conversations.map((conversation) => [conversation.id, conversation.ownerRequest && conversation.ownerRequest.requestId]));
@@ -962,6 +1063,7 @@ async function loadList() {
     }
     state.loadedOnce = true;
     renderList();
+    loadPlane();
   } catch (error) { if (error.status !== 401) console.warn(error); }
 }
 
@@ -1038,7 +1140,15 @@ async function answerOwner(conversationId, text, button) {
     toast(detail.voice && detail.voice.live ? `Telling ${name} now` : `Sent to ${name}`, 'check');
     if (state.selectedId === conversationId) { state.detail = { ...state.detail, ...detail }; renderDetail(); }
     loadList();
-  } catch (error) { errorToast(error); if (button) { button.disabled = false; button.textContent = text; } }
+  } catch (error) {
+    if (error.status === 0) {
+      queueCommand({ label: `Reply “${text.slice(0, 40)}”`, path: `/conversations/${encodeURIComponent(conversationId)}/messages`, method: 'POST', body: { body: text, idempotencyKey: `web:${newCommandId()}` } });
+      toast('Offline — your reply will send when you’re back', 'info', 'var(--orange)');
+      if (button) button.textContent = 'Queued';
+      return;
+    }
+    errorToast(error); if (button) { button.disabled = false; button.textContent = text; }
+  }
 }
 
 let bannerTimer;
@@ -1213,15 +1323,25 @@ async function onQuick(command) {
 }
 
 /** Runtime commands carry the revision they were based on; on a stale revision we refresh once and retry. */
-async function runtimeCall(path, { method, body = {} }, retried = false) {
+const COMMAND_LABELS = { '/runtime/takeover': 'Take over', '/runtime/return-to-assistant': 'Hand back', '/runtime/pause': 'Pause',
+  '/runtime/resume': 'Resume', '/runtime/stop': 'End', '/runtime/interrupt': 'Interrupt', '/runtime/transition-to-sms': 'Move to text', '/runtime': 'Adjust' };
+async function runtimeCall(path, { method, body = {} }, retried = false, commandId = newCommandId()) {
   const id = state.selectedId; if (!id || !state.detail) return;
+  const payload = { ...body, commandId, expectedRevision: state.detail.runtime.revision };
   try {
-    const runtime = await api(`/conversations/${encodeURIComponent(id)}${path}`, { method, body: { ...body, expectedRevision: state.detail.runtime.revision } });
+    const runtime = await api(`/conversations/${encodeURIComponent(id)}${path}`, { method, body: payload });
     if (id === state.selectedId && runtime && runtime.conversationId) { state.detail.runtime = runtime; renderDetail(); }
     loadList(); loadDetail(id);
     return runtime;
   } catch (error) {
-    if (error.status === 409 && /stale/i.test(error.message) && !retried) { await loadDetail(id); return runtimeCall(path, { method, body }, true); }
+    if (error.status === 0) {
+      // No revision check on a queued command: by the time it's sent the owner's intent still stands.
+      const { expectedRevision, ...queued } = payload;
+      queueCommand({ label: COMMAND_LABELS[path] || 'Action', path: `/conversations/${encodeURIComponent(id)}${path}`, method, body: queued });
+      toast('Offline — will send when you’re back', 'info', 'var(--orange)');
+      return;
+    }
+    if (error.status === 409 && /stale/i.test(error.message) && !retried) { await loadDetail(id); return runtimeCall(path, { method, body }, true, newCommandId()); }
     errorToast(error); renderDetail(); throw error;
   }
 }
@@ -1302,14 +1422,20 @@ $('#composer').onsubmit = async (event) => {
   const input = $('#composerInput'); const body = input.value.trim(); if (!body || state.sending) return;
   const id = state.selectedId; state.sending = true; haptic();
   state.pendingMessage = body; state.forceScroll = true; input.value = ''; input.style.height = 'auto'; updateSend(); renderTranscript(state.detail);
+  const key = `web:${newCommandId()}`;
   try {
-    const key = `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const detail = await api(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: { body, idempotencyKey: key } });
     state.pendingMessage = null;
     if (id === state.selectedId) { state.detail = { ...state.detail, ...detail }; state.forceScroll = true; renderDetail(); }
     loadList();
   } catch (error) {
-    state.pendingMessage = null; input.value = body; updateSend(); renderTranscript(state.detail); errorToast(error);
+    state.pendingMessage = null;
+    if (error.status === 0) {
+      // Same idempotency key on retry: the reply is delivered once even if the first attempt did land.
+      queueCommand({ label: 'Your reply', path: `/conversations/${encodeURIComponent(id)}/messages`, method: 'POST', body: { body, idempotencyKey: key } });
+      toast('Offline — your reply will send when you’re back', 'info', 'var(--orange)');
+      renderTranscript(state.detail);
+    } else { input.value = body; updateSend(); renderTranscript(state.detail); errorToast(error); }
   } finally { state.sending = false; updateSend(); }
 };
 
@@ -1699,6 +1825,9 @@ function renderSettings() {
     <div class="group-header">Account</div>
     <div class="group">
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--blue)">${I.phone}</span><span class="row-body"><span class="row-title" id="phoneNumber">Your number</span><div class="row-sub" id="phoneStatus">Checking…</div></span><button class="btn tinted" id="phoneConnect" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Connect</button></div>
+    </div>
+    <div class="group-header">Signed-in devices</div>
+    <div class="group"><div id="sessionRows"></div>
       ${state.token ? '<button class="row destructive" id="signOut">Sign Out</button>' : ''}
     </div>
     <div style="height:24px"></div>`;
@@ -1720,10 +1849,32 @@ function renderSettings() {
   refreshPushRow();
   refreshPhoneRow();
   const signOut = $('#signOut'); if (signOut) signOut.onclick = async () => {
-    const confirmed = await actionSheet({ message: 'You’ll need your access token to sign back in.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
+    const confirmed = await actionSheet({ message: 'You’ll need your access key to sign back in. This device stops getting notifications.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
     if (!confirmed) return;
-    store.set('ownerToken', null); state.token = ''; closeStream(); showSignIn();
+    await api('/auth/session', { method: 'DELETE' }).catch(() => {});
+    setSession(null); showSignIn();
   };
+  refreshSessions();
+}
+
+/** Signed-in devices: the same sessions whether the device is a browser or the iPhone app. */
+async function refreshSessions() {
+  const node = $('#sessionRows'); if (!node) return;
+  let sessions = [];
+  try { sessions = await api('/auth/sessions'); } catch { return; }
+  if (!$('#sessionRows')) return;
+  node.innerHTML = sessions.map((session) => `<button class="row" style="--inset:57px" data-session="${esc(session.id)}" ${session.current ? 'disabled' : ''}>
+    <span class="tile" style="background:${session.platform === 'ios' ? 'var(--blue)' : 'var(--gray)'}">${session.platform === 'ios' ? I.phone : I.laptop}</span>
+    <span class="row-body"><span class="row-title">${esc(session.label)}${session.current ? ' · This device' : ''}</span>
+    <div class="row-sub">Active ${esc(relTime(session.lastUsedAt))}</div></span>${session.current ? '' : I.chevronRight}</button>`).join('');
+  node.querySelectorAll('[data-session]:not([disabled])').forEach((row) => row.onclick = async () => {
+    const session = sessions.find((item) => item.id === row.dataset.session);
+    const confirmed = await actionSheet({ title: session.label, message: 'It’s signed out right away and stops getting notifications.', actions: [{ label: 'Sign Out This Device', value: true, destructive: true }] });
+    if (!confirmed) return;
+    try { await api(`/auth/sessions/${encodeURIComponent(session.id)}`, { method: 'DELETE' }); toast('Signed out', 'lock', 'var(--red)'); }
+    catch (error) { errorToast(error); }
+    refreshSessions();
+  });
 }
 // Keep device status current while Settings is on screen.
 setInterval(() => {
@@ -1818,7 +1969,7 @@ async function showOnboarding(step = 'welcome') {
       haptic();
       try { state.config = await api('/owner/configuration', { method: 'PATCH', body: { assistant: { behavior: button.dataset.behavior } } }); }
       catch (error) { errorToast(error); return; }
-      showOnboarding(isIOS() && !isStandalone() ? 'install' : 'notifications');
+      showOnboarding(isIOS() && !isStandalone() && !NATIVE ? 'install' : 'notifications');
     });
   } else if (step === 'install') {
     node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Add to your Home Screen</h1>
@@ -1855,14 +2006,28 @@ async function handleDeepLink(href) {
   const intent = url.searchParams.get('intent');
   if (state.tab !== 'live') go('live');
   await openConversation(conversationId, { instant: true });
-  if (attentionId) api(`/owner/attention/${encodeURIComponent(attentionId)}/opened`, { method: 'POST' }).catch(() => {});
+  // A notification can be stale: already answered on another device, dismissed, or the call ended.
+  // Then the tap just shows the current state and does nothing else.
+  let item = null;
+  if (attentionId) {
+    item = await api(`/owner/attention/${encodeURIComponent(attentionId)}`).catch(() => null);
+    if (item && ['pending', 'delivered'].includes(item.status)) api(`/owner/attention/${encodeURIComponent(attentionId)}/opened`, { method: 'POST' }).catch(() => {});
+  }
+  const stale = item && ['acted', 'dismissed', 'resolved'].includes(item.status);
+  if (stale) {
+    toast(item.status === 'acted' ? 'Already handled — here’s where it stands' : 'This no longer needs you', 'info', 'var(--blue)');
+    return true;
+  }
   if (intent === 'take_over') {
     try {
-      if (attentionId) await api(`/owner/attention/${encodeURIComponent(attentionId)}/actions`, { method: 'POST', body: { action: 'take_over' } });
+      if (attentionId) await api(`/owner/attention/${encodeURIComponent(attentionId)}/actions`, { method: 'POST', body: { action: 'take_over', commandId: `attention:${attentionId}:take_over` } });
       else await runtimeCall('/runtime/takeover', { method: 'POST' });
       toast('You’re in control', 'person', 'var(--blue)');
       loadDetail(conversationId);
-    } catch (error) { errorToast(error); }
+    } catch (error) {
+      if (error.code === 'attention_resolved') toast(error.message, 'info', 'var(--blue)'); else errorToast(error);
+      loadDetail(conversationId);
+    }
   } else if (intent === 'reply') {
     setTimeout(() => $('#composerInput').focus(), 300);
   }
@@ -1873,6 +2038,20 @@ let ownerStream;
 function openOwnerStream() {
   if (ownerStream) ownerStream.close();
   ownerStream = new EventSource(`/owner/events${state.token ? `?token=${encodeURIComponent(state.token)}` : ''}`);
+  // Reconnected (network back, server restarted): re-read the durable state and send anything queued.
+  let dropped = false;
+  ownerStream.addEventListener('ready', () => {
+    setConnection(true);
+    if (dropped) { loadList(); if (state.selectedId) loadDetail(state.selectedId); }
+    dropped = false;
+    flushOutbox();
+  });
+  ownerStream.onerror = () => {
+    dropped = true;
+    setConnection(false);
+    // A stream that won't reopen is usually an expired or revoked session: ask the API, which signs out cleanly.
+    if (ownerStream && ownerStream.readyState === EventSource.CLOSED) api('/auth/session').then(openOwnerStream, () => {});
+  };
   let timer;
   const refresh = (conversationId) => {
     clearTimeout(timer);
@@ -1896,10 +2075,31 @@ function openOwnerStream() {
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
 function pushSupport() {
+  if (NATIVE) return 'supported';
   if ('serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window) return 'supported';
   return isIOS() && !isStandalone() ? 'install' : 'unsupported';
 }
+/*
+ * The iOS app bridge. The page is the same control plane; the app adds native
+ * push (APNs) and opens notification taps and universal links here.
+ *   page → app: {type: 'session'|'signedOut'|'enablePush'}
+ *   app → page: window.attnNativeEvent({type: 'pushState', state} | {type: 'open', url})
+ */
+const nativeWaiters = [];
+window.attnNativeEvent = (event) => {
+  if (!event || typeof event !== 'object') return;
+  if (event.type === 'pushState') {
+    window.__ATTN_PUSH_STATE__ = event.state;
+    while (nativeWaiters.length) nativeWaiters.shift()(event);
+    refreshPushRow();
+  }
+  if (event.type === 'open' && typeof event.url === 'string') {
+    const target = new URL(event.url, location.origin);
+    if (target.origin === location.origin) handleDeepLink(target.href);
+  }
+};
 async function pushState() {
+  if (NATIVE) return window.__ATTN_PUSH_STATE__ || 'off';
   if (pushSupport() !== 'supported') return pushSupport();
   if (Notification.permission === 'denied') return 'denied';
   try {
@@ -1914,6 +2114,16 @@ function base64UrlToBytes(value) {
 }
 /** Must run from a tap (iOS requires a user gesture for the permission prompt). */
 async function enablePush() {
+  if (NATIVE) {
+    // The app asks iOS for permission, registers with APNs and posts the token with this session.
+    const result = await new Promise((resolve) => {
+      nativeWaiters.push(resolve);
+      postNative({ type: 'enablePush' });
+      setTimeout(() => resolve({ state: 'off', error: 'The app didn’t respond. Try again.' }), 20000);
+    });
+    if (result.state !== 'on') throw new Error(result.error || (result.state === 'denied' ? 'Notifications are off for Text Me in iOS Settings.' : 'Couldn’t turn on notifications.'));
+    return;
+  }
   const support = pushSupport();
   if (support !== 'supported') throw new Error(support === 'install' ? 'Add Text Me to your Home Screen first, then open it from there.' : 'This browser can’t show notifications.');
   const registration = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
@@ -1928,7 +2138,7 @@ async function enablePush() {
     supportsActions: 'maxActions' in Notification && Notification.maxActions > 0,
   } });
 }
-if ('serviceWorker' in navigator) {
+if ('serviceWorker' in navigator && !NATIVE) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
   navigator.serviceWorker.addEventListener('message', (event) => {
     if (event.data && event.data.type === 'open') handleDeepLink(event.data.url);
