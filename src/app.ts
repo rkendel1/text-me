@@ -501,6 +501,17 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // The iPhone polls this while it shows the QR: "Waiting for Mac…" → "Mac connected".
+  app.get('/owner/devices/pair/:id', ownerAuth, async (request, response, next) => {
+    try {
+      const device = await ownerDevices.get(String(request.params.id));
+      if (!device || device.ownerId !== runtimeOwner(request)) throw new HttpError(404, 'Device not found');
+      response.json({ deviceId: device.id, name: device.name, status: device.status });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/owner/devices/:id/activate', async (request, response, next) => {
     try {
       const code = typeof request.body?.pairingCredential === 'string'

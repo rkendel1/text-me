@@ -23,6 +23,7 @@
     "ai": "^7.0.116",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
+    "jsqr": "^1.4.0",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
     "twilio": "^6.1.1",
@@ -41,5 +42,8 @@
     "supertest": "^7.3.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "optionalDependencies": {
+    "@photon-ai/imessage-kit": "^3.0.0"
   }
 }

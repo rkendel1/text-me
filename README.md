@@ -131,13 +131,28 @@ stream WebSocket at `/media-stream`.
 
 ## Mac Messages bridge (optional)
 
-An optional integration; nothing in the product depends on it: the assistant's questions arrive in Messages and
-your replies go straight back into the conversation. Pair it from
-**Settings → Messages → Pair a Mac**, then run:
+An optional integration; nothing in the product depends on it. With it, the
+assistant's questions arrive in Apple Messages and your replies go straight back
+into the conversation. There is nothing to configure on the Mac:
 
-```bash
-BACKEND_URL=https://<project>.vercel.app \
-PAIRING_CREDENTIAL='attn://pair/...' \
-PHOTON_CLIENT_MODULE=/absolute/path/to/photon-client.js \
-npm run bridge:macos
-```
+1. On the Mac: `npm install && npm run build && npm run bridge:macos`.
+   A **Connect this Mac** window opens with a camera viewfinder.
+2. On your iPhone: **Settings → Connected Devices → Connect a Mac** shows a QR code.
+   Hold it up to the Mac's camera. The iPhone goes from *Waiting for Mac…* to
+   *Mac connected ✓* and continues to Messages setup.
+3. Pick the assistant chat (your own thread) on the iPhone, and use
+   **Test connection** to check it end to end without sending anything.
+
+The QR carries only a single-use code that expires in five minutes and the
+address of your deployment. The Mac stores only its own device credential and
+that address (`~/Library/Application Support/Attn Bridge`). Everything else is
+your configuration on the server, which the Mac follows by revision: turning
+**Apple Messages** off on the iPhone stops the Messages watcher without
+restarting anything. Revoking the Mac on the iPhone disconnects it immediately,
+and the bridge reopens the scanner so it can be reconnected with a new code.
+
+The bridge reads Messages through [Photon iMessage Kit](https://www.npmjs.com/package/@photon-ai/imessage-kit)
+(an optional dependency, never loaded by the server). macOS asks for **Full
+Disk Access** (to read Messages) and **Automation → Messages** (to send) the
+first time. Only your own thread is ever offered to the server as the assistant
+chat; other chats, contacts and message history stay on the Mac.
