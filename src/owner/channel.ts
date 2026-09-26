@@ -15,3 +15,7 @@ export interface OwnerChannel {
   readonly type: OwnerChannelType;
   sendMessage(input: OwnerMessageDeliveryInput): Promise<OwnerMessageDelivery>;
 }
+
+export interface OwnerChannelSettings {
+  isChannelEnabled(ownerId: string, channel: OwnerChannelType): boolean | Promise<boolean>;
+}

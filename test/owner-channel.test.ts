@@ -6,6 +6,7 @@ import { FakeMacMessagesAdapter } from '../src/owner/fake-mac-messages-adapter.j
 import { MacOSMessagesOwnerChannel } from '../src/owner/macos-messages-channel.js';
 import type { OwnerBridgeCheckpointStore } from '../src/owner/bridge.js';
 import { OwnerDeviceService } from '../src/owner/device.js';
+import { OwnerConfigurationService } from '../src/owner/configuration.js';
 
 test('macOS owner channel sends only the requested owner delivery', async () => {
   const adapter = new FakeMacMessagesAdapter();
@@ -112,4 +113,34 @@ test('owner device pairing creates a short-lived session and revocation removes 
     service.activate(expired.device.id, expired.pairingCode),
     /Invalid or expired pairing code/,
   );
+});
+
+test('QR pairing is opaque, single-use, and device readiness requires explicit chat authorization', async () => {
+  const adapter = new FakeMacMessagesAdapter();
+  adapter.chats = [{ id: 'assistant-chat', service: 'imessage', displayName: 'Assistant', address: 'assistant@example.test' }];
+  const service = new OwnerDeviceService();
+  const pairing = await service.pair('randy', 'MacBook');
+  assert.match(pairing.pairingUri, /^attn:\/\/pair\/[^/]+$/);
+  assert.equal(pairing.pairingUri.includes('randy'), false);
+  const activated = await service.activate(pairing.device.id, pairing.pairingUri);
+  assert.equal(activated.device.setupStatus, 'paired');
+  await assert.rejects(service.activate(pairing.device.id, pairing.pairingUri));
+
+  await service.heartbeat(activated.sessionToken, await adapter.checkCapabilities());
+  assert.equal((await service.get(pairing.device.id))?.setupStatus, 'awaiting_chat_authorization');
+  await service.discoverChats(activated.sessionToken, adapter);
+  await service.authorizeChat('randy', pairing.device.id, 'assistant-chat', 'imessage');
+  const ready = await service.heartbeat(activated.sessionToken, await adapter.checkCapabilities());
+  assert.equal(ready.setupStatus, 'ready');
+});
+
+test('owner configuration is typed, revisioned, and channel toggles are durable', () => {
+  const service = new OwnerConfigurationService();
+  const initial = service.get('randy');
+  assert.equal(initial.messages.macosMessagesEnabled, true);
+  const updated = service.update('randy', { messages: { macosMessagesEnabled: false } });
+  assert.equal(updated.revision, initial.revision + 1);
+  assert.equal(service.isChannelEnabled('randy', 'macos_messages'), false);
+  assert.equal(service.get('other').messages.macosMessagesEnabled, true);
+  assert.equal(service.events('randy')[0].type, 'owner.channel.disabled');
 });

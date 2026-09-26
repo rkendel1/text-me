@@ -1,5 +1,7 @@
 import type {
   MacMessagesAdapter,
+  MessagesCapabilities,
+  MessagesChat,
   ObservedMessagesMessage,
 } from './mac-messages-adapter.js';
 
@@ -10,6 +12,8 @@ import type {
 export interface PhotonIMessageKitClient {
   sendMessage(input: { recipient: string; body: string }): Promise<{ requestId?: string }>;
   watch(handler: (message: ObservedMessagesMessage) => Promise<void>): Promise<() => Promise<void>>;
+  discoverChats?(): Promise<MessagesChat[]>;
+  checkCapabilities?(): Promise<MessagesCapabilities>;
 }
 
 export class PhotonIMessageKitAdapter implements MacMessagesAdapter {
@@ -24,5 +28,15 @@ export class PhotonIMessageKitAdapter implements MacMessagesAdapter {
     handler: (message: ObservedMessagesMessage) => Promise<void>,
   ): Promise<() => Promise<void>> {
     return this.client.watch(handler);
+  }
+
+  discoverChats(): Promise<MessagesChat[]> {
+    if (!this.client.discoverChats) throw new Error('Messages chat discovery is unavailable');
+    return this.client.discoverChats();
+  }
+
+  checkCapabilities(): Promise<MessagesCapabilities> {
+    if (!this.client.checkCapabilities) throw new Error('Messages capability checks are unavailable');
+    return this.client.checkCapabilities();
   }
 }
