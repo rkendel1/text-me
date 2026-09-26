@@ -130,7 +130,7 @@ export class MacOSMessagesBridge {
         message.cursor <= this.cursor)
     ) return;
 
-    const replyTarget = this.replyTargets.pop();
+    const replyTarget = this.replyTargets.shift();
     await this.backend.submitOwnerMessage({
       ownerId: this.options.ownerId,
       deviceId: this.options.deviceId,

@@ -135,6 +135,52 @@ test('QR pairing is opaque, single-use, and device readiness requires explicit c
   assert.equal(ready.setupStatus, 'ready');
 });
 
+
+test('owner configuration update surfaces optimistic concurrency conflicts', async () => {
+  class ConflictStore {
+    private configuration = {
+      ownerId: 'randy',
+      revision: 1,
+      assistant: {
+        assistantName: 'Assistant',
+        greeting: "Hi, this is Randy's assistant. How can I help?",
+        ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
+        tone: 'friendly' as const,
+        responseStyle: 'concise' as const,
+      },
+      calls: {
+        answerCalls: true,
+        collectCallerName: true,
+        collectReason: true,
+        offerSmsTransition: true,
+        requireSmsConsent: true,
+        voicemailFallback: false,
+      },
+      messages: {
+        webEnabled: true,
+        macosMessagesEnabled: true,
+        notifyOwner: true,
+        interruptOnlyWhenNeeded: true,
+        includeSummary: true,
+        includeSuggestedResponse: true,
+      },
+    };
+    async get() { return structuredClone(this.configuration); }
+    async create() {}
+    async update(_configuration: any, previousRevision: number) {
+      this.configuration.revision = 2;
+      if (previousRevision !== this.configuration.revision) throw new Error('Owner configuration update conflict');
+    }
+    async events() { return []; }
+  }
+
+  const service = new OwnerConfigurationService(new ConflictStore() as never);
+  await assert.rejects(
+    service.update('randy', { messages: { macosMessagesEnabled: false } }),
+    /Owner configuration update conflict/,
+  );
+});
+
 test('owner configuration is typed, revisioned, and channel toggles are durable', async () => {
   const service = new OwnerConfigurationService();
   const initial = await service.get('randy');

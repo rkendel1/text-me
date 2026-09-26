@@ -266,7 +266,15 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/owner/devices/:id/status', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { device } = await deviceAuth(request);
-      response.json(device);
+      response.json({
+        id: device.id,
+        ownerId: device.ownerId,
+        status: device.status,
+        setupStatus: device.setupStatus,
+        assistantChat: device.assistantChat,
+        messagesIdentity: device.messagesIdentity,
+        lastSeenAt: device.lastSeenAt,
+      });
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(401, 'Device authentication required'));
     }
