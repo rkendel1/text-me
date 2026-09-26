@@ -8,6 +8,11 @@ import { QueuedMacMessagesOwnerChannel } from './owner/delivery.js';
 import { TwilioMessagingProvider } from './messaging/twilio-provider.js';
 import { PostgresConversationRepository } from './repositories/postgres-conversation-repository.js';
 import {
+  PostgresConversationRuntimeEventStore,
+  PostgresConversationRuntimeStore,
+  PostgresRuntimeOverrideStore,
+} from './repositories/postgres-conversation-runtime-repository.js';
+import {
   PostgresOwnerConfigurationStore,
   PostgresOwnerDeviceSessionStore,
   PostgresOwnerDeviceStore,
@@ -24,6 +29,9 @@ async function main(): Promise<void> {
   const ownerSessions = new PostgresOwnerDeviceSessionStore(pool);
   const ownerConfigurations = new PostgresOwnerConfigurationStore(pool);
   const ownerDeliveries = new PostgresOwnerMessageDeliveryStore(pool);
+  const runtimeStore = new PostgresConversationRuntimeStore(pool);
+  const runtimeEvents = new PostgresConversationRuntimeEventStore(pool);
+  const runtimeOverrides = new PostgresRuntimeOverrideStore(pool);
 
   await repository.initialize();
   await ownerDeviceStore.initialize();
@@ -31,6 +39,9 @@ async function main(): Promise<void> {
   await ownerSessions.initialize();
   await ownerConfigurations.initialize();
   await ownerDeliveries.initialize();
+  await runtimeStore.initialize();
+  await runtimeEvents.initialize();
+  await runtimeOverrides.initialize();
 
   const ownerDeviceService = new OwnerDeviceService(ownerDeviceStore, Date.now, ownerPairings, ownerSessions);
   const ownerConfigurationService = new OwnerConfigurationService(ownerConfigurations);
@@ -56,6 +67,9 @@ async function main(): Promise<void> {
     ownerConfigurationService,
     ownerDeliveryStore: ownerDeliveries,
     ownerChannel,
+    runtimeStore,
+    runtimeEventStore: runtimeEvents,
+    runtimeOverrideStore: runtimeOverrides,
   });
   app.listen(config.port, () => {
     console.log(`text-me listening on port ${config.port}`);

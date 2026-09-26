@@ -23,6 +23,16 @@ import { OwnerDeviceService } from './owner/device.js';
 import type { MacMessagesAdapter } from './owner/mac-messages-adapter.js';
 import { OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
 import { InMemoryOwnerMessageDeliveryStore, type OwnerMessageDeliveryStore } from './owner/delivery.js';
+import { InProcessConversationRuntimeController, type ConversationRuntimeController } from './runtime/controller.js';
+import { RuntimeControlService, type RuntimeConfigurationPatch } from './runtime/service.js';
+import {
+  InMemoryConversationRuntimeEventStore,
+  InMemoryConversationRuntimeStore,
+  InMemoryRuntimeOverrideStore,
+  type ConversationRuntimeEventStore,
+  type ConversationRuntimeStore,
+  type RuntimeOverrideStore,
+} from './runtime/store.js';
 import twilio from 'twilio';
 
 export interface AppOptions {
@@ -43,6 +53,11 @@ export interface AppOptions {
   ownerConfigurationService?: OwnerConfigurationService;
   ownerDeliveryStore?: OwnerMessageDeliveryStore;
   qrCodeDataUrl?: (content: string) => Promise<string>;
+  runtimeStore?: ConversationRuntimeStore;
+  runtimeEventStore?: ConversationRuntimeEventStore;
+  runtimeOverrideStore?: RuntimeOverrideStore;
+  runtimeController?: ConversationRuntimeController;
+  runtimeControlService?: RuntimeControlService;
 }
 
 function createProviderMap(
@@ -90,6 +105,28 @@ function registerStatusRoute(
   });
 }
 
+function presentRuntime(runtime: Awaited<ReturnType<RuntimeControlService['getRuntimeForConversation']>>) {
+  return {
+    ...runtime,
+    revision: runtime.configurationRevision,
+    startedAt: runtime.startedAt?.toISOString() ?? null,
+    pausedAt: runtime.pausedAt?.toISOString() ?? null,
+    stoppedAt: runtime.stoppedAt?.toISOString() ?? null,
+    updatedAt: runtime.updatedAt.toISOString(),
+    interaction: {
+      enabled: runtime.assistantEnabled,
+      mode: runtime.aiMode,
+      responseStyle: runtime.responseStyle,
+      verbosity: runtime.verbosity,
+      askOwnerWhen: runtime.askOwnerWhen,
+      allowCommitments: runtime.allowCommitments,
+      allowScheduling: runtime.allowScheduling,
+      allowCallerFollowups: runtime.allowCallerFollowups,
+      customInstructions: runtime.customInstructions,
+    },
+  };
+}
+
 export function createApp(options: AppOptions): express.Express {
   const app = express();
   const providers = createProviderMap(
@@ -100,6 +137,14 @@ export function createApp(options: AppOptions): express.Express {
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
   const ownerConfiguration = options.ownerConfigurationService ?? new OwnerConfigurationService();
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
+  const runtime = options.runtimeControlService ?? new RuntimeControlService(
+    options.repository,
+    ownerConfiguration,
+    options.runtimeStore ?? new InMemoryConversationRuntimeStore(),
+    options.runtimeEventStore ?? new InMemoryConversationRuntimeEventStore(),
+    options.runtimeOverrideStore ?? new InMemoryRuntimeOverrideStore(),
+    options.runtimeController ?? new InProcessConversationRuntimeController(),
+  );
   const renderQrCode = options.qrCodeDataUrl ?? ((content: string) => toDataURL(content, {
     errorCorrectionLevel: 'M',
     margin: 1,
@@ -120,6 +165,7 @@ export function createApp(options: AppOptions): express.Express {
     options.conversationModel ?? new FakeConversationModel(),
     options.voiceProvider ?? new FakeVoiceProvider(),
     messaging,
+    runtime,
   );
   const fakeRoutesEnabled = options.includeFakeProviderRoutes ?? true;
 
@@ -472,6 +518,147 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  const runtimeInput = (request: Request) => ({
+    commandId: typeof request.body?.commandId === 'string' ? request.body.commandId : undefined,
+    expectedRevision: typeof request.body?.expectedRevision === 'number'
+      ? request.body.expectedRevision
+      : undefined,
+  });
+
+  const runtimeOwner = (request: Request) => (request as Request & { ownerId?: string }).ownerId!;
+
+  app.get('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.getRuntime(String(request.params.id), runtimeOwner(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/conversations/:id/runtime/events', ownerAuth, async (request, response, next) => {
+    try {
+      const snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
+      response.status(200);
+      response.setHeader('Content-Type', 'text/event-stream');
+      response.setHeader('Cache-Control', 'no-cache');
+      response.setHeader('Connection', 'keep-alive');
+      response.flushHeaders?.();
+      response.write(`event: runtime.state_changed\\n`);
+      response.write(`data: ${JSON.stringify({ runtime: presentRuntime(snapshot) })}\\n\\n`);
+      const unsubscribe = runtime.subscribe(String(request.params.id), (event) => {
+        response.write(`event: ${event.type}\\n`);
+        response.write(`data: ${JSON.stringify({
+          ...event,
+          occurredAt: event.occurredAt.toISOString(),
+        })}\\n\\n`);
+      });
+      request.on('close', unsubscribe);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/start', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.start(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/stop', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.stop(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/pause', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.pause(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/resume', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.resume(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/takeover', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.takeOver(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/return-to-assistant', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.returnToAssistant(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/interrupt', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.interrupt(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/runtime/transition-to-sms', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.transitionToSms(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
+    try {
+      const patch = request.body as RuntimeConfigurationPatch & { expiresAt?: string };
+      const fields = Object.entries(patch).filter(([field]) =>
+        !['commandId', 'expectedRevision', 'expiresAt'].includes(field),
+      ) as [keyof RuntimeConfigurationPatch, unknown][];
+      if (fields.length === 0) throw new HttpError(400, 'At least one runtime field is required');
+      let snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
+      for (const [field, value] of fields) {
+        snapshot = await runtime.setTemporaryOverride(
+          String(request.params.id),
+          runtimeOwner(request),
+          field as Parameters<RuntimeControlService['setTemporaryOverride']>[2],
+          value,
+          runtimeInput(request),
+          typeof patch.expiresAt === 'string' ? new Date(patch.expiresAt) : undefined,
+        );
+      }
+      response.json(presentRuntime(snapshot));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/conversations/:id/runtime/overrides/:field', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(presentRuntime(await runtime.clearTemporaryOverride(
+        String(request.params.id),
+        runtimeOwner(request),
+        String(request.params.field) as Parameters<RuntimeControlService['clearTemporaryOverride']>[2],
+        runtimeInput(request),
+      )));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/conversations', ownerAuth, async (request, response, next) => {
     try {
       let conversations = await service.listConversations();
@@ -485,7 +672,10 @@ export function createApp(options: AppOptions): express.Express {
         conversations = conversations.filter((conversation) =>
           presentConversationSummary(conversation).needsOwner === true);
       }
-      response.json(conversations.map(presentConversationSummary));
+      response.json(await Promise.all(conversations.map(async (conversation) => ({
+        ...presentConversationSummary(conversation),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+      }))));
     } catch (error) {
       next(error);
     }
@@ -500,7 +690,10 @@ export function createApp(options: AppOptions): express.Express {
       if (!conversation) throw new HttpError(404, 'Conversation not found');
       if (options.ownerAuthToken) await service.markOwnerRead(conversation.id, authenticatedOwner);
       const refreshed = await service.getConversation(conversation.id);
-      response.json(presentConversation(refreshed!));
+      response.json({
+        ...presentConversation(refreshed!),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(refreshed!)),
+      });
     } catch (error) {
       next(error);
     }
@@ -522,7 +715,10 @@ export function createApp(options: AppOptions): express.Express {
         ? request.body.idempotencyKey.trim()
         : `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
       const conversation = await engine.respondToOwner(String(request.params.id), body, key);
-      response.json(presentConversation(conversation));
+      response.json({
+        ...presentConversation(conversation),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+      });
     } catch (error) {
       next(error);
     }
@@ -567,7 +763,10 @@ document.querySelector('#pairButton').onclick=pairDevice;document.querySelector(
         callbackId,
         audio: request.body?.audio,
       });
-      response.json(presentConversation(conversation));
+      response.json({
+        ...presentConversation(conversation),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+      });
     } catch (error) {
       next(error);
     }
@@ -576,7 +775,11 @@ document.querySelector('#pairButton').onclick=pairDevice;document.querySelector(
   app.post('/conversations/:id/convert-to-text', async (request, response, next) => {
     try {
       const conversation = await service.convertToTextConversation(request.params.id);
-      response.json(presentConversation(conversation));
+      await runtime.finalizeSmsTransition(conversation.id);
+      response.json({
+        ...presentConversation(conversation),
+        runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+      });
     } catch (error) {
       next(error);
     }
@@ -593,7 +796,11 @@ document.querySelector('#pairButton').onclick=pairDevice;document.querySelector(
         phone,
         typeof request.body?.displayName === 'string' ? request.body.displayName : undefined,
       );
-      response.json(presentConversation(conversation));
+      const runtimeSnapshot = await runtime.finalizeSmsTransition(conversation.id);
+      response.json({
+        ...presentConversation(conversation),
+        runtime: presentRuntime(runtimeSnapshot),
+      });
     } catch (error) {
       next(error);
     }
