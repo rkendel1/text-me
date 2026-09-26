@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import type { Express } from 'express';
 
 import { Pool } from 'pg';
 
@@ -48,7 +49,7 @@ import { MEDIA_STREAM_PATH, RealtimeVoiceService } from './voice/realtime/realti
 export function buildServer(
   config: AppConfig = getConfig(),
   overrides: Partial<AppOptions> = {},
-): { server: Server; ready: Promise<void> } {
+): { app: Express; server: Server; ready: Promise<void> } {
   // Serverless instances each hold their own pool; keep it small for Neon's pooler.
   const pool = new Pool({ connectionString: config.databaseUrl, max: 5 });
   // Neon closes idle connections; without a listener pg's 'error' event would crash the whole process.
@@ -184,5 +185,5 @@ export function buildServer(
     publicBaseUrl: config.publicBaseUrl,
     beforeConnect: ensureReady,
   });
-  return { server, ready };
+  return { app, server, ready };
 }
