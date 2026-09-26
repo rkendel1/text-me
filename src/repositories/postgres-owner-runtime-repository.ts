@@ -680,7 +680,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
       `
         UPDATE owner_message_deliveries
            SET status = 'failed', error = $3, failed_at = NOW(), updated_at = NOW()
-         WHERE id = $1 AND device_id = $2
+         WHERE id = $1 AND device_id = $2 AND status IN ('pending', 'sent')
          RETURNING *
       `,
       [deliveryId, deviceId, error],

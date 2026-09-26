@@ -42,6 +42,7 @@ export interface AppOptions {
   ownerMessagesAdapter?: MacMessagesAdapter;
   ownerConfigurationService?: OwnerConfigurationService;
   ownerDeliveryStore?: OwnerMessageDeliveryStore;
+  qrCodeDataUrl?: (content: string) => Promise<string>;
 }
 
 function createProviderMap(
@@ -99,6 +100,11 @@ export function createApp(options: AppOptions): express.Express {
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
   const ownerConfiguration = options.ownerConfigurationService ?? new OwnerConfigurationService();
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
+  const renderQrCode = options.qrCodeDataUrl ?? ((content: string) => toDataURL(content, {
+    errorCorrectionLevel: 'M',
+    margin: 1,
+    width: 256,
+  }));
   const ownerDeviceRateLimit = rateLimit({
     windowMs: 60_000,
     limit: 60,
@@ -205,11 +211,7 @@ export function createApp(options: AppOptions): express.Express {
       response.status(201).json({
         deviceId: result.device.id,
         pairingUri: result.pairingUri,
-        qrDataUrl: await toDataURL(result.pairingUri, {
-          errorCorrectionLevel: 'M',
-          margin: 1,
-          width: 256,
-        }),
+        qrDataUrl: await renderQrCode(result.pairingUri),
         expiresAt: result.expiresAt.toISOString(),
       });
     } catch (error) {

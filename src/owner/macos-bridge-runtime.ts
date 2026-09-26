@@ -142,46 +142,48 @@ async function main(): Promise<void> {
   let currentChatId: string | undefined;
 
   while (true) {
-    const device = await backend.heartbeat(state.deviceId!);
-    if (!device.assistantChat) {
-      await backend.discoverChats(state.deviceId!);
-      await sleep(pollMs);
-      continue;
-    }
+    try {
+      const device = await backend.heartbeat(state.deviceId!);
+      if (!device.assistantChat) {
+        await backend.discoverChats(state.deviceId!);
+      } else {
+        if (!bridge || currentChatId !== device.assistantChat.chatId) {
+          await bridge?.stop();
+          currentChatId = device.assistantChat.chatId;
+          bridge = new MacOSMessagesBridge(adapter, {
+            async submitOwnerMessage(input) {
+              await backend.submitReply(state.deviceId!, input.externalId, input.body, input.deliveryId, input.replyToExternalId);
+            },
+            async confirmOwnerDelivery(input) {
+              await backend.markObserved(state.deviceId!, input.deliveryId, input.externalId);
+            },
+          }, {
+            ownerId: device.ownerId,
+            deviceId: device.id,
+            assistantChatId: device.assistantChat.chatId,
+            ownerSender: device.messagesIdentity?.address ?? process.env.OWNER_SENDER ?? '',
+            checkpoint,
+          });
+          await bridge.start();
+        }
 
-    if (!bridge || currentChatId !== device.assistantChat.chatId) {
-      await bridge?.stop();
-      currentChatId = device.assistantChat.chatId;
-      bridge = new MacOSMessagesBridge(adapter, {
-        async submitOwnerMessage(input) {
-          await backend.submitReply(state.deviceId!, input.externalId, input.body, input.deliveryId, input.replyToExternalId);
-        },
-        async confirmOwnerDelivery(input) {
-          await backend.markObserved(state.deviceId!, input.deliveryId, input.externalId);
-        },
-      }, {
-        ownerId: device.ownerId,
-        deviceId: device.id,
-        assistantChatId: device.assistantChat.chatId,
-        ownerSender: device.messagesIdentity?.address ?? process.env.OWNER_SENDER ?? '',
-        checkpoint,
-      });
-      await bridge.start();
-    }
-
-    const deliveries = await backend.deliveries(state.deviceId!);
-    for (const delivery of deliveries) {
-      try {
-        const result = await adapter.send({
-          recipient: device.assistantChat.address ?? device.assistantChat.chatId,
-          body: delivery.body,
-        });
-        if (!result.providerRequestId) throw new Error('Messages adapter did not return a providerRequestId');
-        await backend.markRequested(state.deviceId!, delivery.id, result.providerRequestId);
-        bridge.trackDelivery(delivery.id, result.providerRequestId);
-      } catch (error) {
-        await backend.markFailed(state.deviceId!, delivery.id, error instanceof Error ? error.message : 'Delivery failed');
+        const deliveries = await backend.deliveries(state.deviceId!);
+        for (const delivery of deliveries) {
+          try {
+            const result = await adapter.send({
+              recipient: device.assistantChat.address ?? device.assistantChat.chatId,
+              body: delivery.body,
+            });
+            if (!result.providerRequestId) throw new Error('Messages adapter did not return a providerRequestId');
+            await backend.markRequested(state.deviceId!, delivery.id, result.providerRequestId);
+            bridge.trackDelivery(delivery.id, result.providerRequestId);
+          } catch (error) {
+            await backend.markFailed(state.deviceId!, delivery.id, error instanceof Error ? error.message : 'Delivery failed');
+          }
+        }
       }
+    } catch (error) {
+      console.error(error);
     }
     await sleep(pollMs);
   }

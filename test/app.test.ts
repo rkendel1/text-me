@@ -428,6 +428,22 @@ test('QR pairing route returns a scannable QR image payload', async () => {
   assert.equal(typeof pair.body.pairingUri, 'string');
 });
 
+
+test('QR pairing route surfaces QR generation failures as an error response', async () => {
+  const repository = new InMemoryConversationRepository();
+  const app = createApp({
+    repository,
+    qrCodeDataUrl: async () => { throw new Error('QR unavailable'); },
+  });
+
+  const pair = await request(app)
+    .post('/owner/devices/pair/qr')
+    .send({ name: 'Audit Mac' });
+
+  assert.equal(pair.status, 500, JSON.stringify(pair.body));
+  assert.deepEqual(pair.body, { error: 'Internal server error' });
+});
+
 test('global device activation route works without priming the per-device activation route', async () => {
   const repository = new InMemoryConversationRepository();
   const app = createApp({ repository });
