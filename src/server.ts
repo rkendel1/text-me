@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { createApp } from './app.js';
 import { getConfig } from './config.js';
 import { PostgresConversationRepository } from './repositories/postgres-conversation-repository.js';
+import { TwilioMessagingProvider } from './messaging/twilio-provider.js';
 
 async function main(): Promise<void> {
   const config = getConfig();
@@ -14,6 +15,13 @@ async function main(): Promise<void> {
   const app = createApp({
     repository,
     includeFakeProviderRoutes: config.enableFakeProviderRoutes,
+    messagingProvider: new TwilioMessagingProvider(
+      config.twilioAccountSid,
+      config.twilioAuthToken,
+      config.twilioPhoneNumber,
+    ),
+    ownerPhone: config.ownerPhone,
+    twilioAuthToken: config.twilioAuthToken,
   });
   app.listen(config.port, () => {
     console.log(`text-me listening on port ${config.port}`);

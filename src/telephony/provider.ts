@@ -17,6 +17,14 @@ export interface StatusUpdate {
   payload: Record<string, unknown>;
 }
 
+export interface IncomingSms {
+  provider: string;
+  providerMessageId: string;
+  from: string;
+  body: string;
+  payload: Record<string, unknown>;
+}
+
 export interface ProviderResponse {
   body: string;
   contentType: string;
@@ -27,4 +35,5 @@ export interface TelephonyProvider {
   parseIncomingCall(payload: unknown): IncomingCall;
   parseStatusUpdate(payload: unknown): StatusUpdate;
   answerCall(conversation: Conversation): ProviderResponse;
+  parseIncomingSms?(payload: unknown): IncomingSms;
 }
