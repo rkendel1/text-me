@@ -81,7 +81,7 @@ export class PostgresRuntimeEventBus implements RuntimeEventBus {
 
   subscribe(conversationId: string, listener: RuntimeEventListener): () => void {
     this.subscribers += 1;
-    void this.ensureListening();
+    this.listenInBackground();
     const unsubscribe = this.local.subscribe(conversationId, listener);
     return () => {
       unsubscribe();
@@ -91,7 +91,7 @@ export class PostgresRuntimeEventBus implements RuntimeEventBus {
 
   subscribeAll(listener: RuntimeEventListener): () => void {
     this.subscribers += 1;
-    void this.ensureListening();
+    this.listenInBackground();
     const unsubscribe = this.local.subscribeAll(listener);
     return () => {
       unsubscribe();
@@ -109,6 +109,14 @@ export class PostgresRuntimeEventBus implements RuntimeEventBus {
     this.listener = undefined;
     this.connecting = undefined;
     await client?.end().catch(() => undefined);
+  }
+
+  /** A failed LISTEN connection must never take the process down; local delivery keeps working and it retries. */
+  private listenInBackground(): void {
+    this.ensureListening().catch((error: Error) => {
+      console.error('[runtime-bus] couldn’t start listening; retrying in 5s:', error.message);
+      setTimeout(() => { if (this.subscribers > 0) this.listenInBackground(); }, 5000).unref();
+    });
   }
 
   private ensureListening(): Promise<void> {

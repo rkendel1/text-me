@@ -51,6 +51,8 @@ export function buildServer(
 ): { server: Server; ready: Promise<void> } {
   // Serverless instances each hold their own pool; keep it small for Neon's pooler.
   const pool = new Pool({ connectionString: config.databaseUrl, max: 5 });
+  // Neon closes idle connections; without a listener pg's 'error' event would crash the whole process.
+  pool.on('error', (error) => console.error('[database] idle connection closed:', error.message));
   const repository = new PostgresConversationRepository(pool);
   const ownerDeviceStore = new PostgresOwnerDeviceStore(pool);
   const ownerPairings = new PostgresOwnerPairingCredentialStore(pool);

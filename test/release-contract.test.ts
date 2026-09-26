@@ -491,3 +491,24 @@ test('database setup is retried after a failure, and the app shell loads meanwhi
   assert.equal(down.body.code, 'database_unavailable');
   assert.equal((await request(app).get('/owner/control-plane').set(headers)).status, 200, 'the next request retries and succeeds');
 });
+
+test('a failed live-updates connection never crashes the process', async () => {
+  const pg = (await import('pg')).default;
+  const { PostgresRuntimeEventBus } = await import('../src/runtime/event-bus.js');
+  const pool = new pg.Pool({ connectionString: 'postgres://nobody:none@127.0.0.1:1/none' });
+  pool.on('error', () => undefined);
+  const bus = new PostgresRuntimeEventBus(pool, 'postgres://nobody:none@127.0.0.1:1/none');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const unsubscribe = bus.subscribeAll(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    unsubscribe();
+    assert.deepEqual(unhandled, [], 'the connection error is handled, not left to kill the instance');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    await bus.close();
+    await pool.end();
+  }
+});

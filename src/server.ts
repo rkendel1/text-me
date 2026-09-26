@@ -7,6 +7,15 @@ import type {} from 'express';
 import { buildServer } from './bootstrap.js';
 import { startupFailureServer } from './startup-failure.js';
 
+// On Vercel one instance serves many requests at once: a stray rejection or error in one
+// request's background work must be logged, not take every in-flight request down with it.
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] unhandled rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[process] uncaught exception:', error);
+});
+
 let server: Server;
 try {
   ({ server } = buildServer());
