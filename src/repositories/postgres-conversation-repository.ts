@@ -27,6 +27,8 @@ interface ConversationRow {
   channels: ConversationChannel[] | null;
   primary_channel: ConversationChannel | null;
   participants: ConversationParticipant[] | null;
+  owner_id: string | null;
+  last_owner_read_at: Date | null;
 }
 
 interface EventRow {
@@ -55,6 +57,8 @@ export class PostgresConversationRepository implements ConversationRepository {
         channels JSONB NOT NULL DEFAULT '["voice"]',
         primary_channel TEXT NOT NULL DEFAULT 'voice',
         participants JSONB NOT NULL DEFAULT '[]',
+        owner_id TEXT,
+        last_owner_read_at TIMESTAMPTZ,
         UNIQUE (provider, provider_call_id)
       );
     `);
@@ -73,7 +77,9 @@ export class PostgresConversationRepository implements ConversationRepository {
         ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'voice_active',
         ADD COLUMN IF NOT EXISTS channels JSONB NOT NULL DEFAULT '["voice"]',
         ADD COLUMN IF NOT EXISTS primary_channel TEXT NOT NULL DEFAULT 'voice',
-        ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]';
+        ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]',
+          ADD COLUMN IF NOT EXISTS owner_id TEXT,
+          ADD COLUMN IF NOT EXISTS last_owner_read_at TIMESTAMPTZ;
     `);
   }
 
@@ -90,8 +96,9 @@ export class PostgresConversationRepository implements ConversationRepository {
           caller_phone,
           status,
           started_at
+          , owner_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (provider, provider_call_id) DO NOTHING
         RETURNING *
       `,
@@ -102,6 +109,7 @@ export class PostgresConversationRepository implements ConversationRepository {
         input.callerPhone,
         input.status,
         input.startedAt,
+        input.ownerId ?? null,
       ],
     );
 
@@ -155,7 +163,7 @@ export class PostgresConversationRepository implements ConversationRepository {
       `
         SELECT *
         FROM conversations
-        ORDER BY started_at DESC
+        ORDER BY GREATEST(started_at, COALESCE((SELECT MAX(occurred_at) FROM conversation_events e WHERE e.conversation_id = conversations.id), started_at)) DESC
       `,
     );
 
@@ -218,6 +226,13 @@ export class PostgresConversationRepository implements ConversationRepository {
     );
   }
 
+  async markOwnerRead(conversationId: string, ownerId: string, readAt: Date): Promise<void> {
+    await this.pool.query(
+      `UPDATE conversations SET last_owner_read_at = $3 WHERE id = $1 AND owner_id = $2`,
+      [conversationId, ownerId, readAt],
+    );
+  }
+
   private async getConversationWithEvents(id: string): Promise<Conversation | null> {
     const [conversationResult, eventsResult] = await Promise.all([
       this.pool.query<ConversationRow>(
@@ -258,6 +273,8 @@ export class PostgresConversationRepository implements ConversationRepository {
       channels: row.channels ?? ['voice'],
       primaryChannel: row.primary_channel ?? 'voice',
       participants: row.participants ?? [],
+      ownerId: row.owner_id ?? undefined,
+      lastOwnerReadAt: row.last_owner_read_at ? new Date(row.last_owner_read_at) : null,
       events: eventsResult.rows.map((event) => ({
         id: event.id,
         conversationId: event.conversation_id,

@@ -1,4 +1,4 @@
-export type ConversationSpeaker = 'caller' | 'assistant';
+export type ConversationSpeaker = 'caller' | 'assistant' | 'owner';
 
 export interface ConversationTurn {
   speaker: ConversationSpeaker;

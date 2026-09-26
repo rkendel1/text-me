@@ -66,6 +66,7 @@ export class ConversationEngine {
       if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
         throw new Error('SMS destination is unavailable');
       }
+
       const idempotencyKey = `conversation:${conversationId}:sms:turn:${input.callbackId}`;
       const result = await this.messaging.sendMessage({
         to: consent.payload.phoneNumber,
@@ -111,9 +112,59 @@ export class ConversationEngine {
     return this.requireConversation(conversationId);
   }
 
+  async respondToOwner(
+    conversationId: string,
+    body: string,
+    idempotencyKey: string,
+  ): Promise<Conversation> {
+    const conversation = await this.requireConversation(conversationId);
+    const existing = conversation.events.find(
+      (event) => event.type === 'owner.message' && event.payload.idempotencyKey === idempotencyKey,
+    );
+    if (!existing) {
+      await this.repository.appendEvent(conversationId, 'owner.message', {
+        text: body, speaker: 'owner', channel: 'web', source: 'web', idempotencyKey,
+      }, new Date());
+    } else if (conversation.events.some(
+      (event) => event.type === 'assistant.message' && event.payload.idempotencyKey === idempotencyKey,
+    )) {
+      return conversation;
+    }
+    const current = await this.requireConversation(conversationId);
+    const consent = [...current.events].reverse().find(
+      (event) => event.type === 'sms.consent.granted',
+    );
+    if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
+      throw new Error('SMS destination is unavailable');
+    }
+    const history = this.history(current);
+    history.push({ speaker: 'owner', text: body, sequence: history.length + 1 });
+    const text = await this.model.respond(history);
+    try {
+      const result = await this.messaging.sendMessage({
+        to: consent.payload.phoneNumber, body: text, idempotencyKey: `${idempotencyKey}:sms`,
+      });
+      await this.repository.appendEvent(conversationId, 'assistant.message', {
+        text, speaker: 'assistant', channel: 'sms', source: 'web', idempotencyKey,
+        providerMessageId: result.providerMessageId,
+      }, new Date());
+      await this.repository.appendEvent(conversationId, 'sms.sent', {
+        to: consent.payload.phoneNumber, body: text,
+        idempotencyKey: `${idempotencyKey}:sms`, providerMessageId: result.providerMessageId,
+      }, new Date());
+    } catch (error) {
+      await this.repository.appendEvent(conversationId, 'assistant.failed', {
+        idempotencyKey, error: error instanceof Error ? error.message : 'unknown',
+      }, new Date());
+      throw error;
+    }
+    return this.requireConversation(conversationId);
+  }
+
   private history(conversation: Conversation): ConversationTurn[] {
     return conversation.events
-      .filter((event) => turnEvents.has(event.type))
+      .filter((event) => turnEvents.has(event.type) || event.type === 'owner.message' ||
+        event.type === 'caller.message' || event.type === 'assistant.message')
       .map((event) => ({
         speaker: event.payload.speaker as ConversationTurn['speaker'],
         text: String(event.payload.text),

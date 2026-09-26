@@ -6,6 +6,8 @@ export interface AppConfig {
   twilioAuthToken: string;
   twilioPhoneNumber: string;
   ownerPhone: string;
+  ownerId: string;
+  ownerAuthToken: string;
 }
 
 export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -27,5 +29,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!,
     twilioPhoneNumber: env.TWILIO_PHONE_NUMBER!,
     ownerPhone: env.OWNER_PHONE_NUMBER!,
+    ownerId: env.OWNER_ID ?? 'owner',
+    ownerAuthToken: env.OWNER_AUTH_TOKEN ?? '',
   };
 }
