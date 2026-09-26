@@ -88,7 +88,7 @@ calls outside production.
 ## Test
 
 ```bash
-npm test                                       # 43 tests (2 need Postgres and skip without it)
+npm test                                       # 44 tests (2 need Postgres and skip without it)
 TEST_DATABASE_URL=postgres://… npm test        # + Postgres LISTEN/NOTIFY and command store
 ```
 

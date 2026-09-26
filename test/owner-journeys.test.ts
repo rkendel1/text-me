@@ -254,3 +254,22 @@ test('Journeys C/D + audit: owner commands reach the live call and the timeline 
   assert.equal(find('runtime.owner_speech').ids.commandId, ownerMessage.id);
   assert.equal(audit.providerCallId, 'journey');
 });
+
+test('if the text model fails, the caller text is kept and the owner is flagged instead of a 500', async (t) => {
+  const model = new MockLanguageModelV4({ doGenerate: async () => { throw new Error('gateway down'); } });
+  const call = await liveCall({ model });
+  t.after(call.close);
+  call.connector.emit({
+    type: 'function-call-arguments-done', responseId: 'r', itemId: 'i', callId: 'txt',
+    name: 'transition_to_text', arguments: JSON.stringify({ callerName: 'Sam' }),
+  });
+  await eventually(async () => (await request(call.app).get(`/conversations/${call.conversationId}`)).body.state === 'text_active', 'moved to text');
+  const inbound = await request(call.app).post('/webhooks/twilio/sms').type('form')
+    .send({ MessageSid: 'SM-fail-1', From: '+15553334444', Body: 'Are you still there?' });
+  assert.equal(inbound.status, 200);
+  assert.ok(inbound.body.messages.some((message: { body: string }) => message.body === 'Are you still there?'));
+  assert.match(inbound.body.ownerRequest.question, /Are you still there\?/);
+  const detail = (await request(call.app).get(`/conversations/${call.conversationId}`)).body;
+  assert.equal(detail.runtime.status, 'owner_needed');
+  assert.equal(detail.runtime.state, 'waiting_for_owner');
+});

@@ -317,7 +317,19 @@ export function createApp(options: AppOptions): express.Express {
         return;
       }
       const received = await service.receiveSms(message);
-      const conversation = await engine.respondToCallerText(received.id, message.providerMessageId);
+      let conversation = received;
+      try {
+        conversation = await engine.respondToCallerText(received.id, message.providerMessageId);
+      } catch (error) {
+        // The caller's text is saved; if the assistant can't reply, the owner must see it.
+        console.error(`[sms ${received.id}] assistant reply failed`, error);
+        await service.requestOwner(received.id, {
+          question: `New text: "${message.body}" — the assistant couldn't reply. Can you answer?`,
+          source: 'sms', callId: message.providerMessageId,
+        }).catch(() => undefined);
+        await runtime.noteOwnerNeeded(received.id, message.providerMessageId, message.body).catch(() => undefined);
+        conversation = (await service.getConversation(received.id)) ?? received;
+      }
       response.json(presentConversation(conversation));
     } catch (error) {
       next(error);
