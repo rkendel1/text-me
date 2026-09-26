@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 
 import { Pool } from 'pg';
 
-import { createApp, type AppOptions } from './app.js';
+import { createApp, type AppOptions } from './http-app.js';
 import { getConfig, type AppConfig } from './config.js';
 import { OwnerConfigurationService } from './owner/configuration.js';
 import { OwnerDeviceService } from './owner/device.js';

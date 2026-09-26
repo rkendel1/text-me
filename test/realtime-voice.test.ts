@@ -6,7 +6,7 @@ import test from 'node:test';
 import request from 'supertest';
 import WebSocket from 'ws';
 
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/http-app.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 import { FakeTelephonyProvider } from '../src/telephony/fake-provider.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';

@@ -5,7 +5,7 @@ import test from 'node:test';
 
 import request from 'supertest';
 
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/http-app.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 import { acceptableServer, InMemoryBridgeStateStore, MacBridgeAgent, ownSelfChats } from '../src/owner/bridge-agent.js';
 import type { OwnerBridgeCheckpointStore } from '../src/owner/bridge.js';

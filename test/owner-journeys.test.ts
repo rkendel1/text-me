@@ -8,7 +8,7 @@ import { MockLanguageModelV4 } from 'ai/test';
 import request from 'supertest';
 import WebSocket from 'ws';
 
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/http-app.js';
 import { AiSdkTextAgent } from '../src/conversation/ai-sdk-text-agent.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 import { OwnerConfigurationService } from '../src/owner/configuration.js';

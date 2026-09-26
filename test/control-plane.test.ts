@@ -6,7 +6,7 @@ import test from 'node:test';
 import request from 'supertest';
 import WebSocket from 'ws';
 
-import { createApp } from '../src/app.js';
+import { createApp } from '../src/http-app.js';
 import { InMemoryNotificationDeliveryStore, InMemoryOwnerAttentionStore } from '../src/attention/stores.js';
 import type { PushSender } from '../src/attention/surfaces.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
