@@ -4,6 +4,7 @@ import type { ConversationModel, ConversationTurn } from '../conversation/model.
 import type { AudioInput, SpeechProvider } from '../speech/provider.js';
 import type { VoiceProvider } from '../voice/provider.js';
 import type { MessagingProvider } from '../messaging/provider.js';
+import type { RuntimeControlService } from '../runtime/service.js';
 
 const turnEvents = new Set(['speech.transcript', 'ai.response']);
 
@@ -14,10 +15,14 @@ export class ConversationEngine {
     private readonly model: ConversationModel,
     private readonly voice: VoiceProvider,
     private readonly messaging?: MessagingProvider,
+    private readonly runtime?: RuntimeControlService,
   ) {}
 
   async respond(conversationId: string, input: AudioInput): Promise<Conversation> {
     const conversation = await this.requireConversation(conversationId);
+    if (this.runtime && !await this.runtime.canAssistantRespond(conversationId)) {
+      return conversation;
+    }
     const existingTranscript = conversation.events.find(
       (event) =>
         event.type === 'speech.transcript' &&
@@ -32,6 +37,7 @@ export class ConversationEngine {
       { callbackId: input.callbackId, sequence },
       new Date(),
     );
+    await this.runtime?.noteSpeechStarted(conversationId, input.callbackId);
 
     const transcript = await this.speech.transcribe(input);
     if (!transcript.text.trim()) return this.requireConversation(conversationId);
@@ -47,6 +53,12 @@ export class ConversationEngine {
       },
       new Date(),
     );
+    await this.runtime?.noteTranscript(conversationId, input.callbackId, transcript.text);
+
+    if (this.runtime && !await this.runtime.shouldUseAssistantAutonomy(conversationId)) {
+      await this.runtime.noteOwnerNeeded(conversationId, input.callbackId, transcript.text);
+      return this.requireConversation(conversationId);
+    }
 
     const history = this.history(await this.requireConversation(conversationId));
     await this.repository.appendEvent(
@@ -55,6 +67,7 @@ export class ConversationEngine {
       { callbackId: input.callbackId, sequence: sequence + 1 },
       new Date(),
     );
+    await this.runtime?.noteAiStarted(conversationId, input.callbackId);
     const text = await this.model.respond(history);
     const currentConversation = await this.requireConversation(conversationId);
     if (currentConversation.state === 'text_active' || currentConversation.events.some(
@@ -80,6 +93,8 @@ export class ConversationEngine {
         to: consent.payload.phoneNumber, body: text, idempotencyKey,
         providerMessageId: result.providerMessageId,
       }, new Date());
+      await this.runtime?.noteAiCompleted(conversationId, input.callbackId, text);
+      await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
       return this.requireConversation(conversationId);
     }
 
@@ -94,6 +109,15 @@ export class ConversationEngine {
       },
       new Date(),
     );
+    await this.runtime?.noteAiCompleted(conversationId, input.callbackId, text);
+
+    const runtime = this.runtime
+      ? await this.runtime.getRuntimeForConversation(await this.requireConversation(conversationId))
+      : null;
+    if (runtime && !runtime.voiceEnabled) {
+      await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
+      return this.requireConversation(conversationId);
+    }
 
     await this.repository.appendEvent(
       conversationId,
@@ -101,6 +125,7 @@ export class ConversationEngine {
       { callbackId: input.callbackId, sequence: sequence + 1 },
       new Date(),
     );
+    await this.runtime?.noteVoiceStarted(conversationId, input.callbackId, text);
     await this.voice.speak(text);
     await this.repository.appendEvent(
       conversationId,
@@ -108,6 +133,7 @@ export class ConversationEngine {
       { callbackId: input.callbackId, text, sequence: sequence + 1 },
       new Date(),
     );
+    await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
 
     return this.requireConversation(conversationId);
   }
@@ -159,6 +185,7 @@ export class ConversationEngine {
       }, new Date());
       throw error;
     }
+    await this.runtime?.noteOwnerResponse(conversationId);
     return this.requireConversation(conversationId);
   }
 

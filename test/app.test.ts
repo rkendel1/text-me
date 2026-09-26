@@ -23,6 +23,8 @@ import { FakeMacMessagesAdapter } from '../src/owner/fake-mac-messages-adapter.j
 import { OwnerDeviceService } from '../src/owner/device.js';
 import { OwnerConfigurationService } from '../src/owner/configuration.js';
 import { InMemoryOwnerMessageDeliveryStore, QueuedMacMessagesOwnerChannel } from '../src/owner/delivery.js';
+import type { ConversationRuntime } from '../src/domain/runtime.js';
+import type { ConversationRuntimeController } from '../src/runtime/controller.js';
 
 class InMemoryConversationRepository implements ConversationRepository {
   private readonly conversations = new Map<string, Conversation>();
@@ -104,7 +106,7 @@ class InMemoryConversationRepository implements ConversationRepository {
   async updateStatus(
     conversationId: string,
     status: ConversationStatus,
-    patch: { endedAt?: Date | null; durationSeconds?: number | null },
+    patch: { endedAt?: Date | null; durationSeconds?: number | null; state?: Conversation['state'] },
   ): Promise<void> {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) {
@@ -118,6 +120,9 @@ class InMemoryConversationRepository implements ConversationRepository {
     if (patch.durationSeconds !== undefined) {
       conversation.durationSeconds = patch.durationSeconds;
     }
+    if (patch.state !== undefined) {
+      conversation.state = patch.state;
+    }
   }
 
   async markOwnerRead(conversationId: string, _ownerId: string, readAt: Date): Promise<void> {
@@ -129,6 +134,25 @@ class InMemoryConversationRepository implements ConversationRepository {
 class ThrowingTwilioProvider extends TwilioProvider {
   override answerCall() {
     throw new Error('provider unavailable');
+  }
+}
+
+class TrackingRuntimeController implements ConversationRuntimeController {
+  readonly calls: string[] = [];
+  failure?: { method: string; message: string };
+
+  private maybeFail(method: string): void {
+    this.calls.push(method);
+    if (this.failure?.method === method) throw new Error(this.failure.message);
+  }
+
+  async start(): Promise<void> { this.maybeFail('start'); }
+  async stop(): Promise<void> { this.maybeFail('stop'); }
+  async pause(): Promise<void> { this.maybeFail('pause'); }
+  async resume(): Promise<void> { this.maybeFail('resume'); }
+  async interrupt(): Promise<void> { this.maybeFail('interrupt'); }
+  async update(_conversationId: string, _config: ConversationRuntime): Promise<void> {
+    this.maybeFail('update');
   }
 }
 
@@ -651,4 +675,255 @@ test('authenticated owner inbox authorizes and mediates web messages', async () 
   assert.equal(messaging.sentMessages.length, 1);
   assert.equal(response.body.messages.some((message: { role: string; body: string }) =>
     message.role === 'owner' && message.body === 'Friday at 2 works.'), true);
+});
+
+test('runtime lifecycle commands are durable, idempotent, and enforce stale revisions', async () => {
+  const repository = new InMemoryConversationRepository();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'runtime-1',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  const token = 'runtime-token';
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerAuthToken: token,
+  });
+  const auth = { Authorization: 'Bearer ' + token };
+
+  const snapshot = await request(app)
+    .get(`/conversations/${created.conversation.id}/runtime`)
+    .set(auth);
+  assert.equal(snapshot.status, 200, JSON.stringify(snapshot.body));
+  assert.equal(snapshot.body.state, 'listening');
+
+  const pause = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/pause`)
+    .set(auth)
+    .send({ commandId: 'pause-1', expectedRevision: snapshot.body.revision });
+  assert.equal(pause.status, 200, JSON.stringify(pause.body));
+  assert.equal(pause.body.state, 'paused');
+
+  const duplicate = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/pause`)
+    .set(auth)
+    .send({ commandId: 'pause-1', expectedRevision: snapshot.body.revision });
+  assert.equal(duplicate.status, 200, JSON.stringify(duplicate.body));
+  assert.equal(duplicate.body.revision, pause.body.revision);
+
+  const stale = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/resume`)
+    .set(auth)
+    .send({ expectedRevision: snapshot.body.revision });
+  assert.equal(stale.status, 409);
+
+  const resume = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/resume`)
+    .set(auth)
+    .send({ expectedRevision: pause.body.revision });
+  assert.equal(resume.status, 200, JSON.stringify(resume.body));
+  assert.equal(resume.body.state, 'listening');
+
+  const stop = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/stop`)
+    .set(auth)
+    .send({ expectedRevision: resume.body.revision });
+  assert.equal(stop.status, 200, JSON.stringify(stop.body));
+  assert.equal(stop.body.state, 'stopped');
+
+  const invalidResume = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/resume`)
+    .set(auth)
+    .send({ expectedRevision: stop.body.revision });
+  assert.equal(invalidResume.status, 409);
+});
+
+test('takeover stops autonomous replies and temporary runtime overrides do not mutate owner defaults', async () => {
+  const repository = new InMemoryConversationRepository();
+  const voice = new FakeVoiceProvider();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'runtime-2',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  const token = 'takeover-token';
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerAuthToken: token,
+    voiceProvider: voice,
+    speechProvider: new FakeSpeechProvider(),
+    conversationModel: new FakeConversationModel(['I can help with that.']),
+  });
+  const auth = { Authorization: 'Bearer ' + token };
+
+  const takeover = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/takeover`)
+    .set(auth)
+    .send({});
+  assert.equal(takeover.status, 200, JSON.stringify(takeover.body));
+  assert.equal(takeover.body.aiMode, 'owner_only');
+  assert.equal(takeover.body.state, 'waiting_for_owner');
+
+  const turn = await request(app)
+    .post(`/conversations/${created.conversation.id}/turns`)
+    .send({ callbackId: 'turn-owner-only', audio: 'Can you move Friday?' });
+  assert.equal(turn.status, 200, JSON.stringify(turn.body));
+  assert.equal(turn.body.events.includes('ai.response'), false);
+  assert.equal(voice.outputs.length, 0);
+  assert.equal(turn.body.runtime.state, 'waiting_for_owner');
+
+  const config = await request(app)
+    .patch(`/conversations/${created.conversation.id}/runtime`)
+    .set(auth)
+    .send({ responseStyle: 'concise', verbosity: 'short', askOwnerWhen: 'important' });
+  assert.equal(config.status, 200, JSON.stringify(config.body));
+  assert.equal(config.body.responseStyle, 'concise');
+  assert.equal(config.body.verbosity, 'short');
+  assert.equal(config.body.askOwnerWhen, 'important');
+
+  const defaults = await request(app)
+    .get('/owner/configuration')
+    .set(auth);
+  assert.equal(defaults.status, 200, JSON.stringify(defaults.body));
+  assert.equal(defaults.body.assistant.responseStyle, 'concise');
+  assert.equal(defaults.body.messages.interruptOnlyWhenNeeded, true);
+
+  const returned = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/return-to-assistant`)
+    .set(auth)
+    .send({ expectedRevision: config.body.revision });
+  assert.equal(returned.status, 200, JSON.stringify(returned.body));
+  assert.equal(returned.body.aiMode, 'automatic');
+});
+
+test('voice can be disabled independently and runtime controller failures surface explicit command errors', async () => {
+  const repository = new InMemoryConversationRepository();
+  const controller = new TrackingRuntimeController();
+  const voice = new FakeVoiceProvider();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'runtime-3',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  const token = 'voice-token';
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerAuthToken: token,
+    runtimeController: controller,
+    voiceProvider: voice,
+    speechProvider: new FakeSpeechProvider(),
+    conversationModel: new FakeConversationModel(['Voice disabled reply', 'Voice restored reply']),
+  });
+  const auth = { Authorization: 'Bearer ' + token };
+
+  const disabled = await request(app)
+    .patch(`/conversations/${created.conversation.id}/runtime`)
+    .set(auth)
+    .send({ voiceEnabled: false });
+  assert.equal(disabled.status, 200, JSON.stringify(disabled.body));
+  assert.equal(disabled.body.voiceEnabled, false);
+
+  const silentTurn = await request(app)
+    .post(`/conversations/${created.conversation.id}/turns`)
+    .send({ callbackId: 'silent-turn', audio: 'Please help.' });
+  assert.equal(silentTurn.status, 200, JSON.stringify(silentTurn.body));
+  assert.equal(voice.outputs.length, 0);
+
+  const reenabled = await request(app)
+    .patch(`/conversations/${created.conversation.id}/runtime`)
+    .set(auth)
+    .send({ voiceEnabled: true, expectedRevision: disabled.body.revision });
+  assert.equal(reenabled.status, 200, JSON.stringify(reenabled.body));
+  assert.equal(reenabled.body.voiceEnabled, true);
+
+  await request(app)
+    .post(`/conversations/${created.conversation.id}/turns`)
+    .send({ callbackId: 'voice-turn', audio: 'Try again.' });
+  assert.equal(voice.outputs.length, 1);
+
+  controller.failure = { method: 'pause', message: 'active call runtime unavailable' };
+  const failedPause = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/pause`)
+    .set(auth)
+    .send({ expectedRevision: reenabled.body.revision });
+  assert.equal(failedPause.status, 409);
+  assert.match(failedPause.body.error, /active call runtime unavailable/);
+
+  const snapshot = await request(app)
+    .get(`/conversations/${created.conversation.id}/runtime`)
+    .set(auth);
+  assert.equal(snapshot.body.state, 'listening');
+});
+
+test('SMS transition runtime request preserves caller consent and can stream SSE updates', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'runtime-4',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  const token = 'sse-token';
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerAuthToken: token,
+    messagingProvider: messaging,
+    ownerPhone: '+15555550000',
+  });
+  const auth = { Authorization: 'Bearer ' + token };
+
+  const server = app.listen(0);
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const streamResponse = await fetch(`http://127.0.0.1:${address.port}/conversations/${created.conversation.id}/runtime/events`, {
+      headers: auth,
+    });
+    assert.equal(streamResponse.status, 200);
+    assert.equal(streamResponse.headers.get('content-type'), 'text/event-stream');
+    const reader = streamResponse.body!.getReader();
+    const firstChunk = await reader.read();
+    assert.equal(firstChunk.done, false);
+    const payload = new TextDecoder().decode(firstChunk.value);
+    assert.match(payload, /runtime.state_changed/);
+    reader.cancel().catch(() => undefined);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+
+  const requested = await request(app)
+    .post(`/conversations/${created.conversation.id}/runtime/transition-to-sms`)
+    .set(auth)
+    .send({});
+  assert.equal(requested.status, 200, JSON.stringify(requested.body));
+  assert.equal(requested.body.state, 'transferring');
+
+  const withoutConsent = await request(app)
+    .post(`/conversations/${created.conversation.id}/convert-to-text`);
+  assert.equal(withoutConsent.status, 409);
+
+  await request(app)
+    .post(`/conversations/${created.conversation.id}/sms-consent`)
+    .send({ phoneNumber: '+15555550123', displayName: 'John' });
+  const converted = await request(app)
+    .post(`/conversations/${created.conversation.id}/convert-to-text`);
+  assert.equal(converted.status, 200, JSON.stringify(converted.body));
+  assert.equal(converted.body.runtime.state, 'text_active');
+  assert.equal(messaging.sentMessages.length, 2);
 });

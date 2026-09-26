@@ -3,7 +3,18 @@ export type ConversationState =
   | 'voice_active'
   | 'awaiting_sms_consent'
   | 'text_active'
-  | 'completed';
+  | 'completed'
+  | 'idle'
+  | 'starting'
+  | 'listening'
+  | 'transcribing'
+  | 'thinking'
+  | 'speaking'
+  | 'waiting_for_owner'
+  | 'paused'
+  | 'stopped'
+  | 'transferring'
+  | 'error';
 export type ConversationChannel = 'voice' | 'sms' | 'web';
 export type MessageTransport = 'voice' | 'sms' | 'imessage';
 export type OwnerChannelType = 'web' | 'macos_messages';
