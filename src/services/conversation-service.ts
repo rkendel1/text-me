@@ -23,6 +23,7 @@ export class ConversationService {
     private readonly repository: ConversationRepository,
     private readonly messaging?: MessagingProvider,
     private readonly ownerPhone = process.env.OWNER_PHONE_NUMBER,
+    private readonly ownerId = process.env.OWNER_ID ?? 'owner',
   ) {}
 
   async incomingCall(input: IncomingCall): Promise<Conversation> {
@@ -33,6 +34,7 @@ export class ConversationService {
       callerPhone: input.callerPhone,
       status: 'received',
       startedAt: occurredAt,
+      ownerId: this.ownerId,
     });
 
     if (created.created) {
@@ -234,6 +236,23 @@ export class ConversationService {
 
   listConversations(): Promise<Conversation[]> {
     return this.repository.list();
+  }
+
+  async markOwnerRead(conversationId: string, ownerId: string): Promise<Conversation> {
+    const conversation = await this.requireOwnedConversation(conversationId, ownerId);
+    const readAt = new Date();
+    if (this.repository.markOwnerRead) {
+      await this.repository.markOwnerRead(conversationId, ownerId, readAt);
+    }
+    return this.requireConversation(conversation.id);
+  }
+
+  async requireOwnedConversation(conversationId: string, ownerId: string): Promise<Conversation> {
+    const conversation = await this.requireConversation(conversationId);
+    if (conversation.ownerId !== ownerId) {
+      throw new HttpError(404, 'Conversation not found');
+    }
+    return conversation;
   }
 
   private async requireConversation(id: string): Promise<Conversation> {

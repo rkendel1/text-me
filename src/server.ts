@@ -21,6 +21,8 @@ async function main(): Promise<void> {
       config.twilioPhoneNumber,
     ),
     ownerPhone: config.ownerPhone,
+    ownerId: config.ownerId,
+    ownerAuthToken: config.ownerAuthToken,
     twilioAuthToken: config.twilioAuthToken,
   });
   app.listen(config.port, () => {

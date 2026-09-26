@@ -4,7 +4,7 @@ export type ConversationState =
   | 'awaiting_sms_consent'
   | 'text_active'
   | 'completed';
-export type ConversationChannel = 'voice' | 'sms';
+export type ConversationChannel = 'voice' | 'sms' | 'web';
 export type ParticipantRole = 'caller' | 'assistant' | 'owner';
 
 export interface ConversationParticipant {
@@ -33,7 +33,9 @@ export type ConversationEventType =
   | 'sms.sent'
   | 'caller.message'
   | 'owner.message'
-  | 'assistant.message';
+  | 'assistant.message'
+  | 'assistant.failed'
+  | 'owner.read';
 
 export interface ConversationEvent {
   id: string;
@@ -57,4 +59,6 @@ export interface Conversation {
   channels?: ConversationChannel[];
   primaryChannel?: ConversationChannel;
   participants?: ConversationParticipant[];
+  ownerId?: string;
+  lastOwnerReadAt?: Date | null;
 }

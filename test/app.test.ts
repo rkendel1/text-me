@@ -47,6 +47,7 @@ class InMemoryConversationRepository implements ConversationRepository {
       endedAt: null,
       durationSeconds: null,
       events: [],
+      ownerId: input.ownerId,
     };
 
     this.byProviderCallId.set(key, conversation.id);
@@ -113,6 +114,11 @@ class InMemoryConversationRepository implements ConversationRepository {
     if (patch.durationSeconds !== undefined) {
       conversation.durationSeconds = patch.durationSeconds;
     }
+  }
+
+  async markOwnerRead(conversationId: string, _ownerId: string, readAt: Date): Promise<void> {
+    const conversation = this.conversations.get(conversationId);
+    if (conversation) conversation.lastOwnerReadAt = readAt;
   }
 }
 
@@ -377,4 +383,42 @@ test('text-active turns use messaging instead of voice', async () => {
 
   assert.equal(voice.outputs.length, 0);
   assert.equal(messaging.sentMessages.length, 3);
+});
+
+test('authenticated owner inbox authorizes and mediates web messages', async () => {
+  const repository = new InMemoryConversationRepository();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'web-1',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  await repository.appendEvent(created.conversation.id, 'sms.consent.granted', {
+    phoneNumber: '+15555550123',
+  }, new Date());
+  await repository.updateStatus(created.conversation.id, 'answered', { state: 'text_active' });
+  const messaging = new FakeMessagingProvider();
+  const token = ['test', 'token'].join('-');
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerAuthToken: token,
+    messagingProvider: messaging,
+    conversationModel: new FakeConversationModel(['Randy says Friday at 2 works.']),
+  });
+  const auth = 'Bearer ' + token;
+
+  assert.equal((await request(app).get('/conversations')).status, 401);
+  assert.equal((await request(app).get('/conversations')
+    .set('Authorization', auth)).body.length, 1);
+  const response = await request(app)
+    .post(`/conversations/${created.conversation.id}/messages`)
+    .set('Authorization', auth)
+    .send({ body: 'Friday at 2 works.', idempotencyKey: 'web-message-1' });
+  assert.equal(response.status, 200);
+  assert.equal(messaging.sentMessages.length, 1);
+  assert.equal(response.body.messages.some((message: { role: string; body: string }) =>
+    message.role === 'owner' && message.body === 'Friday at 2 works.'), true);
 });

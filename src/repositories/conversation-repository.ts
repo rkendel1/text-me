@@ -6,6 +6,7 @@ export interface CreateConversationInput {
   callerPhone: string;
   status: ConversationStatus;
   startedAt: Date;
+  ownerId?: string;
 }
 
 export interface ConversationRepository {
@@ -34,4 +35,5 @@ export interface ConversationRepository {
       state?: ConversationState;
     },
   ): Promise<void>;
+  markOwnerRead?(conversationId: string, ownerId: string, readAt: Date): Promise<void>;
 }
