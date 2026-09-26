@@ -4,16 +4,7 @@ import test from 'node:test';
 import request from 'supertest';
 
 import { createApp } from '../src/app.js';
-import type {
-  Conversation,
-  ConversationEvent,
-  ConversationStatus,
-} from '../src/domain/conversation.js';
-import { createConversationId, createEventId } from '../src/lib/ids.js';
-import type {
-  ConversationRepository,
-  CreateConversationInput,
-} from '../src/repositories/conversation-repository.js';
+import { InMemoryConversationRepository } from './support/in-memory-repository.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
 import { FakeConversationModel } from '../src/conversation/fake-model.js';
 import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
@@ -26,113 +17,8 @@ import { InMemoryOwnerMessageDeliveryStore, QueuedMacMessagesOwnerChannel } from
 import type { ConversationRuntime } from '../src/domain/runtime.js';
 import type { ConversationRuntimeController } from '../src/runtime/controller.js';
 
-class InMemoryConversationRepository implements ConversationRepository {
-  private readonly conversations = new Map<string, Conversation>();
-  private readonly byProviderCallId = new Map<string, string>();
-
-  async createIfAbsent(
-    input: CreateConversationInput,
-  ): Promise<{ conversation: Conversation; created: boolean }> {
-    const key = `${input.provider}:${input.providerCallId}`;
-    const existingId = this.byProviderCallId.get(key);
-
-    if (existingId) {
-      return {
-        conversation: structuredClone(this.conversations.get(existingId)!),
-        created: false,
-      };
-    }
-
-    const conversation: Conversation = {
-      id: createConversationId(),
-      provider: input.provider,
-      providerCallId: input.providerCallId,
-      callerPhone: input.callerPhone,
-      status: input.status,
-      startedAt: input.startedAt,
-      endedAt: null,
-      durationSeconds: null,
-      events: [],
-      ownerId: input.ownerId,
-    };
-
-    this.byProviderCallId.set(key, conversation.id);
-    this.conversations.set(conversation.id, structuredClone(conversation));
-
-    return {
-      conversation: structuredClone(conversation),
-      created: true,
-    };
-  }
-
-  async getById(id: string): Promise<Conversation | null> {
-    return structuredClone(this.conversations.get(id) ?? null);
-  }
-
-  async getByProviderCallId(
-    provider: string,
-    providerCallId: string,
-  ): Promise<Conversation | null> {
-    const id = this.byProviderCallId.get(`${provider}:${providerCallId}`);
-    return id ? this.getById(id) : null;
-  }
-
-  async list(): Promise<Conversation[]> {
-    return [...this.conversations.values()]
-      .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())
-      .map((conversation) => structuredClone(conversation));
-  }
-
-  async appendEvent(
-    conversationId: string,
-    type: ConversationEvent['type'],
-    payload: Record<string, unknown>,
-    occurredAt: Date,
-  ): Promise<void> {
-    const conversation = this.conversations.get(conversationId);
-    if (!conversation) {
-      return;
-    }
-
-    conversation.events.push({
-      id: createEventId(),
-      conversationId,
-      type,
-      payload,
-      occurredAt,
-    });
-  }
-
-  async updateStatus(
-    conversationId: string,
-    status: ConversationStatus,
-    patch: { endedAt?: Date | null; durationSeconds?: number | null; state?: Conversation['state'] },
-  ): Promise<void> {
-    const conversation = this.conversations.get(conversationId);
-    if (!conversation) {
-      return;
-    }
-
-    conversation.status = status;
-    if (patch.endedAt !== undefined) {
-      conversation.endedAt = patch.endedAt;
-    }
-    if (patch.durationSeconds !== undefined) {
-      conversation.durationSeconds = patch.durationSeconds;
-    }
-    if (patch.state !== undefined) {
-      conversation.state = patch.state;
-    }
-  }
-
-  async markOwnerRead(conversationId: string, _ownerId: string, readAt: Date): Promise<void> {
-    const conversation = this.conversations.get(conversationId);
-    if (conversation) conversation.lastOwnerReadAt = readAt;
-  }
-}
-
 class ThrowingTwilioProvider extends TwilioProvider {
-  override answerCall() {
+  override answerCall(): never {
     throw new Error('provider unavailable');
   }
 }
@@ -926,4 +812,32 @@ test('SMS transition runtime request preserves caller consent and can stream SSE
   assert.equal(converted.status, 200, JSON.stringify(converted.body));
   assert.equal(converted.body.runtime.state, 'text_active');
   assert.equal(messaging.sentMessages.length, 2);
+});
+
+test('moving to text still works when no Mac is paired, notifying the owner by SMS instead', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const ownerDevices = new OwnerDeviceService();
+  const ownerConfiguration = new OwnerConfigurationService();
+  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerPhone: '+15550009999',
+    messagingProvider: messaging,
+    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
+    ownerDeviceService: ownerDevices,
+    ownerConfigurationService: ownerConfiguration,
+    ownerDeliveryStore: ownerDeliveries,
+  });
+  await request(app).post('/webhooks/fake/voice').send({ callId: 'no-mac', callerPhone: '+15553334444' });
+  const [conversation] = await repository.list();
+  await request(app).post(`/conversations/${conversation.id}/sms-consent`).send({ phoneNumber: '+15553334444', displayName: 'Jordan' });
+
+  const converted = await request(app).post(`/conversations/${conversation.id}/convert-to-text`);
+
+  assert.equal(converted.status, 200, JSON.stringify(converted.body));
+  assert.equal(converted.body.state, 'text_active');
+  assert.deepEqual(messaging.sentMessages.map((message) => message.to), ['+15553334444', '+15550009999']);
+  assert.ok(converted.body.events.includes('owner.delivery.failed'));
 });

@@ -53,7 +53,10 @@ export type ConversationEventType =
   | 'owner.message.received'
   | 'assistant.message'
   | 'assistant.failed'
-  | 'owner.read';
+  | 'owner.read'
+  | 'owner.attention.requested'
+  | 'caller.identified'
+  | 'assistant.activity';
 
 export interface ConversationEvent {
   id: string;
