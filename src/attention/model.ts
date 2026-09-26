@@ -11,6 +11,7 @@ export type OwnerAttentionType =
   | 'conversation_transferred'
   | 'conversation_completed'
   | 'owner_message'
+  | 'voicemail'
   | 'error';
 
 /** interrupt: notify now. passive: in-app only unless the owner opted in. */

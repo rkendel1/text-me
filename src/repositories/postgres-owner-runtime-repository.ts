@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 
+import { ConfigurationConflictError } from '../owner/configuration.js';
 import type {
   OwnerConfiguration,
   OwnerConfigurationAuditEvent,
@@ -35,6 +36,7 @@ interface OwnerDeviceRow {
   updated_at: Date;
   last_seen_at: Date | null;
   revoked_at: Date | null;
+  probe: OwnerDevice['probe'];
 }
 
 interface OwnerMessageChatRow {
@@ -131,6 +133,7 @@ function hydrateDevice(row: OwnerDeviceRow, chats: OwnerMessageChatRow[]): Owner
     updatedAt: new Date(row.updated_at),
     lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at) : null,
     revokedAt: row.revoked_at ? new Date(row.revoked_at) : null,
+    probe: row.probe ?? null,
   };
 }
 
@@ -178,6 +181,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
         revoked_at TIMESTAMPTZ
       )
     `);
+    await this.pool.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS probe JSONB');
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS owner_messages_chats (
         device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
@@ -201,11 +205,11 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           INSERT INTO owner_devices (
             id, owner_id, type, name, status, setup_status, health,
             messages_identity, is_primary, bridge_version,
-            created_at, updated_at, last_seen_at, revoked_at
+            created_at, updated_at, last_seen_at, revoked_at, probe
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10,
-            $11, $12, $13, $14
+            $11, $12, $13, $14, $15
           )
           ON CONFLICT (id) DO UPDATE SET
             owner_id = EXCLUDED.owner_id,
@@ -219,7 +223,8 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
             bridge_version = EXCLUDED.bridge_version,
             updated_at = EXCLUDED.updated_at,
             last_seen_at = EXCLUDED.last_seen_at,
-            revoked_at = EXCLUDED.revoked_at
+            revoked_at = EXCLUDED.revoked_at,
+            probe = EXCLUDED.probe
         `,
         [
           device.id,
@@ -236,6 +241,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           device.updatedAt,
           device.lastSeenAt,
           device.revokedAt,
+          device.probe ? JSON.stringify(device.probe) : null,
         ],
       );
       await client.query('DELETE FROM owner_messages_chats WHERE device_id = $1', [device.id]);
@@ -348,6 +354,17 @@ export class PostgresOwnerPairingCredentialStore implements OwnerPairingCredenti
     );
     const row = result.rows[0];
     if (!row) return null;
+    return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
+  }
+
+  async consume(code: string, now: number): Promise<OwnerPairingCredentialRecord | null> {
+    // DELETE … RETURNING is atomic: of two simultaneous scans, exactly one gets the row.
+    const result = await this.pool.query<OwnerPairingRow>(
+      'DELETE FROM owner_pairing_credentials WHERE credential = $1 RETURNING device_id, owner_id, credential, expires_at',
+      [code],
+    );
+    const row = result.rows[0];
+    if (!row || new Date(row.expires_at).getTime() <= now) return null;
     return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
   }
 
@@ -550,7 +567,7 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
         ],
       );
       if (current.rowCount !== 1) {
-        throw new Error('Owner configuration update conflict');
+        throw new ConfigurationConflictError();
       }
       await client.query(
         `

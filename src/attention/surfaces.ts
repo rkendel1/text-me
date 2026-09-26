@@ -4,6 +4,7 @@ import type { ConversationRepository } from '../repositories/conversation-reposi
 import type { MessagingProvider } from '../messaging/provider.js';
 import type { OwnerChannel } from '../owner/channel.js';
 import { attentionUrl, type NotificationDelivery, type OwnerAttention, type OwnerSurfaceKind } from './model.js';
+import type { NotificationPreferences } from './router.js';
 import type { AppSecretStore, OwnerSurfaceDeviceStore } from './stores.js';
 
 export type SurfaceResult = Pick<NotificationDelivery, 'status' | 'deviceId' | 'error' | 'providerId'>;
@@ -16,7 +17,30 @@ export interface OwnerSurface {
   readonly kind: OwnerSurfaceKind;
   /** Set up and usable for this owner right now (a registered phone, a paired Mac…). */
   available(ownerId: string): Promise<boolean>;
-  deliver(attention: OwnerAttention): Promise<SurfaceResult[]>;
+  deliver(attention: OwnerAttention, preferences?: Pick<NotificationPreferences, 'includeSummary' | 'includeSuggestedResponse'>): Promise<SurfaceResult[]>;
+}
+
+/**
+ * The text the owner reads in Messages or SMS, shaped by their settings:
+ * include the caller summary and a suggested reply only if they want them.
+ */
+export function ownerTextMessage(
+  attention: OwnerAttention,
+  preferences: Pick<NotificationPreferences, 'includeSummary' | 'includeSuggestedResponse'> = { includeSummary: true, includeSuggestedResponse: true },
+): string {
+  const meta = attention.metadata;
+  const caller = String(meta.callerName ?? attention.title.replace(/ (needs you|is now texting|is calling)$/, ''));
+  const reason = preferences.includeSummary && typeof meta.callerReason === 'string' ? ` (${meta.callerReason})` : '';
+  if (attention.type === 'assistant_needs_owner') {
+    const suggestion = preferences.includeSuggestedResponse && Array.isArray(meta.suggestedReplies) && meta.suggestedReplies[0]
+      ? ` Suggested reply: "${meta.suggestedReplies[0]}".` : '';
+    return `${caller}${reason} is waiting: ${String(meta.question ?? attention.body)}${suggestion} Reply here.`;
+  }
+  if (attention.type === 'conversation_transferred') {
+    const summary = preferences.includeSummary && typeof meta.summary === 'string' ? ` They called about ${meta.summary}` : '';
+    return `${caller} is now texting.${summary} Reply here and I'll take care of the conversation with them.`;
+  }
+  return `${attention.title}: ${attention.body} — reply here.`;
 }
 
 // ---------------------------------------------------------------- Web Push
@@ -129,9 +153,9 @@ export class MacMessagesSurface implements OwnerSurface {
     return this.channel.isAvailable ? this.channel.isAvailable(ownerId) : true;
   }
 
-  async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
+  async deliver(attention: OwnerAttention, preferences?: Parameters<OwnerSurface['deliver']>[1]): Promise<SurfaceResult[]> {
     const messageId = String(attention.metadata.messageKey ?? attention.dedupeKey);
-    const body = String(attention.metadata.messageBody ?? `${attention.title}: ${attention.body} — reply here.`);
+    const body = ownerTextMessage(attention, preferences);
     await this.repository.appendEvent(attention.conversationId, 'owner.message.created', {
       messageId, body, source: 'macos_messages', attentionId: attention.id,
     }, new Date());
@@ -162,9 +186,9 @@ export class OwnerSmsSurface implements OwnerSurface {
     return Boolean(this.messaging && this.ownerPhone);
   }
 
-  async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
+  async deliver(attention: OwnerAttention, preferences?: Parameters<OwnerSurface['deliver']>[1]): Promise<SurfaceResult[]> {
     try {
-      const body = String(attention.metadata.messageBody ?? `${attention.title}: ${attention.body} — reply here.`);
+      const body = ownerTextMessage(attention, preferences);
       const result = await this.messaging!.sendMessage({ to: this.ownerPhone!, body, idempotencyKey: `attention:${attention.id}:sms` });
       return [{ status: 'sent', providerId: result.providerMessageId }];
     } catch (error) {

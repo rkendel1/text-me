@@ -22,9 +22,10 @@ import type { VoiceProvider } from './voice/provider.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
 import type { OwnerChannel } from './owner/channel.js';
-import { OwnerDeviceService } from './owner/device.js';
+import { OwnerDeviceService, pairingQrPayload } from './owner/device.js';
+import type { MessagesCapabilities } from './owner/mac-messages-adapter.js';
 import type { MacMessagesAdapter } from './owner/mac-messages-adapter.js';
-import { OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
+import { ConfigurationConflictError, OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
 import { InMemoryOwnerMessageDeliveryStore, type OwnerMessageDeliveryStore } from './owner/delivery.js';
 import { InProcessConversationRuntimeController, type ConversationRuntimeController } from './runtime/controller.js';
 import { RuntimeControlService, type RuntimeConfigurationPatch } from './runtime/service.js';
@@ -90,6 +91,8 @@ export interface AppOptions {
   pushSender?: PushSender;
   /** Lets the owner connect their number from the app (no provider console). */
   phoneNumbers?: PhoneNumberService;
+  /** Public origin put in pairing QR codes so the Mac bridge needs no server address typed in. */
+  publicBaseUrl?: string;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
@@ -109,11 +112,33 @@ function registerIncomingCallRoute(
   path: string,
   provider: TelephonyProvider,
   service: ConversationService,
+  configuration: OwnerConfigurationService,
+  defaultOwnerId: string,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
       const incomingCall = provider.parseIncomingCall(request.body);
       const conversation = await service.incomingCall(incomingCall);
+      const settings = await configuration.get(conversation.ownerId ?? defaultOwnerId);
+      if (!settings.calls.answerCalls) {
+        // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
+        const twiml = new twilio.twiml.VoiceResponse();
+        const owner = settings.assistant.ownerName || 'The person you called';
+        if (settings.calls.voicemailFallback) {
+          twiml.say(`${owner} can't take your call right now. Please leave a message after the tone.`);
+          twiml.record({
+            maxLength: 120, playBeep: true, trim: 'trim-silence', method: 'POST',
+            action: `/webhooks/twilio/voicemail?conversationId=${encodeURIComponent(conversation.id)}`,
+          });
+        } else {
+          twiml.say(`${owner} can't take calls right now. Please send a text message to this number instead.`);
+        }
+        twiml.hangup();
+        await service.answerCall(conversation.id, incomingCall.payload);
+        await service.recordEvent(conversation.id, 'call.declined', { voicemail: settings.calls.voicemailFallback });
+        response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
       const providerResponse = provider.answerCall(conversation);
       await service.answerCall(conversation.id, incomingCall.payload);
       // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
@@ -239,7 +264,14 @@ export function createApp(options: AppOptions): express.Express {
       mac: options.ownerChannel ? new MacMessagesSurface(options.ownerChannel, options.repository) : undefined,
       sms: new OwnerSmsSurface(messaging, options.ownerPhone),
     }),
-    async (owner) => ({ notifyOnActivity: (await ownerConfiguration.get(owner)).messages.notifyOnActivity === true }),
+    async (owner) => {
+      const { messages } = await ownerConfiguration.get(owner);
+      return {
+        notifyOwner: messages.notifyOwner, interruptOnlyWhenNeeded: messages.interruptOnlyWhenNeeded,
+        webEnabled: messages.webEnabled, macosMessagesEnabled: messages.macosMessagesEnabled,
+        includeSummary: messages.includeSummary, includeSuggestedResponse: messages.includeSuggestedResponse,
+      };
+    },
     (raised) => runtime.publishAttention(raised.conversationId, {
       attentionId: raised.id, attentionType: raised.type, status: raised.status, priority: raised.priority,
     }),
@@ -340,8 +372,34 @@ export function createApp(options: AppOptions): express.Express {
     throw new Error('Twilio provider is required');
   }
 
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, ownerId);
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
+
+  // A caller left a voicemail (only offered when the owner turned off answering calls).
+  app.post('/webhooks/twilio/voicemail', async (request, response, next) => {
+    try {
+      const conversationId = typeof request.query.conversationId === 'string' ? request.query.conversationId : '';
+      const recordingUrl = typeof request.body?.RecordingUrl === 'string' ? request.body.RecordingUrl : '';
+      if (!conversationId || !recordingUrl) throw new HttpError(400, 'conversationId and RecordingUrl are required');
+      const duration = Number(request.body?.RecordingDuration ?? 0);
+      await service.recordEvent(conversationId, 'voicemail.recorded', {
+        recordingUrl, recordingSid: request.body?.RecordingSid, durationSeconds: Number.isFinite(duration) ? duration : null,
+      });
+      await service.raiseAttention(conversationId, {
+        type: 'voicemail',
+        title: (name) => `${name} left a voicemail`,
+        body: Number.isFinite(duration) && duration > 0 ? `${duration} second message` : 'New voicemail',
+        dedupeKey: `voicemail:${conversationId}:${request.body?.RecordingSid ?? recordingUrl}`,
+        actions: ['open'],
+      });
+      const twiml = new twilio.twiml.VoiceResponse();
+      twiml.say('Thanks. Goodbye.');
+      twiml.hangup();
+      response.type('text/xml; charset=utf-8').send(twiml.toString());
+    } catch (error) {
+      next(error);
+    }
+  });
 
   // Twilio continues here once a realtime media stream ends.
   app.post('/webhooks/twilio/voice/continue', async (request, response, next) => {
@@ -397,7 +455,7 @@ export function createApp(options: AppOptions): express.Express {
   if (fakeRoutesEnabled) {
     const fake = providers.get('fake');
     if (fake) {
-      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service);
+      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, ownerId);
       registerStatusRoute(app, '/webhooks/fake/status', fake, service);
     }
   }
@@ -429,10 +487,13 @@ export function createApp(options: AppOptions): express.Express {
         (request as Request & { ownerId?: string }).ownerId!,
         typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
       );
+      // The QR holds only a single-use token and the server to redeem it at.
+      const origin = options.publicBaseUrl ?? `${request.protocol}://${request.get('host')}`;
+      const payload = pairingQrPayload(result.pairingCode, origin);
       response.status(201).json({
         deviceId: result.device.id,
-        pairingUri: result.pairingUri,
-        qrDataUrl: await renderQrCode(result.pairingUri),
+        pairingUri: payload,
+        qrDataUrl: await renderQrCode(payload),
         expiresAt: result.expiresAt.toISOString(),
       });
     } catch (error) {
@@ -464,6 +525,7 @@ export function createApp(options: AppOptions): express.Express {
     try {
       const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
       const result = await ownerDevices.activatePairing(credential);
+      await ownerConfiguration.recordChange(result.device.ownerId, 'device.connected', 'macos_bridge').catch(() => undefined);
       response.json({
         ...result,
         device: {
@@ -506,11 +568,25 @@ export function createApp(options: AppOptions): express.Express {
   app.post('/owner/devices/:id/heartbeat', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { token } = await deviceAuth(request);
-      if (!options.ownerMessagesAdapter?.checkCapabilities) throw new HttpError(501, 'Messages capability checks are unavailable');
-      response.json(await ownerDevices.heartbeat(
-        token,
-        await options.ownerMessagesAdapter.checkCapabilities(),
-      ));
+      // The bridge measures capabilities on the Mac and reports them; there is no Messages access on the server.
+      const reported = request.body?.capabilities;
+      let capabilities: MessagesCapabilities;
+      if (reported && typeof reported === 'object') {
+        const identity = reported.authorizedIdentity;
+        capabilities = {
+          messagesAccess: reported.messagesAccess === true,
+          sendCapability: reported.sendCapability === true,
+          watcher: reported.watcher === true,
+          ...(identity && (identity.service === 'imessage' || identity.service === 'sms') && typeof identity.address === 'string'
+            ? { authorizedIdentity: { service: identity.service, address: identity.address.slice(0, 200) } } : {}),
+        };
+      } else if (options.ownerMessagesAdapter?.checkCapabilities) {
+        capabilities = await options.ownerMessagesAdapter.checkCapabilities();
+      } else {
+        throw new HttpError(400, 'capabilities are required');
+      }
+      const version = typeof request.body?.bridgeVersion === 'string' ? request.body.bridgeVersion.slice(0, 40) : undefined;
+      response.json(await ownerDevices.reportHealth(token, capabilities, version));
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Device authentication required'));
     }
@@ -527,6 +603,53 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  // The bridge reports candidate assistant chats it found on the Mac (its owner's own threads only).
+  app.post('/owner/devices/:id/messages/chats', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      const { token } = await deviceAuth(request);
+      const chats = Array.isArray(request.body?.chats) ? request.body.chats : null;
+      if (!chats) throw new HttpError(400, 'chats are required');
+      const valid = chats.filter((chat: Record<string, unknown>) => typeof chat?.id === 'string' &&
+        (chat.service === 'imessage' || chat.service === 'sms'))
+        .map((chat: Record<string, unknown>) => ({
+          id: String(chat.id).slice(0, 200), service: chat.service as 'imessage' | 'sms',
+          displayName: typeof chat.displayName === 'string' ? chat.displayName.slice(0, 120) : undefined,
+          address: typeof chat.address === 'string' ? chat.address.slice(0, 200) : undefined,
+          isGroup: chat.isGroup === true,
+        }));
+      const device = await ownerDevices.reportChats(token, valid);
+      response.json({ discoveredChats: device.discoveredChats.length });
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Device authentication required'));
+    }
+  });
+
+  // Test connection: the owner asks, the bridge checks and answers; nothing visible is sent.
+  app.post('/owner/devices/:id/test', ownerAuth, async (request, response, next) => {
+    try {
+      const device = await ownerDevices.requestProbe(runtimeOwner(request), String(request.params.id));
+      response.status(202).json({ probe: device.probe });
+    } catch (error) {
+      next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
+    }
+  });
+
+  app.post('/owner/devices/:id/probe/:probeId', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      const { token } = await deviceAuth(request);
+      const body = request.body ?? {};
+      const device = await ownerDevices.completeProbe(token, String(request.params.probeId), {
+        messagesAccess: body.messagesAccess === true,
+        sendCapability: body.sendCapability === true,
+        watcher: body.watcher === true,
+        assistantChatFound: body.assistantChatFound === true,
+      });
+      response.json({ probe: device.probe });
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Connection test failed'));
+    }
+  });
+
   app.post('/owner/devices/:id/messages/chat', ownerDeviceRateLimit, ownerAuth, async (request, response, next) => {
     try {
       const service = request.body?.service;
@@ -534,9 +657,11 @@ export function createApp(options: AppOptions): express.Express {
       if ((service !== 'imessage' && service !== 'sms') || typeof chatId !== 'string' || !chatId.trim()) {
         throw new HttpError(400, 'chatId and service are required');
       }
-      response.json(await ownerDevices.authorizeChat(
+      const device = await ownerDevices.authorizeChat(
         (request as Request & { ownerId?: string }).ownerId!, String(request.params.id), chatId, service,
-      ));
+      );
+      await ownerConfiguration.recordChange(device.ownerId, 'assistant.chat.changed');
+      response.json(device);
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Chat authorization failed'));
     }
@@ -826,22 +951,50 @@ export function createApp(options: AppOptions): express.Express {
 
   app.patch('/owner/configuration', ownerAuth, async (request, response, next) => {
     try {
+      const { expectedRevision, ...patch } = (request.body ?? {}) as OwnerConfigurationPatch & { expectedRevision?: unknown };
+      for (const key of Object.keys(patch)) {
+        if (!['assistant', 'calls', 'messages', 'onboarding'].includes(key)) throw new HttpError(400, `Unknown settings section: ${key}`);
+      }
       response.json(await ownerConfiguration.update(
         (request as Request & { ownerId?: string }).ownerId!,
-        request.body as OwnerConfigurationPatch,
+        patch as OwnerConfigurationPatch,
+        'web',
+        typeof expectedRevision === 'number' ? expectedRevision : undefined,
       ));
     } catch (error) {
-      next(new HttpError(400, error instanceof Error ? error.message : 'Invalid configuration'));
+      if (error instanceof ConfigurationConflictError) next(new HttpError(409, error.message));
+      else next(error instanceof HttpError ? error : new HttpError(400, error instanceof Error ? error.message : 'Invalid configuration'));
+    }
+  });
+
+  // Who changed what, when (no message contents).
+  app.get('/owner/configuration/events', ownerAuth, async (request, response, next) => {
+    try {
+      response.json((await ownerConfiguration.events(runtimeOwner(request))).map((event) => ({
+        ...event, occurredAt: event.occurredAt.toISOString(),
+      })));
+    } catch (error) {
+      next(error);
     }
   });
 
   app.get('/owner/devices/:id/configuration', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { device } = await deviceAuth(request);
+      const configuration = await ownerConfiguration.get(device.ownerId);
       response.json({
         deviceId: device.id,
         ownerId: device.ownerId,
-        configuration: await ownerConfiguration.get(device.ownerId),
+        revision: configuration.revision,
+        // What the Mac executes; it never edits any of this.
+        bridge: {
+          messagesChannelEnabled: configuration.messages.macosMessagesEnabled,
+          assistantChat: device.assistantChat,
+          ownerIdentity: device.messagesIdentity?.address ?? null,
+          needsChatDiscovery: !device.assistantChat,
+          pendingProbe: device.probe && !device.probe.completedAt ? { id: device.probe.id } : null,
+        },
+        configuration,
       });
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(401, 'Device authentication required'));
@@ -851,7 +1004,12 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/owner/devices', ownerAuth, async (request, response, next) => {
     try {
       const devices = await ownerDevices.list((request as Request & { ownerId?: string }).ownerId!);
-      response.json(devices);
+      // Online = the bridge checked in recently; health itself is what the bridge measured on the Mac.
+      response.json(devices.map((device) => ({
+        ...device,
+        online: device.status === 'active' && Boolean(device.lastSeenAt) && Date.now() - new Date(device.lastSeenAt!).getTime() < 120_000,
+        ready: ownerDevices.isReady(device),
+      })));
     } catch (error) {
       next(error);
     }
@@ -863,6 +1021,7 @@ export function createApp(options: AppOptions): express.Express {
         (request as Request & { ownerId?: string }).ownerId!,
         String(request.params.id),
       );
+      await ownerConfiguration.recordChange(runtimeOwner(request), 'device.revoked').catch(() => undefined);
       response.status(204).send();
     } catch (error) {
       next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));

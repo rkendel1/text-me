@@ -128,6 +128,7 @@ export function buildServer(
     runtimeOverrideStore: runtimeOverrides,
     runtimeEventBus,
     runtimeCommandStore: runtimeCommands,
+    publicBaseUrl: config.publicBaseUrl,
     phoneNumbers: new PhoneNumberService(
       new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
       config.twilioPhoneNumber,

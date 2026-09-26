@@ -221,7 +221,7 @@ test('an expired phone subscription is retired and the owner is texted instead',
 
 test('owners who opt in hear about every call; everyone else is only interrupted when needed', async (t) => {
   const configuration = new OwnerConfigurationService();
-  await configuration.update('owner', { messages: { notifyOnActivity: true } });
+  await configuration.update('owner', { messages: { interruptOnlyWhenNeeded: false } });
   const owner = await iphoneOwner({ configuration });
   t.after(owner.close);
   await request(owner.app).post('/owner/push/devices').send({ subscription: subscription('iphone') });

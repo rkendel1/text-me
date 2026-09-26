@@ -12,6 +12,12 @@ function firstName(name: string): string {
   return /^\+?\d/.test(name) ? name : name.split(' ')[0];
 }
 
+function callerReason(conversation: Conversation): string | undefined {
+  const noted = [...conversation.events].reverse().find((event) =>
+    event.type === 'caller.identified' && typeof event.payload.reason === 'string');
+  return noted ? String(noted.payload.reason) : undefined;
+}
+
 function callerDisplayName(conversation: Conversation): string {
   const named = [...conversation.events].reverse().find((event) =>
     (event.type === 'caller.identified' && typeof event.payload.name === 'string') ||
@@ -41,6 +47,11 @@ export class ConversationService {
     /** Where "the owner should know" goes; surfaces (phone, Mac, SMS) are the router's business. */
     private readonly attention?: OwnerAttentionService,
   ) {}
+
+  async recordEvent(conversationId: string, type: Conversation['events'][number]['type'], payload: Record<string, unknown>): Promise<void> {
+    await this.requireConversation(conversationId);
+    await this.repository.appendEvent(conversationId, type, payload, new Date());
+  }
 
   async resolveAttention(conversationId: string, types: Parameters<OwnerAttentionService['resolve']>[2], reason: string): Promise<void> {
     if (!this.attention) return;
@@ -135,13 +146,12 @@ export class ConversationService {
     const ownerKey = `conversation:${conversationId}:sms:owner-summary`;
     await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
       `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
-    const ownerMessage = `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`;
     await this.raiseAttention(conversationId, {
       type: 'conversation_transferred',
       title: (name) => `${firstName(name)} is now texting`,
       body: `About ${summary}`.replace(/\.$/, ''),
       dedupeKey: ownerKey,
-      metadata: { messageKey: ownerKey, messageBody: ownerMessage },
+      metadata: { messageKey: ownerKey, summary, callerName: consent.payload.displayName ?? callerDisplayName(conversation) },
     });
 
     await this.repository.appendEvent(conversationId, 'conversation.channel_transitioned', {
@@ -207,9 +217,9 @@ export class ConversationService {
       body: `“${input.question}”`,
       dedupeKey: `owner-request:${requestId}`,
       metadata: {
-        requestId, suggestedReplies, source: input.source,
+        requestId, suggestedReplies, source: input.source, question: input.question,
         messageKey: `owner-request:${requestId}`,
-        messageBody: `${caller} is waiting: ${input.question}${suggestedReplies.length ? ` (e.g. "${suggestedReplies[0]}")` : ''} — reply here.`,
+        callerName: caller, callerReason: callerReason(conversation),
       },
     });
     return requestId;

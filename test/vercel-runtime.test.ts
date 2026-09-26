@@ -267,3 +267,36 @@ test('production composition starts with no Mac at all, and a fresh instance rec
   assert.equal(attention[0].type, 'conversation_started');
   assert.equal((await request(second.server).get(`/conversations/${id}/live`)).status, 200);
 });
+
+test('Neon: a pairing credential can be redeemed exactly once, even by two simultaneous scans', {
+  skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
+}, async (t) => {
+  const { PostgresOwnerDeviceStore, PostgresOwnerPairingCredentialStore, PostgresOwnerDeviceSessionStore, PostgresOwnerConfigurationStore } =
+    await import('../src/repositories/postgres-owner-runtime-repository.js');
+  const { OwnerDeviceService } = await import('../src/owner/device.js');
+  const { OwnerConfigurationService } = await import('../src/owner/configuration.js');
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+  t.after(() => pool.end());
+  const devices = new PostgresOwnerDeviceStore(pool);
+  const pairings = new PostgresOwnerPairingCredentialStore(pool);
+  const sessions = new PostgresOwnerDeviceSessionStore(pool);
+  const configurations = new PostgresOwnerConfigurationStore(pool);
+  for (const store of [devices, pairings, sessions, configurations]) await store.initialize();
+  const service = new OwnerDeviceService(devices, Date.now, pairings, sessions);
+  const owner = `owner-${Date.now()}`;
+  const paired = await service.pair(owner, 'MacBook Pro');
+  const results = await Promise.allSettled([service.activatePairing(paired.pairingUri), service.activatePairing(paired.pairingUri)]);
+  assert.deepEqual(results.map((result) => result.status).sort(), ['fulfilled', 'rejected']);
+  const probed = await service.requestProbe(owner, paired.device.id);
+  assert.equal((await devices.get(paired.device.id))!.probe!.id, probed.probe!.id, 'probe persists');
+
+  // Concurrent settings edits: the second writer on a stale revision gets a conflict, not a silent overwrite.
+  const settings = new OwnerConfigurationService(configurations);
+  const start = await settings.get(owner);
+  const outcomes = await Promise.allSettled([
+    settings.update(owner, { assistant: { tone: 'warm' } }, 'web', start.revision),
+    settings.update(owner, { assistant: { tone: 'professional' } }, 'web', start.revision),
+  ]);
+  assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+  assert.equal((await settings.get(owner)).revision, start.revision + 1);
+});
