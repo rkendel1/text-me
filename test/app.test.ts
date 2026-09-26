@@ -15,6 +15,9 @@ import type {
   CreateConversationInput,
 } from '../src/repositories/conversation-repository.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
+import { FakeConversationModel } from '../src/conversation/fake-model.js';
+import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
+import { FakeVoiceProvider } from '../src/voice/fake-provider.js';
 
 class InMemoryConversationRepository implements ConversationRepository {
   private readonly conversations = new Map<string, Conversation>();
@@ -270,4 +273,47 @@ test('fake provider exercises the same lifecycle', async () => {
     'call.answered',
     'call.ended',
   ]);
+});
+
+test('fake providers run ordered, idempotent conversational turns', async () => {
+  const repository = new InMemoryConversationRepository();
+  const voice = new FakeVoiceProvider();
+  const app = createApp({
+    repository,
+    voiceProvider: voice,
+    speechProvider: new FakeSpeechProvider(),
+    conversationModel: new FakeConversationModel(['I can help with that.']),
+  });
+
+  const call = await request(app)
+    .post('/webhooks/fake/voice')
+    .send({ callId: 'conversation-1', callerPhone: '+15555550123' });
+  const conversationId = call.body?.id ?? (await request(app).get('/conversations')).body[0].id;
+
+  const turn = await request(app)
+    .post(`/conversations/${conversationId}/turns`)
+    .send({ callbackId: 'media-1', audio: 'I need to reschedule tomorrow.' });
+  assert.equal(turn.status, 200);
+  assert.deepEqual(turn.body.events, [
+    'call.received',
+    'call.answered',
+    'speech.started',
+    'speech.transcript',
+    'ai.thinking',
+    'ai.response',
+    'voice.started',
+    'voice.completed',
+  ]);
+  assert.equal(turn.body.eventLog[3].payload.text, 'I need to reschedule tomorrow.');
+  assert.equal(turn.body.eventLog[3].payload.sequence, 3);
+  assert.equal(turn.body.eventLog[5].payload.text, 'I can help with that.');
+  assert.equal(turn.body.eventLog[5].payload.sequence, 4);
+  assert.equal(voice.outputs.length, 1);
+
+  const duplicate = await request(app)
+    .post(`/conversations/${conversationId}/turns`)
+    .send({ callbackId: 'media-1', audio: 'I need to reschedule tomorrow.' });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.body.events.length, turn.body.events.length);
+  assert.equal(voice.outputs.length, 1);
 });

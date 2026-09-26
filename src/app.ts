@@ -7,11 +7,21 @@ import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import type { TelephonyProvider } from './telephony/provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
+import { FakeConversationModel } from './conversation/fake-model.js';
+import type { ConversationModel } from './conversation/model.js';
+import { ConversationEngine } from './services/conversation-engine.js';
+import { FakeSpeechProvider } from './speech/fake-provider.js';
+import type { SpeechProvider } from './speech/provider.js';
+import { FakeVoiceProvider } from './voice/fake-provider.js';
+import type { VoiceProvider } from './voice/provider.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
   providers?: TelephonyProvider[];
   includeFakeProviderRoutes?: boolean;
+  speechProvider?: SpeechProvider;
+  conversationModel?: ConversationModel;
+  voiceProvider?: VoiceProvider;
 }
 
 function createProviderMap(
@@ -65,6 +75,12 @@ export function createApp(options: AppOptions): express.Express {
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
   );
   const service = new ConversationService(options.repository);
+  const engine = new ConversationEngine(
+    options.repository,
+    options.speechProvider ?? new FakeSpeechProvider(),
+    options.conversationModel ?? new FakeConversationModel(),
+    options.voiceProvider ?? new FakeVoiceProvider(),
+  );
   const fakeRoutesEnabled = options.includeFakeProviderRoutes ?? true;
 
   app.use(express.json());
@@ -103,6 +119,25 @@ export function createApp(options: AppOptions): express.Express {
         throw new HttpError(404, 'Conversation not found');
       }
 
+      response.json(presentConversation(conversation));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/conversations/:id/turns', async (request, response, next) => {
+    try {
+      const callbackId =
+        typeof request.body?.callbackId === 'string'
+          ? request.body.callbackId
+          : undefined;
+      if (!callbackId) {
+        throw new HttpError(400, 'Missing required field: callbackId');
+      }
+      const conversation = await engine.respond(request.params.id, {
+        callbackId,
+        audio: request.body?.audio,
+      });
       response.json(presentConversation(conversation));
     } catch (error) {
       next(error);
