@@ -47,5 +47,8 @@
   },
   "optionalDependencies": {
     "@photon-ai/imessage-kit": "^3.0.0"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }
