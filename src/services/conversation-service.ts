@@ -5,6 +5,15 @@ import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provi
 import type { MessagingProvider } from '../messaging/provider.js';
 import type { OwnerChannel } from '../owner/channel.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
+import { randomUUID } from 'node:crypto';
+import { openOwnerRequest, type OwnerRequest } from '../domain/owner-requests.js';
+
+function callerDisplayName(conversation: Conversation): string {
+  const named = [...conversation.events].reverse().find((event) =>
+    (event.type === 'caller.identified' && typeof event.payload.name === 'string') ||
+    (event.type === 'sms.consent.granted' && typeof event.payload.displayName === 'string'));
+  return named ? String(named.payload.name ?? named.payload.displayName) : conversation.callerPhone;
+}
 
 const allowedTransitions: Record<ConversationStatus, ConversationStatus[]> = {
   received: ['answered'],
@@ -134,6 +143,65 @@ export class ConversationService {
       text: input.body, channel: 'sms',
     }, new Date());
     return this.requireConversation(conversation.id);
+  }
+
+  /**
+   * The assistant needs the owner: record the request (it stays open until the
+   * owner replies) and notify them. Only attention-worthy moments notify.
+   */
+  async requestOwner(conversationId: string, input: {
+    question: string;
+    suggestedReplies?: string[];
+    source: string;
+    callId?: string;
+  }): Promise<string> {
+    const conversation = await this.requireConversation(conversationId);
+    const requestId = `req_${input.callId ?? randomUUID()}`;
+    if (conversation.events.some((event) =>
+      event.type === 'owner.attention.requested' && event.payload.requestId === requestId)) return requestId;
+    const suggestedReplies = (input.suggestedReplies ?? []).map((reply) => reply.trim()).filter(Boolean).slice(0, 3);
+    await this.repository.appendEvent(conversationId, 'owner.attention.requested', {
+      requestId, question: input.question, suggestedReplies, source: input.source,
+    }, new Date());
+    const caller = callerDisplayName(conversation);
+    await this.notifyOwnerSafely(conversationId, `owner-request:${requestId}`,
+      `${caller} is waiting: ${input.question}${suggestedReplies.length ? ` (e.g. "${suggestedReplies[0]}")` : ''} — reply here.`);
+    return requestId;
+  }
+
+  /** The request the owner has not answered yet, if any. */
+  openOwnerRequest(conversation: Conversation): OwnerRequest | null {
+    return openOwnerRequest(conversation);
+  }
+
+  /** Where an owner reply without an explicit conversation (SMS, Messages) should go. */
+  async findConversationForOwnerReply(): Promise<Conversation | null> {
+    const conversations = await this.repository.list();
+    const waiting = conversations
+      .map((conversation) => ({ conversation, request: this.openOwnerRequest(conversation) }))
+      .filter((candidate) => candidate.request)
+      .sort((left, right) => right.request!.askedAt.getTime() - left.request!.askedAt.getTime())[0];
+    if (waiting) return waiting.conversation;
+    return conversations.find((candidate) => candidate.state === 'text_active' ||
+      candidate.events.some((event) => event.type === 'conversation.channel_transitioned')) ?? null;
+  }
+
+  /** Earlier conversations with the same caller, newest first. */
+  async priorConversations(conversationId: string, limit = 3): Promise<Conversation[]> {
+    const conversation = await this.requireConversation(conversationId);
+    return (await this.repository.list())
+      .filter((candidate) => candidate.id !== conversationId && candidate.callerPhone === conversation.callerPhone)
+      .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())
+      .slice(0, limit);
+  }
+
+  /** Notify the owner without ever failing the caller's conversation. */
+  async notifyOwnerSafely(conversationId: string, key: string, body: string): Promise<void> {
+    try {
+      await this.notifyOwner(conversationId, key, body);
+    } catch (error) {
+      console.error(`[owner-notify ${conversationId}]`, error instanceof Error ? error.message : error);
+    }
   }
 
   /**

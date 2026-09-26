@@ -1,7 +1,7 @@
 import { HttpError } from '../errors.js';
 import type { Conversation } from '../domain/conversation.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
-import type { ConversationModel, ConversationTurn } from '../conversation/model.js';
+import type { ConversationModel, ConversationModelContext, ConversationTurn } from '../conversation/model.js';
 import type { AudioInput, SpeechProvider } from '../speech/provider.js';
 import type { VoiceProvider } from '../voice/provider.js';
 import type { MessagingProvider } from '../messaging/provider.js';
@@ -17,6 +17,12 @@ export class ConversationEngine {
     private readonly voice: VoiceProvider,
     private readonly messaging?: MessagingProvider,
     private readonly runtime?: RuntimeControlService,
+    private readonly options: {
+      /** Owner instructions and product tools for this conversation. */
+      contextFor?: (conversationId: string) => Promise<ConversationModelContext>;
+      /** Reply to caller texts automatically (production, with the AI SDK text agent). */
+      autoReplyToCallerTexts?: boolean;
+    } = {},
   ) {}
 
   async respond(conversationId: string, input: AudioInput): Promise<Conversation> {
@@ -147,7 +153,8 @@ export class ConversationEngine {
     conversationId: string,
     body: string,
     idempotencyKey: string,
-    source: 'web' | 'macos_messages' = 'web',
+    source: 'web' | 'macos_messages' | 'sms' = 'web',
+    meta: { requestId?: string; messageId?: string } = {},
   ): Promise<Conversation> {
     const conversation = await this.requireConversation(conversationId);
     const existing = conversation.events.find(
@@ -158,7 +165,7 @@ export class ConversationEngine {
     }
     if (!existing) {
       await this.repository.appendEvent(conversationId, 'owner.message', {
-        text: body, speaker: 'owner', channel: 'web', source, idempotencyKey,
+        text: body, speaker: 'owner', channel: 'web', source, idempotencyKey, ...meta,
       }, new Date());
     } else if (conversation.events.some(
       (event) => event.type === 'assistant.message' && event.payload.idempotencyKey === idempotencyKey,
@@ -172,9 +179,10 @@ export class ConversationEngine {
     if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
       throw new HttpError(409, 'The caller has not agreed to continue over text yet');
     }
-    const history = this.history(current);
+    const history = this.history(current).filter((turn) =>
+      !(turn.speaker === 'owner' && turn.text === body));
     history.push({ speaker: 'owner', text: body, sequence: history.length + 1 });
-    const text = await this.model.respond(history);
+    const text = await this.model.respond(history, await this.options.contextFor?.(conversationId));
     try {
       const result = await this.messaging.sendMessage({
         to: consent.payload.phoneNumber, body: text, idempotencyKey: `${idempotencyKey}:sms`,
@@ -197,16 +205,44 @@ export class ConversationEngine {
     return this.requireConversation(conversationId);
   }
 
+  /** A caller texted: reply as the assistant unless the owner has taken over. */
+  async respondToCallerText(conversationId: string, providerMessageId: string): Promise<Conversation> {
+    const conversation = await this.requireConversation(conversationId);
+    if (!this.options.autoReplyToCallerTexts || !this.messaging) return conversation;
+    const idempotencyKey = `conversation:${conversationId}:sms:reply:${providerMessageId}`;
+    if (conversation.events.some((event) => event.type === 'assistant.message' && event.payload.idempotencyKey === idempotencyKey)) {
+      return conversation;
+    }
+    if (this.runtime && (!await this.runtime.canAssistantRespond(conversationId) ||
+      !await this.runtime.shouldUseAssistantAutonomy(conversationId))) {
+      const lastCallerText = [...conversation.events].reverse().find((event) => event.type === 'caller.message');
+      await this.runtime?.noteOwnerNeeded(conversationId, providerMessageId, String(lastCallerText?.payload.text ?? ''));
+      return conversation;
+    }
+    const consent = [...conversation.events].reverse().find((event) => event.type === 'sms.consent.granted');
+    if (typeof consent?.payload.phoneNumber !== 'string') return conversation;
+    const text = await this.model.respond(this.history(conversation), await this.options.contextFor?.(conversationId));
+    const result = await this.messaging.sendMessage({ to: consent.payload.phoneNumber, body: text, idempotencyKey });
+    await this.repository.appendEvent(conversationId, 'assistant.message', {
+      text, speaker: 'assistant', channel: 'sms', source: 'assistant', idempotencyKey,
+      providerMessageId: result.providerMessageId, inReplyTo: providerMessageId,
+    }, new Date());
+    await this.repository.appendEvent(conversationId, 'sms.sent', {
+      to: consent.payload.phoneNumber, body: text, idempotencyKey, providerMessageId: result.providerMessageId,
+    }, new Date());
+    return this.requireConversation(conversationId);
+  }
+
   private history(conversation: Conversation): ConversationTurn[] {
     return conversation.events
       .filter((event) => turnEvents.has(event.type) || event.type === 'owner.message' ||
         event.type === 'caller.message' || event.type === 'assistant.message')
-      .map((event) => ({
+      // The event log is append-only and chronological; SMS turns carry no sequence number.
+      .map((event, index) => ({
         speaker: event.payload.speaker as ConversationTurn['speaker'],
         text: String(event.payload.text),
-        sequence: Number(event.payload.sequence),
-      }))
-      .sort((left, right) => left.sequence - right.sequence);
+        sequence: index + 1,
+      }));
   }
 
   private nextSequence(conversation: Conversation): number {

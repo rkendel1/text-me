@@ -1,4 +1,15 @@
 import type { Conversation } from '../domain/conversation.js';
+import { openOwnerRequest } from '../domain/owner-requests.js';
+
+function presentOwnerRequest(conversation: Conversation) {
+  const request = openOwnerRequest(conversation);
+  return request ? { ...request, askedAt: request.askedAt.toISOString() } : null;
+}
+
+function lastText(conversation: Conversation, types: string[]): string | null {
+  const event = [...conversation.events].reverse().find((candidate) => types.includes(candidate.type));
+  return event ? String(event.payload.text ?? event.payload.body ?? '') : null;
+}
 
 /** Best known caller name: explicit participant, then what they told the assistant, then SMS consent. */
 export function callerName(conversation: Conversation): string | undefined {
@@ -14,10 +25,8 @@ export function callerName(conversation: Conversation): string | undefined {
 export function needsOwner(conversation: Conversation): boolean {
   const lastTime = (type: string) => [...conversation.events].reverse()
     .find((event) => event.type === type)?.occurredAt.getTime();
-  const lastOwnerMessage = lastTime('owner.message');
-  const lastAttention = lastTime('owner.attention.requested');
-  if (lastAttention !== undefined && (lastOwnerMessage === undefined || lastOwnerMessage < lastAttention)) return true;
-  return conversation.events.some((event) => event.type === 'assistant.message') && lastOwnerMessage === undefined;
+  if (openOwnerRequest(conversation)) return true;
+  return conversation.events.some((event) => event.type === 'assistant.message') && lastTime('owner.message') === undefined;
 }
 
 export function presentConversation(conversation: Conversation): Record<string, unknown> {
@@ -60,6 +69,7 @@ export function presentConversation(conversation: Conversation): Record<string, 
     ],
     ownerId: conversation.ownerId,
     callerName: callerName(conversation) ?? null,
+    ownerRequest: presentOwnerRequest(conversation),
     summary: summary ? String(summary) : undefined,
     needsOwner: needsOwner(conversation),
     unread: conversation.events.some((event) => event.occurredAt.getTime() > lastRead &&
@@ -105,6 +115,9 @@ export function presentConversationSummary(
       [...conversation.events].find((event) => event.type === 'conversation.summary.created')?.payload.summary ??
       '',
     needsOwner: needsOwner(conversation),
+    ownerRequest: presentOwnerRequest(conversation),
+    lastCallerMessage: lastText(conversation, ['caller.message', 'speech.transcript']),
+    lastAssistantMessage: lastText(conversation, ['assistant.message', 'ai.response']),
     unread: conversation.events.some((event) => event.occurredAt.getTime() >
       (conversation.lastOwnerReadAt?.getTime() ?? 0) && event.type !== 'owner.read'),
     updatedAt: [...conversation.events].reduce(

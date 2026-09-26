@@ -70,9 +70,14 @@ export class RuntimeControlService {
   }
 
   /** Ask the live call (on whichever instance holds it) to speak the owner's words to the caller. */
-  async requestOwnerSpeech(conversationId: string, ownerId: string, text: string): Promise<void> {
+  async requestOwnerSpeech(
+    conversationId: string,
+    ownerId: string,
+    text: string,
+    meta: { messageId?: string; requestId?: string; commandId?: string } = {},
+  ): Promise<void> {
     await this.requireOwnedConversation(conversationId, ownerId);
-    await this.persistEvent(conversationId, 'runtime.owner_speech', { text }, true);
+    await this.persistEvent(conversationId, 'runtime.owner_speech', { text, ...meta, commandId: meta.commandId ?? randomUUID() }, true);
   }
 
   async listEvents(conversationId: string, ownerId: string) {
@@ -389,7 +394,8 @@ export class RuntimeControlService {
   async shouldUseAssistantAutonomy(conversationId: string): Promise<boolean> {
     const conversation = await this.requireConversation(conversationId);
     const runtime = await this.ensureRuntime(conversation);
-    return runtime.aiMode === 'automatic';
+    // "Ask me" mode still lets the assistant talk; it escalates instead of deciding. Only takeover silences it.
+    return runtime.aiMode !== 'owner_only';
   }
 
   private async applyCommand(
@@ -408,6 +414,7 @@ export class RuntimeControlService {
     try {
       const result = await apply(runtime, conversation);
       if (!result.changed) return result.runtime;
+      await this.supersedeOverrides(conversationId, runtime, result.runtime);
       await this.store.save(result.runtime);
       await this.syncConversationState(conversation, result.runtime.state);
       await this.persistEvent(conversationId, eventType, {
@@ -430,6 +437,18 @@ export class RuntimeControlService {
       });
       if (error instanceof HttpError) throw error;
       throw new HttpError(409, reason);
+    }
+  }
+
+  /**
+   * A command (take over, stop, move to text…) is the owner's latest word on the
+   * fields it changes, so any earlier per-conversation override of those fields
+   * must not re-apply on the next read.
+   */
+  private async supersedeOverrides(conversationId: string, before: ConversationRuntime, after: ConversationRuntime): Promise<void> {
+    const overrides = await this.overrides.list(conversationId);
+    for (const override of overrides) {
+      if (before[override.field] !== after[override.field]) await this.overrides.delete(conversationId, override.field);
     }
   }
 

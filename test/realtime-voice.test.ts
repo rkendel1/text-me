@@ -158,7 +158,7 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   assert.deepEqual(connector.config!.inputAudioFormat, { type: 'audio/pcmu', rate: 8000 });
   assert.deepEqual(connector.config!.outputAudioFormat, { type: 'audio/pcmu', rate: 8000 });
   assert.equal(connector.config!.voice, 'marin');
-  assert.deepEqual(connector.config!.tools!.map((tool) => tool.name), ['note_caller', 'ask_owner', 'continue_over_text', 'end_call']);
+  assert.deepEqual(connector.config!.tools!.map((tool) => tool.name), ['note_caller', 'get_owner_context', 'lookup_conversation', 'ask_owner', 'transition_to_text', 'end_call']);
   await eventually(() => connector.sentOfType('response-create').length === 1, 'greeting');
   assert.match(connector.sentOfType('response-create')[0].options!.instructions!, /Greet the caller/);
 
@@ -236,7 +236,7 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   // Tools: the caller agrees to text, then the assistant hangs up.
   connector.emit({
     type: 'function-call-arguments-done', responseId: 'r', itemId: 'i', callId: 'call-sms',
-    name: 'continue_over_text', arguments: JSON.stringify({ callerName: 'Jordan' }),
+    name: 'transition_to_text', arguments: JSON.stringify({ callerName: 'Jordan' }),
   });
   await eventually(() => connector.sentOfType('conversation-item-create').length === 1, 'tool output');
   assert.equal(service.messaging.sentMessages.length, 2);

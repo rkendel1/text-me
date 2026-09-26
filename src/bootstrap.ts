@@ -24,6 +24,9 @@ import {
 import { PostgresRuntimeEventBus } from './runtime/event-bus.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
+import { createGateway } from 'ai';
+
+import { AiSdkTextAgent } from './conversation/ai-sdk-text-agent.js';
 import { GatewayRealtimeConnector } from './voice/realtime/connector.js';
 import { MEDIA_STREAM_PATH, RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 
@@ -71,6 +74,11 @@ export function buildServer(
   const realtimeVoice = config.realtimeVoice
     ? new RealtimeVoiceService(new GatewayRealtimeConnector(config.realtimeVoice), { voice: config.realtimeVoice.voice })
     : undefined;
+  // AI SDK is the AI boundary: realtime voice and text both go through AI Gateway.
+  const ai = config.realtimeVoice;
+  const textAgent = ai
+    ? new AiSdkTextAgent(createGateway({ apiKey: ai.apiKey, baseURL: ai.baseURL, teamIdOrSlug: ai.teamIdOrSlug })(ai.textModelId))
+    : undefined;
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 
   const app = createApp({
@@ -101,6 +109,8 @@ export function buildServer(
     runtimeOverrideStore: runtimeOverrides,
     runtimeEventBus,
     realtimeVoice,
+    conversationModel: textAgent,
+    autoReplyToCallerTexts: Boolean(textAgent),
     beforeRequest: ready,
     ...overrides,
   });

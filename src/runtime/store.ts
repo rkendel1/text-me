@@ -109,18 +109,22 @@ export function createDefaultRuntime(
 ): ConversationRuntime {
   const now = new Date();
   const state = deriveRuntimeState(conversation);
+  const behavior = configuration.assistant.behavior ?? 'automatic';
   return {
     conversationId: conversation.id,
     state,
     assistantEnabled: configuration.calls.answerCalls,
-    voiceEnabled: state !== 'text_active',
-    transcriptionEnabled: true,
-    aiMode: 'automatic',
+    voiceEnabled: state !== 'text_active' && configuration.calls.voiceEnabled !== false,
+    transcriptionEnabled: configuration.calls.transcriptionEnabled !== false,
+    aiMode: behavior === 'automatic' ? 'automatic' : 'owner_assist',
     responseStyle: configuration.assistant.tone === 'professional' ? 'professional'
       : configuration.assistant.tone === 'warm' ? 'friendly' : 'concise',
-    verbosity: configuration.assistant.responseStyle === 'detailed' ? 'detailed' : 'short',
-    askOwnerWhen: configuration.messages.interruptOnlyWhenNeeded ? 'important' : 'always',
-    allowCommitments: true,
+    verbosity: configuration.assistant.responseStyle === 'detailed' ? 'detailed'
+      : configuration.assistant.responseStyle === 'normal' ? 'normal' : 'short',
+    askOwnerWhen: behavior === 'ask_when_unsure' ? 'uncertain'
+      : behavior === 'ask_before_commitments' ? 'important'
+        : configuration.messages.interruptOnlyWhenNeeded ? 'important' : 'always',
+    allowCommitments: behavior !== 'ask_before_commitments',
     allowScheduling: true,
     allowCallerFollowups: true,
     smsTransitionEnabled: configuration.calls.offerSmsTransition,

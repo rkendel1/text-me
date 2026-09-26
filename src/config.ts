@@ -1,5 +1,7 @@
 export interface RealtimeVoiceConfig {
   modelId: string;
+  /** Model for text messages (SMS replies, relaying the owner's answers). */
+  textModelId: string;
   voice?: string;
   apiKey?: string;
   baseURL?: string;
@@ -24,6 +26,7 @@ export interface AppConfig {
 }
 
 export const DEFAULT_REALTIME_MODEL = 'openai/gpt-realtime-2';
+export const DEFAULT_TEXT_MODEL = 'anthropic/claude-haiku-4.5';
 
 /**
  * The public origin Twilio calls back to. On Vercel this defaults to the
@@ -44,6 +47,7 @@ function resolveRealtimeVoice(env: NodeJS.ProcessEnv): RealtimeVoiceConfig | und
   if (!hasCredential) return undefined;
   return {
     modelId: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
+    textModelId: env.TEXT_MODEL || DEFAULT_TEXT_MODEL,
     voice: env.REALTIME_VOICE_NAME || undefined,
     apiKey: env.AI_GATEWAY_API_KEY || undefined,
     baseURL: env.AI_GATEWAY_BASE_URL || undefined,

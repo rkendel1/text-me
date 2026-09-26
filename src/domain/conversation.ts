@@ -55,7 +55,8 @@ export type ConversationEventType =
   | 'assistant.failed'
   | 'owner.read'
   | 'owner.attention.requested'
-  | 'caller.identified';
+  | 'caller.identified'
+  | 'assistant.activity';
 
 export interface ConversationEvent {
   id: string;

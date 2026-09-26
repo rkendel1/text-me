@@ -1,5 +1,6 @@
 import type { ConversationRuntime, ConversationRuntimeEvent } from '../../domain/runtime.js';
 import type { OwnerConfigurationService } from '../../owner/configuration.js';
+import { presentConversationSummary } from '../../http/presenters.js';
 import type { ConversationRepository } from '../../repositories/conversation-repository.js';
 import type { RuntimeControlService } from '../../runtime/service.js';
 import type { ConversationService } from '../../services/conversation-service.js';
@@ -8,7 +9,8 @@ import type {
   RealtimeConnector,
   RealtimeServerEvent,
 } from './connector.js';
-import { buildSessionConfig, type CallToolName } from './session-config.js';
+import type { OwnerConfiguration } from '../../owner/configuration.js';
+import { buildSessionConfig, relayInstructions, type CallToolName } from './session-config.js';
 
 export interface CallBridgeServices {
   repository: ConversationRepository;
@@ -41,6 +43,7 @@ export class RealtimeCallBridge {
   private connection?: RealtimeConnection;
   private streamSid?: string;
   private runtimeSnapshot?: ConversationRuntime;
+  private configuration?: OwnerConfiguration;
   private paused = false;
   private closing = false;
   private hangupWhenIdle = false;
@@ -60,7 +63,12 @@ export class RealtimeCallBridge {
     private readonly connector: RealtimeConnector,
     private readonly services: CallBridgeServices,
     private readonly socket: MediaStreamSocket,
-    private readonly options: { voice?: string; onClosed?: (bridge: RealtimeCallBridge) => void } = {},
+    private readonly options: {
+      voice?: string;
+      onClosed?: (bridge: RealtimeCallBridge) => void;
+      /** Called once an owner command has actually been applied to this live call. */
+      onCommandApplied?: (commandId: string) => void | Promise<void>;
+    } = {},
   ) {}
 
   async start(streamSid: string): Promise<void> {
@@ -70,6 +78,7 @@ export class RealtimeCallBridge {
     const runtime = await this.services.runtime.getRuntimeForConversation(conversation);
     const configuration = await this.services.configuration.get(conversation.ownerId ?? 'owner');
     this.runtimeSnapshot = runtime;
+    this.configuration = configuration;
     this.paused = runtime.state === 'paused' || runtime.state === 'stopped' || !runtime.assistantEnabled;
     this.sequence = conversation.events.length + 1000;
     this.connection = await this.connector.connect(
@@ -84,7 +93,7 @@ export class RealtimeCallBridge {
       model: this.connector.modelId,
       streamSid,
     }, new Date());
-    if (!this.paused && runtime.aiMode === 'automatic') {
+    if (!this.paused && runtime.aiMode !== 'owner_only') {
       await this.requestResponse(`Greet the caller now with: "${configuration.assistant.greeting}"`);
     }
   }
@@ -110,20 +119,28 @@ export class RealtimeCallBridge {
   // ----- Owner controls (runtime events, from any instance) -----
 
   handleRuntimeEvent(event: ConversationRuntimeEvent): void {
+    const commandId = typeof event.payload.commandId === 'string' ? event.payload.commandId : undefined;
+    const applied = () => {
+      if (commandId) this.enqueue(async () => this.options.onCommandApplied?.(commandId));
+    };
     switch (event.type) {
       case 'runtime.paused':
         this.pause();
+        applied();
         return;
       case 'runtime.stopped':
         this.enqueue(() => this.stop());
+        applied();
         return;
       case 'runtime.interrupted':
         this.interrupt();
+        applied();
         return;
       case 'runtime.owner_speech':
         if (typeof event.payload.text === 'string') {
           const text = event.payload.text;
           this.enqueue(() => this.speak(text));
+          applied();
         }
         return;
       case 'runtime.started':
@@ -132,6 +149,7 @@ export class RealtimeCallBridge {
       case 'runtime.returned_to_assistant':
       case 'runtime.configuration_changed':
         this.enqueue(() => this.refresh());
+        applied();
         return;
       default:
         return;
@@ -176,18 +194,17 @@ export class RealtimeCallBridge {
     if (!this.connection) return;
     const conversation = await this.services.repository.getById(this.conversationId);
     const configuration = await this.services.configuration.get(conversation?.ownerId ?? 'owner');
+    this.configuration = configuration;
     await this.connection.send({
       type: 'session-update',
       config: await buildSessionConfig(runtime, configuration, this.options.voice),
     });
   }
 
-  /** Speak the owner's words into the call in the assistant's voice. */
+  /** Relay the owner's reply to the caller: the assistant mediates, it does not read it out verbatim. */
   async speak(text: string): Promise<void> {
     this.silence();
-    await this.requestResponse(
-      `Say the following to the caller exactly as written, then stop and listen: "${text.replace(/"/g, "'")}"`,
-    );
+    await this.requestResponse(relayInstructions(this.configuration?.assistant.ownerName ?? '', text));
   }
 
   // ----- Model side -----
@@ -243,7 +260,8 @@ export class RealtimeCallBridge {
   }
 
   private onResponseCreated(responseId: string): void {
-    const autonomous = this.runtimeSnapshot?.aiMode === 'automatic' && !this.paused;
+    // "Ask me" mode keeps the assistant talking (it escalates via ask_owner); only takeover silences it.
+    const autonomous = this.runtimeSnapshot?.aiMode !== 'owner_only' && !this.paused;
     if (this.requestedResponses > 0) {
       this.requestedResponses -= 1;
     } else if (!autonomous) {
@@ -279,7 +297,7 @@ export class RealtimeCallBridge {
 
   private async recordCallerTurn(itemId: string, transcript: string): Promise<void> {
     const text = transcript.trim();
-    if (!text) {
+    if (!text || this.runtimeSnapshot?.transcriptionEnabled === false) {
       await this.services.runtime.noteVoiceStopped(this.conversationId, itemId);
       return;
     }
@@ -287,7 +305,7 @@ export class RealtimeCallBridge {
       callbackId: itemId, speaker: 'caller', text, sequence: this.sequence++, source: 'realtime',
     }, new Date());
     await this.services.runtime.noteTranscript(this.conversationId, itemId, text);
-    if (this.runtimeSnapshot?.aiMode !== 'automatic') {
+    if (this.runtimeSnapshot?.aiMode === 'owner_only') {
       await this.services.runtime.noteOwnerNeeded(this.conversationId, itemId, text);
     }
   }
@@ -309,37 +327,64 @@ export class RealtimeCallBridge {
       // Fall through with empty input; each tool validates what it needs.
     }
     this.toolOutputsPending.add(callId);
+    const owner = this.configuration?.assistant.ownerName || 'the owner';
+    const text = (key: string) => (typeof input[key] === 'string' && (input[key] as string).trim() ? (input[key] as string).trim() : undefined);
     let output: Record<string, unknown>;
+    let activity: string | undefined;
     let followUp = true;
     try {
       if (name === 'note_caller') {
-        const details = {
-          ...(typeof input.name === 'string' && input.name.trim() ? { name: input.name.trim() } : {}),
-          ...(typeof input.reason === 'string' && input.reason.trim() ? { reason: input.reason.trim() } : {}),
-        };
+        const details = { ...(text('name') ? { name: text('name') } : {}), ...(text('reason') ? { reason: text('reason') } : {}) };
         await this.services.repository.appendEvent(this.conversationId, 'caller.identified', {
-          ...details, source: 'realtime',
+          ...details, callId, source: 'realtime',
         }, new Date());
+        activity = ['Noted caller', details.name, details.reason && `— ${details.reason}`].filter(Boolean).join(' ');
         output = { status: 'noted' };
+      } else if (name === 'get_owner_context') {
+        output = {
+          ownerName: owner,
+          introduction: this.configuration?.assistant.ownerIntroduction,
+          prefersText: this.runtimeSnapshot?.smsTransitionEnabled ?? false,
+          currentTime: new Date().toString(),
+        };
+        activity = `Checked ${owner}'s preferences`;
+      } else if (name === 'lookup_conversation') {
+        const earlier = await this.services.conversations.priorConversations(this.conversationId);
+        output = {
+          earlierConversations: earlier.map((conversation) => {
+            const summary = presentConversationSummary(conversation);
+            return { when: conversation.startedAt.toISOString(), lastMessage: summary.preview, state: summary.state };
+          }),
+        };
+        activity = earlier.length ? `Looked up ${earlier.length} earlier conversation${earlier.length === 1 ? '' : 's'}` : 'Looked for earlier conversations (none)';
       } else if (name === 'ask_owner') {
-        const question = typeof input.question === 'string' ? input.question : 'The caller needs the owner.';
-        await this.services.repository.appendEvent(this.conversationId, 'owner.attention.requested', {
-          question, callId, source: 'realtime',
-        }, new Date());
+        const question = text('question') ?? 'The caller needs you.';
+        const suggestedReplies = Array.isArray(input.suggestedReplies) ? input.suggestedReplies.map(String) : [];
+        await this.services.conversations.requestOwner(this.conversationId, {
+          question, suggestedReplies, source: 'realtime', callId,
+        });
         await this.services.runtime.noteOwnerNeeded(this.conversationId, callId, question);
-        output = { status: 'owner_notified', say: 'Let the caller know the owner has been notified and will respond shortly.' };
-      } else if (name === 'continue_over_text') {
-        output = await this.continueOverText(typeof input.callerName === 'string' ? input.callerName : undefined);
+        activity = `Asked ${owner}: "${question}"`;
+        output = { status: 'owner_notified', say: `Tell the caller you're checking with ${owner}; keep them company until the answer arrives.` };
+      } else if (name === 'transition_to_text') {
+        output = await this.continueOverText(text('callerName'));
+        activity = output.status === 'texting' ? 'Moved the conversation to text' : 'Could not move to text';
       } else if (name === 'end_call') {
         this.hangupWhenIdle = true;
         this.farewellTimer ??= setTimeout(() => this.hangUp(), FAREWELL_TIMEOUT_MS);
         followUp = false;
+        activity = 'Ended the call';
         output = { status: 'ending' };
       } else {
         output = { error: `Unknown tool: ${String(name)}` };
       }
     } catch (error) {
       output = { error: error instanceof Error ? error.message : 'Tool failed' };
+    }
+    if (activity) {
+      await this.services.repository.appendEvent(this.conversationId, 'assistant.activity', {
+        tool: name, summary: activity, callId, source: 'realtime',
+      }, new Date());
     }
     await this.connection?.send({
       type: 'conversation-item-create',
@@ -361,7 +406,7 @@ export class RealtimeCallBridge {
     if (!conversation) throw new Error('Conversation not found');
     await this.services.conversations.grantSmsConsent(this.conversationId, conversation.callerPhone, callerName);
     await this.services.conversations.convertToTextConversation(this.conversationId);
-    return { status: 'texting', say: 'Tell the caller they will get a text from this number now, then say goodbye.' };
+    return { status: 'texting', say: 'Tell the caller a text is on its way from this number, then say goodbye.' };
   }
 
   // ----- Helpers -----

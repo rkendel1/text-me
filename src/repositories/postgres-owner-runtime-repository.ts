@@ -68,6 +68,7 @@ interface OwnerConfigurationRow {
   assistant: OwnerConfiguration['assistant'];
   calls: OwnerConfiguration['calls'];
   messages: OwnerConfiguration['messages'];
+  onboarding: Partial<OwnerConfiguration['onboarding']> | null;
 }
 
 interface OwnerAuditRow {
@@ -192,9 +193,10 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
   }
 
   async save(device: OwnerDevice): Promise<void> {
-    await this.pool.query('BEGIN');
+    const client = await this.pool.connect();
     try {
-      await this.pool.query(
+      await client.query('BEGIN');
+      await client.query(
         `
           INSERT INTO owner_devices (
             id, owner_id, type, name, status, setup_status, health,
@@ -236,10 +238,10 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           device.revokedAt,
         ],
       );
-      await this.pool.query('DELETE FROM owner_messages_chats WHERE device_id = $1', [device.id]);
+      await client.query('DELETE FROM owner_messages_chats WHERE device_id = $1', [device.id]);
       for (const chat of device.discoveredChats) {
         const isAuthorized = device.assistantChat?.chatId === chat.id && device.assistantChat.service === chat.service;
-        await this.pool.query(
+        await client.query(
           `
             INSERT INTO owner_messages_chats (
               device_id, chat_id, service, display_name, address, is_group, is_authorized
@@ -259,7 +261,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
       if (device.assistantChat && !device.discoveredChats.some((chat) =>
         chat.id === device.assistantChat!.chatId && chat.service === device.assistantChat!.service,
       )) {
-        await this.pool.query(
+        await client.query(
           `
             INSERT INTO owner_messages_chats (
               device_id, chat_id, service, display_name, address, is_group, is_authorized
@@ -274,10 +276,12 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           ],
         );
       }
-      await this.pool.query('COMMIT');
+      await client.query('COMMIT');
     } catch (error) {
-      await this.pool.query('ROLLBACK');
+      await client.query('ROLLBACK');
       throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -432,6 +436,9 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    await this.pool.query(
+      "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
+    );
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
         owner_id TEXT NOT NULL,
@@ -456,7 +463,7 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
 
   async get(ownerId: string): Promise<OwnerConfiguration | null> {
     const result = await this.pool.query<OwnerConfigurationRow>(
-      'SELECT owner_id, revision, assistant, calls, messages FROM owner_configurations WHERE owner_id = $1',
+      'SELECT owner_id, revision, assistant, calls, messages, onboarding FROM owner_configurations WHERE owner_id = $1',
       [ownerId],
     );
     const row = result.rows[0];
@@ -467,16 +474,18 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
       assistant: row.assistant,
       calls: row.calls,
       messages: row.messages,
+      onboarding: { completed: false, ...row.onboarding },
     };
   }
 
   async create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
-    await this.pool.query('BEGIN');
+    const client = await this.pool.connect();
     try {
-      await this.pool.query(
+      await client.query('BEGIN');
+      await client.query(
         `
-          INSERT INTO owner_configurations (owner_id, revision, assistant, calls, messages, updated_at)
-          VALUES ($1, $2, $3, $4, $5, NOW())
+          INSERT INTO owner_configurations (owner_id, revision, assistant, calls, messages, onboarding, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, NOW())
           ON CONFLICT (owner_id) DO NOTHING
         `,
         [
@@ -485,9 +494,10 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
           JSON.stringify(configuration.messages),
+          JSON.stringify(configuration.onboarding),
         ],
       );
-      await this.pool.query(
+      await client.query(
         `
           INSERT INTO owner_configuration_revisions (owner_id, revision, assistant, calls, messages)
           VALUES ($1, $2, $3, $4, $5)
@@ -501,27 +511,31 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           JSON.stringify(configuration.messages),
         ],
       );
-      await this.pool.query(
+      await client.query(
         'INSERT INTO owner_configuration_audit (owner_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
         [event.ownerId, event.revision, event.type, event.source, event.occurredAt],
       );
-      await this.pool.query('COMMIT');
+      await client.query('COMMIT');
     } catch (error) {
-      await this.pool.query('ROLLBACK');
+      await client.query('ROLLBACK');
       throw error;
+    } finally {
+      client.release();
     }
   }
 
   async update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
-    await this.pool.query('BEGIN');
+    const client = await this.pool.connect();
     try {
-      const current = await this.pool.query(
+      await client.query('BEGIN');
+      const current = await client.query(
         `
           UPDATE owner_configurations
              SET revision = $2,
                  assistant = $3,
                  calls = $4,
                  messages = $5,
+                 onboarding = $7,
                  updated_at = NOW()
            WHERE owner_id = $1 AND revision = $6
         `,
@@ -532,12 +546,13 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           JSON.stringify(configuration.calls),
           JSON.stringify(configuration.messages),
           previousRevision,
+          JSON.stringify(configuration.onboarding),
         ],
       );
       if (current.rowCount !== 1) {
         throw new Error('Owner configuration update conflict');
       }
-      await this.pool.query(
+      await client.query(
         `
           INSERT INTO owner_configuration_revisions (owner_id, revision, assistant, calls, messages)
           VALUES ($1, $2, $3, $4, $5)
@@ -550,14 +565,16 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           JSON.stringify(configuration.messages),
         ],
       );
-      await this.pool.query(
+      await client.query(
         'INSERT INTO owner_configuration_audit (owner_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
         [event.ownerId, event.revision, event.type, event.source, event.occurredAt],
       );
-      await this.pool.query('COMMIT');
+      await client.query('COMMIT');
     } catch (error) {
-      await this.pool.query('ROLLBACK');
+      await client.query('ROLLBACK');
       throw error;
+    } finally {
+      client.release();
     }
   }
 

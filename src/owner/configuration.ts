@@ -1,8 +1,13 @@
 export type AssistantTone = 'friendly' | 'professional' | 'warm';
-export type AssistantResponseStyle = 'concise' | 'detailed';
+export type AssistantResponseStyle = 'concise' | 'normal' | 'detailed';
+/** How calls are normally handled; each conversation can override it live. */
+export type AssistantBehavior = 'automatic' | 'ask_when_unsure' | 'ask_before_commitments';
 
 export interface OwnerAssistantSettings {
+  /** Who the assistant works for, as callers should hear it ("Randy"). */
+  ownerName: string;
   assistantName: string;
+  behavior: AssistantBehavior;
   greeting: string;
   ownerIntroduction: string;
   tone: AssistantTone;
@@ -16,6 +21,10 @@ export interface OwnerCallSettings {
   offerSmsTransition: boolean;
   requireSmsConsent: boolean;
   voicemailFallback: boolean;
+  /** Default for new calls: the assistant speaks its replies. */
+  voiceEnabled: boolean;
+  /** Default for new calls: the owner sees a live transcript. */
+  transcriptionEnabled: boolean;
 }
 
 export interface OwnerMessageSettings {
@@ -33,6 +42,7 @@ export interface OwnerConfiguration {
   assistant: OwnerAssistantSettings;
   calls: OwnerCallSettings;
   messages: OwnerMessageSettings;
+  onboarding: { completed: boolean };
 }
 
 export interface OwnerConfigurationAuditEvent {
@@ -47,6 +57,7 @@ export type OwnerConfigurationPatch = {
   assistant?: Partial<OwnerAssistantSettings>;
   calls?: Partial<OwnerCallSettings>;
   messages?: Partial<OwnerMessageSettings>;
+  onboarding?: Partial<OwnerConfiguration['onboarding']>;
 };
 
 export interface OwnerConfigurationStore {
@@ -92,7 +103,9 @@ function defaultConfiguration(ownerId: string): OwnerConfiguration {
     ownerId,
     revision: 1,
     assistant: {
+      ownerName: 'Randy',
       assistantName: 'Assistant',
+      behavior: 'automatic',
       greeting: "Hi, this is Randy's assistant. How can I help?",
       ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
       tone: 'friendly',
@@ -105,6 +118,8 @@ function defaultConfiguration(ownerId: string): OwnerConfiguration {
       offerSmsTransition: true,
       requireSmsConsent: true,
       voicemailFallback: false,
+      voiceEnabled: true,
+      transcriptionEnabled: true,
     },
     messages: {
       webEnabled: true,
@@ -114,7 +129,40 @@ function defaultConfiguration(ownerId: string): OwnerConfiguration {
       includeSummary: true,
       includeSuggestedResponse: true,
     },
+    onboarding: { completed: false },
   };
+}
+
+/** Fill in fields added after a configuration was first stored. */
+function withDefaults(stored: OwnerConfiguration): OwnerConfiguration {
+  const defaults = defaultConfiguration(stored.ownerId);
+  return {
+    ...defaults,
+    ...stored,
+    assistant: { ...defaults.assistant, ...stored.assistant },
+    calls: { ...defaults.calls, ...stored.calls },
+    messages: { ...defaults.messages, ...stored.messages },
+    onboarding: { ...defaults.onboarding, ...stored.onboarding },
+  };
+}
+
+const allowed: Record<string, readonly string[]> = {
+  behavior: ['automatic', 'ask_when_unsure', 'ask_before_commitments'],
+  tone: ['friendly', 'professional', 'warm'],
+  responseStyle: ['concise', 'normal', 'detailed'],
+};
+
+function validatePatch(patch: OwnerConfigurationPatch): void {
+  for (const [key, values] of Object.entries(allowed)) {
+    const value = (patch.assistant as Record<string, unknown> | undefined)?.[key];
+    if (value !== undefined && !values.includes(value as string)) throw new Error(`Invalid value for ${key}`);
+  }
+  for (const key of ['ownerName', 'assistantName', 'greeting', 'ownerIntroduction'] as const) {
+    const value = patch.assistant?.[key];
+    if (value !== undefined && (typeof value !== 'string' || !value.trim() || value.length > 300)) {
+      throw new Error(`Invalid value for ${key}`);
+    }
+  }
 }
 
 export class OwnerConfigurationService {
@@ -122,7 +170,7 @@ export class OwnerConfigurationService {
 
   async get(ownerId: string): Promise<OwnerConfiguration> {
     const existing = await this.store.get(ownerId);
-    if (existing) return structuredClone(existing);
+    if (existing) return withDefaults(structuredClone(existing));
     const configuration = defaultConfiguration(ownerId);
     await this.store.create(configuration, {
       type: 'configuration.created',
@@ -135,6 +183,7 @@ export class OwnerConfigurationService {
   }
 
   async update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web'): Promise<OwnerConfiguration> {
+    validatePatch(patch);
     const current = await this.get(ownerId);
     const next: OwnerConfiguration = {
       ...current,
@@ -142,6 +191,7 @@ export class OwnerConfigurationService {
       assistant: { ...current.assistant, ...patch.assistant },
       calls: { ...current.calls, ...patch.calls },
       messages: { ...current.messages, ...patch.messages },
+      onboarding: { ...current.onboarding, ...patch.onboarding },
     };
     await this.store.update(next, current.revision, {
       type: patch.messages?.macosMessagesEnabled === true ? 'owner.channel.enabled'

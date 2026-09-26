@@ -38,6 +38,8 @@ import {
 import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
+import { buildInstructions } from './voice/realtime/session-config.js';
+import { OwnerReplyService } from './services/owner-reply.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -67,6 +69,8 @@ export interface AppOptions {
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
   beforeRequest?: Promise<void>;
+  /** Let the assistant answer caller texts itself (production, with the AI SDK text agent). */
+  autoReplyToCallerTexts?: boolean;
 }
 
 function createProviderMap(
@@ -176,7 +180,35 @@ export function createApp(options: AppOptions): express.Express {
     options.voiceProvider ?? new FakeVoiceProvider(),
     messaging,
     runtime,
+    {
+      autoReplyToCallerTexts: options.autoReplyToCallerTexts ?? false,
+      contextFor: async (conversationId) => {
+        const conversation = await service.getConversation(conversationId);
+        if (!conversation) return {};
+        const configuration = await ownerConfiguration.get(conversation.ownerId ?? ownerId);
+        const snapshot = await runtime.getRuntimeForConversation(conversation);
+        return {
+          instructions: buildInstructions(snapshot, configuration, 'text'),
+          ownerName: configuration.assistant.ownerName,
+          tools: {
+            askOwner: async (question, suggestedReplies) => {
+              const requestId = await service.requestOwner(conversationId, { question, suggestedReplies, source: 'sms' });
+              await options.repository.appendEvent(conversationId, 'assistant.activity', {
+                tool: 'ask_owner', summary: `Asked ${configuration.assistant.ownerName}: "${question}"`, requestId, source: 'sms',
+              }, new Date());
+              await runtime.noteOwnerNeeded(conversationId, requestId, question);
+            },
+            noteCaller: async (name, reason) => {
+              await options.repository.appendEvent(conversationId, 'caller.identified', {
+                ...(name ? { name } : {}), ...(reason ? { reason } : {}), source: 'sms',
+              }, new Date());
+            },
+          },
+        };
+      },
+    },
   );
+  const ownerReplies = new OwnerReplyService(options.repository, service, engine, runtime, Boolean(options.realtimeVoice));
   const fakeRoutesEnabled = options.includeFakeProviderRoutes ?? true;
   const realtimeVoice = options.realtimeVoice;
   realtimeVoice?.bind({
@@ -257,7 +289,19 @@ export function createApp(options: AppOptions): express.Express {
     try {
       if (!twilioProvider.parseIncomingSms) throw new HttpError(501, 'SMS is not supported');
       const message = twilioProvider.parseIncomingSms(request.body);
-      const conversation = await service.receiveSms(message);
+      if (options.ownerPhone && message.from === options.ownerPhone) {
+        // The owner texted back: it answers whichever conversation is waiting on them.
+        const target = await service.findConversationForOwnerReply();
+        if (!target) throw new HttpError(404, 'No conversation is waiting for you');
+        const conversation = await ownerReplies.reply({
+          conversationId: target.id, ownerId, body: message.body,
+          idempotencyKey: `sms:${message.providerMessageId}`, source: 'sms',
+        });
+        response.json(presentConversation(conversation));
+        return;
+      }
+      const received = await service.receiveSms(message);
+      const conversation = await engine.respondToCallerText(received.id, message.providerMessageId);
       response.json(presentConversation(conversation));
     } catch (error) {
       next(error);
@@ -490,12 +534,13 @@ export function createApp(options: AppOptions): express.Express {
         body,
         source: 'macos_messages',
       }, new Date());
-      const conversation = await engine.respondToOwner(
-        delivery.conversationId,
+      const conversation = await ownerReplies.reply({
+        conversationId: delivery.conversationId,
+        ownerId: device.ownerId,
         body,
-        `macos:${device.id}:${externalId}`,
-        'macos_messages',
-      );
+        idempotencyKey: `macos:${device.id}:${externalId}`,
+        source: 'macos_messages',
+      });
       response.json(presentConversation(conversation));
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Owner reply failed'));
@@ -774,21 +819,13 @@ export function createApp(options: AppOptions): express.Express {
       const key = typeof request.body?.idempotencyKey === 'string' && request.body.idempotencyKey.trim()
         ? request.body.idempotencyKey.trim()
         : `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const conversationId = String(request.params.id);
-      const current = (await service.getConversation(conversationId))!;
-      let conversation: Conversation;
-      if (realtimeVoice && realtimeVoiceStatus(current).live) {
-        // The caller is on the phone: the assistant speaks the owner's words into the call.
-        if (!current.events.some((event) => event.type === 'owner.message' && event.payload.idempotencyKey === key)) {
-          await options.repository.appendEvent(conversationId, 'owner.message', {
-            text: body, speaker: 'owner', channel: 'voice', source: 'web', idempotencyKey: key,
-          }, new Date());
-          await runtime.requestOwnerSpeech(conversationId, (request as Request & { ownerId?: string }).ownerId!, body);
-        }
-        conversation = (await service.getConversation(conversationId))!;
-      } else {
-        conversation = await engine.respondToOwner(conversationId, body, key);
-      }
+      const conversation = await ownerReplies.reply({
+        conversationId: String(request.params.id),
+        ownerId: (request as Request & { ownerId?: string }).ownerId!,
+        body,
+        idempotencyKey: key,
+        source: 'web',
+      });
       response.json({
         ...presentConversation(conversation),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
