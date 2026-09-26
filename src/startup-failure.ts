@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import express, { type Express } from 'express';
 
 import { ConfigurationError } from './config.js';
 
@@ -8,7 +9,7 @@ import { ConfigurationError } from './config.js';
  * clients, so the problem is visible instead of an opaque function crash.
  * Only configuration problems are shown; other errors go to the function logs.
  */
-export function startupFailureServer(error: unknown): Server {
+export function startupFailureApp(error: unknown): Express {
   const problems = error instanceof ConfigurationError
     ? error.problems
     : ['The server failed to start. Open the deployment’s function logs in Vercel for details.'];
@@ -24,19 +25,32 @@ ul{background:#fff;border-radius:12px;padding:6px 0;margin:0;list-style:none}li{
 <ul>${problems.map((problem) => `<li>${escape(problem)}</li>`).join('')}</ul>
 <p style="margin-top:20px">Where to get each value: docs/release-audit.md, section 6.</p></main></body></html>`;
 
-  return createServer((request, response) => {
-    const path = (request.url ?? '/').split('?')[0];
+  const app = express();
+  app.use((request, response) => {
+    const path = request.path;
+    const requestId = request.header('x-vercel-id') ?? request.header('x-request-id') ?? null;
+    console.warn('[startup] serving failure response', {
+      requestId,
+      method: request.method,
+      path,
+      status: path === '/health' ? 200 : 503,
+    });
     const json = (status: number, body: unknown) => {
       response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       response.end(JSON.stringify(body));
     };
     if (path === '/health') return json(200, { status: 'ok', ready: false });
     if (path === '/health/ready') return json(503, { status: 'not_configured', problems });
-    if ((request.headers.accept ?? '').includes('text/html')) {
+    if ((request.header('accept') ?? '').includes('text/html')) {
       response.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       response.end(page);
       return;
     }
     json(503, { error: 'This deployment isn’t configured yet.', code: 'not_configured', problems });
   });
+  return app;
+}
+
+export function startupFailureServer(error: unknown): Server {
+  return createServer(startupFailureApp(error));
 }

@@ -386,6 +386,15 @@ test('health: liveness always answers; readiness says exactly what a deployment 
   assert.ok(!JSON.stringify(ready.body).includes(ACCESS_KEY), 'no secrets');
 });
 
+test('the deployed app shell and static assets return through Express', async (t) => {
+  const p = await plane();
+  t.after(p.close);
+  assert.equal((await request(p.app).get('/')).status, 200);
+  assert.equal((await request(p.app).get('/health/ready')).status, 503);
+  assert.equal((await request(p.app).get('/sw.js')).status, 200);
+  assert.equal((await request(p.app).get('/manifest.webmanifest')).status, 200);
+});
+
 test('keep your real number: the assistant line is optional config, and forwarding is proven by a forwarded call', async (t) => {
   const { PhoneNumberService, forwardingCodes } = await import('../src/telephony/phone-number.js');
   type PhoneRecord = { sid: string; phoneNumber: string; voiceUrl: string | null; smsUrl: string | null; statusCallback: string | null };

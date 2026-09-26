@@ -281,6 +281,28 @@ export function createApp(options: AppOptions): express.Express {
     ? options.beforeRequest()
     : options.beforeRequest ?? Promise.resolve();
   const app = express();
+  app.use((request, response, next) => {
+    const startedAt = Date.now();
+    const requestId = request.header('x-vercel-id') ?? request.header('x-request-id');
+    const path = request.path;
+    response.on('finish', () => {
+      console.info('[http]', JSON.stringify({
+        requestId: requestId ?? null,
+        method: request.method,
+        path,
+        status: response.statusCode,
+        durationMs: Date.now() - startedAt,
+        environment: options.release?.environment ?? process.env.NODE_ENV ?? 'development',
+        commit: options.release?.commit ?? null,
+      }));
+    });
+    response.on('close', () => {
+      if (!response.writableEnded) {
+        console.warn('[http] client disconnected', JSON.stringify({ requestId: requestId ?? null, method: request.method, path }));
+      }
+    });
+    next();
+  });
   const providers = createProviderMap(
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
   );
@@ -307,6 +329,12 @@ export function createApp(options: AppOptions): express.Express {
   const ownerDeviceRateLimit = rateLimit({
     windowMs: 60_000,
     limit: 60,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+  });
+  const staticAssetRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 300,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
   });
@@ -1633,28 +1661,28 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
-  app.get('/', (_request, response) => {
+  app.get('/', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
-    response.sendFile('index.html', { root: publicDir });
+    response.sendFile('index.html', { root: publicDir }, next);
   });
   // Deep link from a notification straight into one live conversation (the app loads it, no inbox step).
-  app.get('/conversations/:id/live', (_request, response) => {
+  app.get('/conversations/:id/live', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
-    response.sendFile('index.html', { root: publicDir });
+    response.sendFile('index.html', { root: publicDir }, next);
   });
-  app.get('/sw.js', (_request, response) => {
+  app.get('/sw.js', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Service-Worker-Allowed', '/');
-    response.type('application/javascript').sendFile('sw.js', { root: publicDir });
+    response.type('application/javascript').sendFile('sw.js', { root: publicDir }, next);
   });
-  app.get(/^\/icon-(180|192|512)\.png$/, (request, response) => {
-    response.sendFile(request.path.slice(1), { root: publicDir });
+  app.get(/^\/icon-(180|192|512)\.png$/, staticAssetRateLimit, (request, response, next) => {
+    response.sendFile(request.path.slice(1), { root: publicDir }, next);
   });
-  app.get('/manifest.webmanifest', (_request, response) => {
-    response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir });
+  app.get('/manifest.webmanifest', staticAssetRateLimit, (_request, response, next) => {
+    response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir }, next);
   });
-  app.get('/icon.svg', (_request, response) => {
-    response.sendFile('icon.svg', { root: publicDir });
+  app.get('/icon.svg', staticAssetRateLimit, (_request, response, next) => {
+    response.sendFile('icon.svg', { root: publicDir }, next);
   });
 
   app.post('/conversations/:id/turns', async (request, response, next) => {
@@ -1731,7 +1759,12 @@ export function createApp(options: AppOptions): express.Express {
         return;
       }
 
-      console.error(error);
+      console.error('[http] request failed', JSON.stringify({
+        requestId: _request.header('x-vercel-id') ?? _request.header('x-request-id') ?? null,
+        method: _request.method,
+        path: _request.path,
+        error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error,
+      }));
       response.status(500).json({ error: 'Internal server error' });
     },
   );
