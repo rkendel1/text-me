@@ -98,7 +98,7 @@ export interface AppOptions {
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
   realtimeVoice?: RealtimeVoiceService;
   /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
-  beforeRequest?: Promise<void>;
+  beforeRequest?: Promise<void> | (() => Promise<void>);
   /** Let the assistant answer caller texts itself (production, with the AI SDK text agent). */
   autoReplyToCallerTexts?: boolean;
   /** Owner sign-in sessions (web and iOS share them). */
@@ -277,6 +277,9 @@ function presentRuntime(
 
 export function createApp(options: AppOptions): express.Express {
   if (options.production) assertProductionComposition(options);
+  const ensureReady = (): Promise<void> => typeof options.beforeRequest === 'function'
+    ? options.beforeRequest()
+    : options.beforeRequest ?? Promise.resolve();
   const app = express();
   const providers = createProviderMap(
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
@@ -410,7 +413,7 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/health/ready', async (_request, response) => {
     const checks: Record<string, { ok: boolean; detail?: string }> = {};
     try {
-      await options.beforeRequest;
+      await ensureReady();
       await options.healthCheck?.();
       checks.database = { ok: true, ...(options.healthCheck ? {} : { detail: 'in-memory (not production)' }) };
     } catch (error) {
@@ -428,9 +431,14 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   if (options.beforeRequest) {
-    const ready = options.beforeRequest;
-    app.use((_request, _response, next) => {
-      ready.then(() => next(), next);
+    // The app shell loads even while the database is unavailable; API calls then get a clear 503.
+    const shell = /^\/(?:$|sw\.js$|manifest\.webmanifest$|icon[\w.-]*$|conversations\/[^/]+\/live$|\.well-known\/)/;
+    app.use((request, _response, next) => {
+      if (request.method === 'GET' && shell.test(request.path)) return next();
+      ensureReady().then(() => next(), (error) => {
+        next(new HttpError(503, 'Can’t reach the database right now. Try again in a moment.', 'database_unavailable'));
+        void error;
+      });
     });
   }
   app.use(express.json());

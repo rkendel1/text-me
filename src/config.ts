@@ -90,30 +90,54 @@ function resolveRealtimeVoice(env: NodeJS.ProcessEnv): RealtimeVoiceConfig | und
   };
 }
 
+/** Every configuration problem at once, with what to do about each. Never includes values. */
+export class ConfigurationError extends Error {
+  constructor(readonly problems: string[]) {
+    super(`Configuration incomplete:\n- ${problems.join('\n- ')}`);
+  }
+}
+
+const REQUIRED: Array<[string, string]> = [
+  ['TWILIO_ACCOUNT_SID', 'TWILIO_ACCOUNT_SID is missing (Twilio Console → Account Info)'],
+  ['TWILIO_AUTH_TOKEN', 'TWILIO_AUTH_TOKEN is missing (Twilio Console → Account Info → Auth Token)'],
+  ['OWNER_PHONE_NUMBER', 'OWNER_PHONE_NUMBER is missing (your real mobile number, e.g. +15551112222)'],
+  ['OWNER_AUTH_TOKEN', 'OWNER_AUTH_TOKEN is missing (your access key; make one with: openssl rand -base64 32)'],
+];
+
 export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const problems: string[] = [];
   // Neon's Vercel integration sets DATABASE_URL (pooled) and DATABASE_URL_UNPOOLED;
   // the legacy POSTGRES_* names are accepted too.
   const databaseUrl = env.DATABASE_URL ?? env.POSTGRES_URL;
-  if (!databaseUrl) {
-    throw new Error('DATABASE_URL is required (add Neon from the Vercel Marketplace, or set it manually)');
-  }
+  if (!databaseUrl) problems.push('DATABASE_URL is missing (Vercel → Storage → add Neon and connect it to this project)');
   // TWILIO_PHONE_NUMBER is optional: the account's only number is used as the assistant line.
-  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'OWNER_PHONE_NUMBER', 'OWNER_AUTH_TOKEN'];
-  for (const key of required) {
-    if (!env[key]) throw new Error(`${key} is required`);
+  for (const [key, message] of REQUIRED) {
+    if (!env[key]?.trim()) problems.push(message);
+  }
+  if (env.OWNER_PHONE_NUMBER?.trim() && !/^\+[1-9]\d{6,14}$/.test(env.OWNER_PHONE_NUMBER.trim())) {
+    problems.push('OWNER_PHONE_NUMBER must be in international format with no spaces, e.g. +15551112222');
+  }
+  if (env.TWILIO_PHONE_NUMBER?.trim() && !/^\+[1-9]\d{6,14}$/.test(env.TWILIO_PHONE_NUMBER.trim())) {
+    problems.push('TWILIO_PHONE_NUMBER must be in international format, e.g. +15550000000 (or leave it unset)');
+  }
+  const apnsKeys = ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_BUNDLE_ID'];
+  const apnsSet = apnsKeys.filter((key) => env[key]);
+  if (apnsSet.length && apnsSet.length < apnsKeys.length) {
+    problems.push(`iOS push is partly configured: also set ${apnsKeys.filter((key) => !env[key]).join(', ')} (or remove the APNS_* variables)`);
   }
 
   const production = env.NODE_ENV === 'production' || Boolean(env.VERCEL);
   const aiGateway = resolveAiGateway(env);
   if (production && !aiGateway) {
-    throw new Error('An AI Gateway credential is required in production: set AI_GATEWAY_API_KEY (Vercel deployments use OIDC automatically)');
+    problems.push('An AI Gateway credential is required in production: set AI_GATEWAY_API_KEY (Vercel deployments use OIDC automatically)');
   }
   if (production && env.REALTIME_VOICE === 'off') {
-    throw new Error('REALTIME_VOICE=off isn’t supported in production: calls would get a canned greeting instead of your assistant');
+    problems.push('REALTIME_VOICE=off isn’t supported in production: calls would get a canned greeting instead of your assistant');
   }
   if (production && !/^https:\/\//.test(resolvePublicBaseUrl(env))) {
-    throw new Error('PUBLIC_BASE_URL must be an https URL in production (Twilio calls back to it)');
+    problems.push('PUBLIC_BASE_URL must be an https URL in production (Twilio calls back to it)');
   }
+  if (problems.length) throw new ConfigurationError(problems);
 
   return {
     production,
@@ -121,15 +145,15 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     aiGateway,
     apns: apnsConfigFromEnv(env),
     appleTeamId: env.APNS_TEAM_ID || undefined,
-    databaseUrl,
-    databaseListenUrl: env.DATABASE_URL_UNPOOLED ?? env.POSTGRES_URL_NON_POOLING ?? databaseUrl,
+    databaseUrl: databaseUrl!,
+    databaseListenUrl: env.DATABASE_URL_UNPOOLED ?? env.POSTGRES_URL_NON_POOLING ?? databaseUrl!,
     enableFakeProviderRoutes: !production,
     port: Number(env.PORT ?? '3000'),
     publicBaseUrl: resolvePublicBaseUrl(env),
-    twilioAccountSid: env.TWILIO_ACCOUNT_SID!,
-    twilioAuthToken: env.TWILIO_AUTH_TOKEN!,
-    twilioPhoneNumber: env.TWILIO_PHONE_NUMBER || undefined,
-    ownerPhone: env.OWNER_PHONE_NUMBER!,
+    twilioAccountSid: env.TWILIO_ACCOUNT_SID!.trim(),
+    twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
+    twilioPhoneNumber: env.TWILIO_PHONE_NUMBER?.trim() || undefined,
+    ownerPhone: env.OWNER_PHONE_NUMBER!.trim(),
     ownerId: env.OWNER_ID ?? 'owner',
     ownerAuthToken: env.OWNER_AUTH_TOKEN ?? '',
     realtimeVoice: resolveRealtimeVoice(env),

@@ -55,6 +55,8 @@ feature is never marked PASS just because the code exists.
 | 13 | A real phone number couldn't be used; `TWILIO_PHONE_NUMBER` was required and was the number callers dial | GAP | **PASS**: keep your real number with carrier forwarding (§7) |
 | 14 | Rate limits key on the client IP, which is Vercel's proxy address because `trust proxy` is off, so all clients share one bucket | GAP (minor) | Open. Harmless for a single owner, but sign-in attempts are limited globally (20 per 15 minutes) |
 | 15 | One owner per deployment; no self-serve accounts | GAP (known) | Open, out of scope. Identity is `OWNER_ID`, and every route is scoped to it |
+| 16 | A missing or invalid environment variable crashed the function at load (`INTERNAL_FUNCTION_INVOCATION_FAILED`, seen on the first production deploy) with no explanation | GAP | **PASS**: every problem is reported at once on a setup page and at `/health/ready` (values never shown) |
+| 17 | A failed first database setup (e.g. a Neon cold start) made every later request on that instance fail | GAP | **PASS**: setup is retried on the next request; the app page still loads, and API calls get `503 database_unavailable` |
 
 ### Browser-only and iOS-only assumptions
 

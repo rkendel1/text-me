@@ -68,7 +68,7 @@ export function buildServer(
   const runtimeEventBus = new PostgresRuntimeEventBus(pool, config.databaseListenUrl);
   const authSessions = new PostgresOwnerAuthSessionStore(pool);
 
-  const ready = (async () => {
+  const initialize = async () => {
     await repository.initialize();
     await ownerDeviceStore.initialize();
     await ownerPairings.initialize();
@@ -84,8 +84,20 @@ export function buildServer(
     await surfaceDevices.initialize();
     await appSecrets.initialize();
     await authSessions.initialize();
-  })();
-  ready.catch((error) => console.error('Database initialization failed', error));
+  };
+  // Retried on the next request after a failure (e.g. a database cold start), rather than
+  // failing every request for the lifetime of this instance.
+  let initializing: Promise<void> | undefined;
+  const ensureReady = (): Promise<void> => {
+    initializing ??= initialize().catch((error) => {
+      initializing = undefined;
+      console.error('Database initialization failed', error);
+      throw error;
+    });
+    return initializing;
+  };
+  const ready = ensureReady();
+  ready.catch(() => undefined);
 
   const ownerDeviceService = new OwnerDeviceService(ownerDeviceStore, Date.now, ownerPairings, ownerSessions);
   const ownerConfigurationService = new OwnerConfigurationService(ownerConfigurations);
@@ -154,7 +166,7 @@ export function buildServer(
     realtimeVoice,
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),
-    beforeRequest: ready,
+    beforeRequest: ensureReady,
     authSessionStore: authSessions,
     apnsSender: config.apns ? new HttpApnsSender(config.apns) : undefined,
     appleTeamId: config.appleTeamId,
@@ -168,7 +180,7 @@ export function buildServer(
   realtimeVoice?.attach(server, {
     twilioAuthToken: config.twilioAuthToken,
     publicBaseUrl: config.publicBaseUrl,
-    beforeConnect: ready,
+    beforeConnect: ensureReady,
   });
   return { server, ready };
 }
