@@ -431,7 +431,7 @@ export class RuntimeControlService {
     const current = stored ?? createDefaultRuntime(conversation, baseConfiguration);
     const normalizedState = deriveRuntimeState(conversation);
     const nextState: ConversationRuntime['state'] = conversation.state === 'awaiting_sms_consent'
-      ? 'transferring'
+      ? current.state === 'transferring' ? 'transferring' : 'listening'
       : conversation.state === 'text_active'
         ? 'text_active'
         : conversation.status === 'completed'

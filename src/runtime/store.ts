@@ -95,7 +95,7 @@ export class InMemoryRuntimeOverrideStore implements RuntimeOverrideStore {
 }
 
 export function deriveRuntimeState(conversation: Conversation): InteractionState {
-  if (conversation.state === 'awaiting_sms_consent') return 'transferring';
+  if (conversation.state === 'awaiting_sms_consent') return 'listening';
   if (conversation.state === 'text_active' || conversation.events.some((event) =>
     event.type === 'conversation.channel_transitioned')) return 'text_active';
   if (conversation.status === 'completed') return 'stopped';
