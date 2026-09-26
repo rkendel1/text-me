@@ -142,6 +142,46 @@ Photon and no Messages authorization** anywhere in the account.
 | 22 | Close the app, reopen it (or reload) | `/conversations/<id>/live` rebuilds everything from the API |
 | 23 | At no point is a Mac involved | no `owner.delivery.*` events; no `mac_messages` deliveries |
 
+## Journey J — connect a Mac by QR (optional integration)
+
+The Mac is an executor: it pairs by scanning a code and then follows the
+owner's settings. Nothing is typed on the Mac. Screenshots:
+[`docs/screenshots/qr-pairing`](screenshots/qr-pairing), captured by driving
+the real bridge process (`npm run bridge:macos`) whose camera saw the QR the
+iPhone displayed, against the local production stack.
+
+| # | Step | Expected, and where to verify it |
+|---|---|---|
+| 1 | Settings → Connected devices → **Connect a Mac…** | QR sheet, *Waiting for Mac…*, 5:00 countdown (06). `owner_pairing_credentials` row; QR payload is `attn://pair/<token>?s=<deployment>` only |
+| 2 | On the Mac run the bridge | **Connect this Mac** opens with the camera (07). Nothing to configure |
+| 3 | Hold the iPhone up to the Mac camera | Mac shows *Mac connected* (12); iPhone switches to *Mac connected ✓* within ~1.5 s (08) and continues into Messages setup (09). Credential row deleted; `device.connected` audit |
+| 4 | Pick your own thread as the assistant chat | Only the owner's own thread is offered (09); `assistant.chat.changed` audit; within one sync the Mac shows *Watching Messages* (10) |
+| 5 | **Test Connection** | Five checks pass, *Nothing was sent* (11); no message appears in Messages |
+| 6 | Turn **Apple Messages** off | Mac stops watching without restarting (14); iPhone shows *Connected · Apple Messages off* (15); `owner.channel.disabled` audit; Mac deliveries stop |
+| 7 | Scan the same QR again (another Mac) | Rejected: *That code has expired or was already used* |
+| 8 | Revoke the Mac | Confirm sheet (16); the Mac's next request is 401, it forgets its credential and returns to the scanner with *This Mac was disconnected* (17); `device.revoked` audit |
+| 9 | Connect again with a new code | Works; the Mac is a new active device |
+| 10 | A setting fails to save | *Unable to update setting. Try again.* and the control shows the stored value (05) |
+
+### Real-device acceptance (must be run on hardware)
+
+The automated run above uses a stand-in for Messages. Before release, run it on
+a real Mac and iPhone against the Vercel deployment:
+
+1. Mac with the bridge built (`npm install && npm run build && npm run bridge:macos`).
+   Grant **Full Disk Access** and **Automation → Messages** when macOS asks.
+2. Do steps 1–5 above. Confirm the chat list contains only your own thread.
+3. Place a test call; when the assistant asks you something, confirm the
+   question arrives in your own Messages thread on the Mac and on the iPhone.
+4. Reply in that thread from the iPhone. Confirm the caller hears the answer and
+   the reply appears once in the live conversation (not twice).
+5. Turn Apple Messages off, place another call that needs you: nothing arrives in
+   Messages; the push notification still arrives.
+6. Revoke the Mac. Confirm the bridge returns to the scanner within ~5 s and no
+   further messages are sent from the Mac.
+7. Quit and relaunch the bridge while connected: it reconnects without a new
+   code.
+
 ## Acceptance matrix
 
 | Capability | Required | Local evidence in this PR | Production audit |

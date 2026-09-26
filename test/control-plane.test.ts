@@ -386,3 +386,22 @@ test('settings: defaults, persistence, revisions, conflicts, audit, and owner is
   assert.equal((await request(plane.app).get(`/owner/devices/${other.body.deviceId}/configuration`).set(bridge)).status, 401);
   assert.equal((await request(plane.app).get(`/owner/devices/${deviceId}/configuration`).set(bridge)).status, 200);
 });
+
+test('every Settings control in the owner UI is bound to a real, typed setting', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const start = html.indexOf('function renderSettings()');
+  const settings = html.slice(start, html.indexOf('\n}\n', start)) + html.slice(html.indexOf('function renderMacConfig('), html.indexOf('async function testMac('));
+  const paths = new Set([
+    ...[...settings.matchAll(/\bsw\('([a-z]+\.[A-Za-z]+)'/g)].map((match) => match[1]),
+    ...[...settings.matchAll(/switchHTML\('([a-z]+\.[A-Za-z]+)'/g)].map((match) => match[1]),
+    ...[...settings.matchAll(/(?:textRow|areaRow)\('[^']+', '([a-z]+\.[A-Za-z]+)'/g)].map((match) => match[1]),
+    ...[...settings.matchAll(/choiceRows\('([a-z]+\.[A-Za-z]+)'/g)].map((match) => match[1]),
+  ]);
+  assert.ok(paths.size >= 20, `found only ${paths.size} controls`);
+  const defaults = await new OwnerConfigurationService().get('owner') as unknown as Record<string, Record<string, unknown>>;
+  for (const path of paths) {
+    const [section, key] = path.split('.');
+    assert.ok(section in defaults && key in defaults[section], `Settings control "${path}" has no stored setting`);
+  }
+});

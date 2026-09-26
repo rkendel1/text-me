@@ -20,6 +20,7 @@ import type {
   OwnerMessageDeliveryStore,
 } from '../owner/delivery.js';
 import type { MessagesChat } from '../owner/mac-messages-adapter.js';
+import { migrate } from './schema-lock.js';
 
 interface OwnerDeviceRow {
   id: string;
@@ -163,37 +164,39 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_devices (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        type TEXT NOT NULL,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        setup_status TEXT NOT NULL,
-        health JSONB NOT NULL,
-        messages_identity JSONB,
-        is_primary BOOLEAN NOT NULL DEFAULT FALSE,
-        bridge_version TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ,
-        revoked_at TIMESTAMPTZ
-      )
-    `);
-    await this.pool.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS probe JSONB');
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_messages_chats (
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        chat_id TEXT NOT NULL,
-        service TEXT NOT NULL,
-        display_name TEXT,
-        address TEXT,
-        is_group BOOLEAN NOT NULL DEFAULT FALSE,
-        is_authorized BOOLEAN NOT NULL DEFAULT FALSE,
-        PRIMARY KEY (device_id, chat_id, service)
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_devices (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          status TEXT NOT NULL,
+          setup_status TEXT NOT NULL,
+          health JSONB NOT NULL,
+          messages_identity JSONB,
+          is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+          bridge_version TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ,
+          revoked_at TIMESTAMPTZ
+        )
+      `);
+      await db.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS probe JSONB');
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_messages_chats (
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL,
+          service TEXT NOT NULL,
+          display_name TEXT,
+          address TEXT,
+          is_group BOOLEAN NOT NULL DEFAULT FALSE,
+          is_authorized BOOLEAN NOT NULL DEFAULT FALSE,
+          PRIMARY KEY (device_id, chat_id, service)
+        )
+      `);
+    });
   }
 
   async save(device: OwnerDevice): Promise<void> {
@@ -322,15 +325,17 @@ export class PostgresOwnerPairingCredentialStore implements OwnerPairingCredenti
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_pairing_credentials (
-        device_id TEXT PRIMARY KEY REFERENCES owner_devices(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        credential TEXT NOT NULL UNIQUE,
-        expires_at TIMESTAMPTZ NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_pairing_credentials (
+          device_id TEXT PRIMARY KEY REFERENCES owner_devices(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          credential TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+    });
   }
 
   async save(record: OwnerPairingCredentialRecord): Promise<void> {
@@ -387,15 +392,17 @@ export class PostgresOwnerDeviceSessionStore implements OwnerDeviceSessionStore 
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_device_sessions (
-        token TEXT PRIMARY KEY,
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ NOT NULL
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_device_sessions (
+          token TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    });
   }
 
   async save(record: OwnerDeviceSessionRecord): Promise<void> {
@@ -443,39 +450,41 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configurations (
-        owner_id TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        assistant JSONB NOT NULL,
-        calls JSONB NOT NULL,
-        messages JSONB NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await this.pool.query(
-      "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
-    );
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
-        owner_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        assistant JSONB NOT NULL,
-        calls JSONB NOT NULL,
-        messages JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (owner_id, revision)
-      )
-    `);
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_configuration_audit (
-        owner_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        source TEXT NOT NULL,
-        occurred_at TIMESTAMPTZ NOT NULL
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configurations (
+          owner_id TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL,
+          assistant JSONB NOT NULL,
+          calls JSONB NOT NULL,
+          messages JSONB NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await db.query(
+        "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
+      );
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
+          owner_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          assistant JSONB NOT NULL,
+          calls JSONB NOT NULL,
+          messages JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (owner_id, revision)
+        )
+      `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_configuration_audit (
+          owner_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          type TEXT NOT NULL,
+          source TEXT NOT NULL,
+          occurred_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+    });
   }
 
   async get(ownerId: string): Promise<OwnerConfiguration | null> {
@@ -614,27 +623,29 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_message_deliveries (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        message_id TEXT NOT NULL,
-        body TEXT NOT NULL,
-        correlation_key TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        provider_request_id TEXT,
-        observed_external_id TEXT,
-        replied_external_id TEXT,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL,
-        observed_at TIMESTAMPTZ,
-        replied_at TIMESTAMPTZ,
-        failed_at TIMESTAMPTZ,
-        error TEXT
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_message_deliveries (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          message_id TEXT NOT NULL,
+          body TEXT NOT NULL,
+          correlation_key TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL,
+          provider_request_id TEXT,
+          observed_external_id TEXT,
+          replied_external_id TEXT,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          observed_at TIMESTAMPTZ,
+          replied_at TIMESTAMPTZ,
+          failed_at TIMESTAMPTZ,
+          error TEXT
+        )
+      `);
+    });
   }
 
   async create(input: Omit<OwnerMessageDeliveryRecord, 'id' | 'createdAt' | 'updatedAt' | 'status' | 'correlationKey'> & {

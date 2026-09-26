@@ -7,6 +7,7 @@ import type {
   OwnerAttentionStore,
   OwnerSurfaceDeviceStore,
 } from './stores.js';
+import { migrate } from '../repositories/schema-lock.js';
 
 interface AttentionRow {
   id: string;
@@ -46,27 +47,29 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_attention (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        type TEXT NOT NULL,
-        priority TEXT NOT NULL,
-        title TEXT NOT NULL,
-        body TEXT NOT NULL,
-        actions JSONB NOT NULL DEFAULT '[]'::jsonb,
-        status TEXT NOT NULL,
-        dedupe_key TEXT NOT NULL,
-        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL,
-        updated_at TIMESTAMPTZ NOT NULL,
-        resolved_at TIMESTAMPTZ,
-        UNIQUE (owner_id, dedupe_key)
-      )
-    `);
-    await this.pool.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_owner ON owner_attention (owner_id, created_at DESC)');
-    await this.pool.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_conversation ON owner_attention (conversation_id)');
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_attention (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          priority TEXT NOT NULL,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL,
+          actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+          status TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL,
+          resolved_at TIMESTAMPTZ,
+          UNIQUE (owner_id, dedupe_key)
+        )
+      `);
+      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_owner ON owner_attention (owner_id, created_at DESC)');
+      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_conversation ON owner_attention (conversation_id)');
+    });
   }
 
   async create(attention: OwnerAttention): Promise<OwnerAttention> {
@@ -150,20 +153,22 @@ export class PostgresNotificationDeliveryStore implements NotificationDeliverySt
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS notification_deliveries (
-        id TEXT PRIMARY KEY,
-        attention_id TEXT NOT NULL REFERENCES owner_attention(id) ON DELETE CASCADE,
-        owner_id TEXT NOT NULL,
-        surface TEXT NOT NULL,
-        device_id TEXT,
-        status TEXT NOT NULL,
-        error TEXT,
-        provider_id TEXT,
-        created_at TIMESTAMPTZ NOT NULL
-      )
-    `);
-    await this.pool.query('CREATE INDEX IF NOT EXISTS idx_notification_deliveries_attention ON notification_deliveries (attention_id)');
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+          id TEXT PRIMARY KEY,
+          attention_id TEXT NOT NULL REFERENCES owner_attention(id) ON DELETE CASCADE,
+          owner_id TEXT NOT NULL,
+          surface TEXT NOT NULL,
+          device_id TEXT,
+          status TEXT NOT NULL,
+          error TEXT,
+          provider_id TEXT,
+          created_at TIMESTAMPTZ NOT NULL
+        )
+      `);
+      await db.query('CREATE INDEX IF NOT EXISTS idx_notification_deliveries_attention ON notification_deliveries (attention_id)');
+    });
   }
 
   async record(delivery: NotificationDelivery): Promise<void> {
@@ -228,20 +233,22 @@ export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS owner_surface_devices (
-        id TEXT PRIMARY KEY,
-        owner_id TEXT NOT NULL,
-        platform TEXT NOT NULL,
-        device_token TEXT NOT NULL,
-        capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
-        label TEXT,
-        status TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL,
-        last_seen_at TIMESTAMPTZ NOT NULL,
-        UNIQUE (owner_id, device_token)
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS owner_surface_devices (
+          id TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          device_token TEXT NOT NULL,
+          capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
+          label TEXT,
+          status TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL,
+          last_seen_at TIMESTAMPTZ NOT NULL,
+          UNIQUE (owner_id, device_token)
+        )
+      `);
+    });
   }
 
   async upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice> {
@@ -279,13 +286,15 @@ export class PostgresAppSecretStore implements AppSecretStore {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS app_secrets (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS app_secrets (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+    });
   }
 
   async getOrCreate(key: string, create: () => string): Promise<string> {

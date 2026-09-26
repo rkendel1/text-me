@@ -48,6 +48,7 @@ export async function startConnectServer(agent: ConnectPageAgent, port = 0): Pro
       if (!keyOk(url.searchParams.get('key'))) return send(response, 403, 'text/plain', 'Open this page from the bridge.');
       return send(response, 200, 'text/html; charset=utf-8', connectPage(key));
     }
+    if (url.pathname === '/favicon.ico') return send(response, 204, 'image/x-icon', '');
     if (request.method === 'GET' && url.pathname === '/jsQR.js') {
       return send(response, 200, 'text/javascript', await readFile(jsqrPath, 'utf8'));
     }

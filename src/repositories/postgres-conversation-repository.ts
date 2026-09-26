@@ -13,6 +13,7 @@ import type {
   ConversationRepository,
   CreateConversationInput,
 } from './conversation-repository.js';
+import { migrate } from './schema-lock.js';
 
 interface ConversationRow {
   id: string;
@@ -43,44 +44,46 @@ export class PostgresConversationRepository implements ConversationRepository {
   constructor(private readonly pool: Pool) {}
 
   async initialize(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        provider TEXT NOT NULL,
-        provider_call_id TEXT NOT NULL,
-        caller_phone TEXT NOT NULL,
-        status TEXT NOT NULL,
-        started_at TIMESTAMPTZ NOT NULL,
-        ended_at TIMESTAMPTZ,
-        duration_seconds INTEGER,
-        state TEXT NOT NULL DEFAULT 'voice_active',
-        channels JSONB NOT NULL DEFAULT '["voice"]',
-        primary_channel TEXT NOT NULL DEFAULT 'voice',
-        participants JSONB NOT NULL DEFAULT '[]',
-        owner_id TEXT,
-        last_owner_read_at TIMESTAMPTZ,
-        UNIQUE (provider, provider_call_id)
-      );
-    `);
+    await migrate(this.pool, async (db) => {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS conversations (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          provider_call_id TEXT NOT NULL,
+          caller_phone TEXT NOT NULL,
+          status TEXT NOT NULL,
+          started_at TIMESTAMPTZ NOT NULL,
+          ended_at TIMESTAMPTZ,
+          duration_seconds INTEGER,
+          state TEXT NOT NULL DEFAULT 'voice_active',
+          channels JSONB NOT NULL DEFAULT '["voice"]',
+          primary_channel TEXT NOT NULL DEFAULT 'voice',
+          participants JSONB NOT NULL DEFAULT '[]',
+          owner_id TEXT,
+          last_owner_read_at TIMESTAMPTZ,
+          UNIQUE (provider, provider_call_id)
+        );
+      `);
 
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS conversation_events (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        type TEXT NOT NULL,
-        payload JSONB NOT NULL,
-        occurred_at TIMESTAMPTZ NOT NULL
-      );
-    `);
-    await this.pool.query(`
-      ALTER TABLE conversations
-        ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'voice_active',
-        ADD COLUMN IF NOT EXISTS channels JSONB NOT NULL DEFAULT '["voice"]',
-        ADD COLUMN IF NOT EXISTS primary_channel TEXT NOT NULL DEFAULT 'voice',
-        ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]',
-          ADD COLUMN IF NOT EXISTS owner_id TEXT,
-          ADD COLUMN IF NOT EXISTS last_owner_read_at TIMESTAMPTZ;
-    `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS conversation_events (
+          id TEXT PRIMARY KEY,
+          conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          payload JSONB NOT NULL,
+          occurred_at TIMESTAMPTZ NOT NULL
+        );
+      `);
+      await db.query(`
+        ALTER TABLE conversations
+          ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'voice_active',
+          ADD COLUMN IF NOT EXISTS channels JSONB NOT NULL DEFAULT '["voice"]',
+          ADD COLUMN IF NOT EXISTS primary_channel TEXT NOT NULL DEFAULT 'voice',
+          ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]',
+            ADD COLUMN IF NOT EXISTS owner_id TEXT,
+            ADD COLUMN IF NOT EXISTS last_owner_read_at TIMESTAMPTZ;
+      `);
+    });
   }
 
   async createIfAbsent(

@@ -128,7 +128,24 @@ for web.
 Streams are a projection of state in Neon, not a source of truth. After any
 event, re-read the conversation with `GET /conversations/:id`.
 
-## 7. Diagnostics (not consumer UI)
+## 7. Settings and connected devices
+
+| Route | |
+|---|---|
+| `GET /owner/configuration` | Typed settings: `assistant`, `calls`, `messages`, with a `revision` |
+| `PATCH /owner/configuration` | Change any fields; optional `expectedRevision` (`409` if stale). Unknown sections are `400`. The response is what was stored: render it, not the tap |
+| `POST /owner/devices/pair/qr` | `{ deviceId, qrDataUrl, expiresAt }`. The QR holds only `attn://pair/<single-use token>?s=<deployment>`; it expires in 5 minutes |
+| `GET /owner/devices/pair/:deviceId` | `{ status: pending \| active \| revoked }`, polled while the QR is shown |
+| `GET /owner/devices` | Macs with `online`, `health` (what the Mac measured), `assistantChat`, `discoveredChats` (the owner's own thread only), `lastSeenAt`, `probe` |
+| `POST /owner/devices/:id/messages/chat` | Choose the assistant chat |
+| `POST /owner/devices/:id/test` | Test connection (`202`); the Mac answers on its next sync and `probe.result` appears. Nothing visible is sent |
+| `POST /owner/devices/:id/revoke` | Immediate: the Mac's next request is `401` |
+
+The Mac itself only reads: `GET /owner/devices/:id/configuration` (by
+revision), and reports health, chats, probe results and deliveries. It can't
+change owner settings.
+
+## 8. Diagnostics (not consumer UI)
 
 `GET /conversations/:id/audit` returns the full id-linked timeline:
 conversation, turn, response, command, attention, notification delivery and
