@@ -12,6 +12,7 @@ Copy `.env.example` and set:
 - `TWILIO_PHONE_NUMBER`
 - `OWNER_PHONE_NUMBER`
 - `PUBLIC_BASE_URL`
+- `OWNER_AUTH_TOKEN`
 
 ## Run locally
 
@@ -37,6 +38,25 @@ When `NODE_ENV` is not `production`, local webhook simulation is also available:
 
 - `POST /webhooks/fake/voice`
 - `POST /webhooks/fake/status`
+
+
+## Mac bridge runtime
+
+The production backend now persists owner devices, pairing credentials, device sessions,
+configuration revisions, authorized chats, and queued Mac Messages deliveries in the
+same PostgreSQL database as conversations.
+
+To run the macOS bridge against a real backend after building:
+
+```bash
+BACKEND_URL=http://localhost:3000 \
+PAIRING_CREDENTIAL='attn://pair/...' \
+PHOTON_CLIENT_MODULE=/absolute/path/to/photon-client.js \
+npm run bridge:macos
+```
+
+The bridge stores its restart-safe session token and message checkpoint locally and
+reuses them on reboot.
 
 ## Test
 

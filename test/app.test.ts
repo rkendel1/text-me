@@ -19,6 +19,10 @@ import { FakeConversationModel } from '../src/conversation/fake-model.js';
 import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
 import { FakeVoiceProvider } from '../src/voice/fake-provider.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
+import { FakeMacMessagesAdapter } from '../src/owner/fake-mac-messages-adapter.js';
+import { OwnerDeviceService } from '../src/owner/device.js';
+import { OwnerConfigurationService } from '../src/owner/configuration.js';
+import { InMemoryOwnerMessageDeliveryStore, QueuedMacMessagesOwnerChannel } from '../src/owner/delivery.js';
 
 class InMemoryConversationRepository implements ConversationRepository {
   private readonly conversations = new Map<string, Conversation>();
@@ -410,6 +414,36 @@ test('text-active turns use messaging instead of voice', async () => {
   assert.equal(messaging.sentMessages.length, 3);
 });
 
+
+test('QR pairing route returns a scannable QR image payload', async () => {
+  const repository = new InMemoryConversationRepository();
+  const app = createApp({ repository });
+
+  const pair = await request(app)
+    .post('/owner/devices/pair/qr')
+    .send({ name: 'Audit Mac' });
+
+  assert.equal(pair.status, 201, JSON.stringify(pair.body));
+  assert.match(pair.body.qrDataUrl, /^data:image\/png;base64,/);
+  assert.equal(typeof pair.body.pairingUri, 'string');
+});
+
+
+test('QR pairing route surfaces QR generation failures as an error response', async () => {
+  const repository = new InMemoryConversationRepository();
+  const app = createApp({
+    repository,
+    qrCodeDataUrl: async () => { throw new Error('QR unavailable'); },
+  });
+
+  const pair = await request(app)
+    .post('/owner/devices/pair/qr')
+    .send({ name: 'Audit Mac' });
+
+  assert.equal(pair.status, 500, JSON.stringify(pair.body));
+  assert.deepEqual(pair.body, { error: 'Internal server error' });
+});
+
 test('global device activation route works without priming the per-device activation route', async () => {
   const repository = new InMemoryConversationRepository();
   const app = createApp({ repository });
@@ -425,6 +459,160 @@ test('global device activation route works without priming the per-device activa
   assert.equal(activate.status, 200, JSON.stringify(activate.body));
   assert.equal(activate.body.device.id, pair.body.deviceId);
   assert.equal(typeof activate.body.sessionToken, 'string');
+});
+
+
+
+test('device delivery queue and Mac replies bridge owner messages back to the caller', async () => {
+  const repository = new InMemoryConversationRepository();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'mac-1',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  await repository.appendEvent(created.conversation.id, 'speech.transcript', {
+    callbackId: 'voice-summary',
+    speaker: 'caller',
+    text: 'Friday lunch',
+    sequence: 1,
+  }, new Date());
+  await repository.appendEvent(created.conversation.id, 'sms.consent.granted', {
+    phoneNumber: '+15555550123',
+    displayName: 'John',
+  }, new Date());
+  await repository.updateStatus(created.conversation.id, 'answered', { state: 'awaiting_sms_consent' });
+
+  const messaging = new FakeMessagingProvider();
+  const adapter = new FakeMacMessagesAdapter();
+  adapter.chats = [{ id: 'assistant-chat', service: 'imessage', displayName: 'Assistant', address: 'assistant@example.test' }];
+  const ownerDevices = new OwnerDeviceService();
+  const ownerConfiguration = new OwnerConfigurationService();
+  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const pair = await ownerDevices.pair('randy', 'Randy Mac');
+  const activation = await ownerDevices.activate(pair.device.id, pair.pairingCode);
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.discoverChats(activation.sessionToken, adapter);
+  await ownerDevices.authorizeChat('randy', pair.device.id, 'assistant-chat', 'imessage');
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.setPrimary('randy', pair.device.id);
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
+    ownerDeviceService: ownerDevices,
+    ownerConfigurationService: ownerConfiguration,
+    ownerDeliveryStore: ownerDeliveries,
+    ownerMessagesAdapter: adapter,
+    messagingProvider: messaging,
+    conversationModel: new FakeConversationModel(['Randy says Friday at 2 works.']),
+  });
+  const auth = { Authorization: 'Bearer ' + activation.sessionToken };
+
+  const converted = await request(app).post(`/conversations/${created.conversation.id}/convert-to-text`);
+  assert.equal(converted.status, 200, JSON.stringify(converted.body));
+  assert.equal(messaging.sentMessages.length, 1);
+  assert.equal(messaging.sentMessages[0]?.to, '+15555550123');
+
+  const pending = await request(app)
+    .get(`/owner/devices/${pair.device.id}/deliveries`)
+    .set(auth);
+  assert.equal(pending.status, 200, JSON.stringify(pending.body));
+  assert.equal(pending.body.length, 1);
+
+  const requested = await request(app)
+    .post(`/owner/devices/${pair.device.id}/deliveries/${pending.body[0].id}/requested`)
+    .set(auth)
+    .send({ providerRequestId: 'request-1' });
+  assert.equal(requested.status, 200, JSON.stringify(requested.body));
+
+  const observed = await request(app)
+    .post(`/owner/devices/${pair.device.id}/deliveries/${pending.body[0].id}/observed`)
+    .set(auth)
+    .send({ externalId: 'request-1' });
+  assert.equal(observed.status, 200, JSON.stringify(observed.body));
+  const sentEvent = (await repository.getById(created.conversation.id))!.events.find((event) => event.type === 'owner.delivery.sent');
+  assert.deepEqual(sentEvent?.payload, {
+    messageId: pending.body[0].messageId,
+    deliveryId: pending.body[0].id,
+    externalId: 'request-1',
+    providerRequestId: 'request-1',
+    source: 'macos_messages',
+  });
+
+  const reply = await request(app)
+    .post(`/owner/devices/${pair.device.id}/messages/replies`)
+    .set(auth)
+    .send({ externalId: 'reply-1', body: 'Friday at 2 works.', deliveryId: pending.body[0].id, replyToExternalId: 'request-1' });
+  assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  assert.equal(messaging.sentMessages.length, 2);
+  assert.equal(messaging.sentMessages[1]?.body, 'Randy says Friday at 2 works.');
+  assert.equal(reply.body.messages.some((message: { role: string; body: string }) =>
+    message.role === 'owner' && message.body === 'Friday at 2 works.'), true);
+  assert.equal(reply.body.messages.some((message: { role: string; body: string }) =>
+    message.role === 'assistant' && message.body === 'Randy says Friday at 2 works.'), true);
+});
+
+
+test('delivery failure route records a durable owner delivery failure event', async () => {
+  const repository = new InMemoryConversationRepository();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'mac-failure',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  await repository.appendEvent(created.conversation.id, 'sms.consent.granted', {
+    phoneNumber: '+15555550123',
+  }, new Date());
+  await repository.updateStatus(created.conversation.id, 'answered', { state: 'awaiting_sms_consent' });
+
+  const messaging = new FakeMessagingProvider();
+  const adapter = new FakeMacMessagesAdapter();
+  adapter.chats = [{ id: 'assistant-chat', service: 'imessage', displayName: 'Assistant', address: 'assistant@example.test' }];
+  const ownerDevices = new OwnerDeviceService();
+  const ownerConfiguration = new OwnerConfigurationService();
+  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const pair = await ownerDevices.pair('randy', 'Randy Mac');
+  const activation = await ownerDevices.activate(pair.device.id, pair.pairingCode);
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.discoverChats(activation.sessionToken, adapter);
+  await ownerDevices.authorizeChat('randy', pair.device.id, 'assistant-chat', 'imessage');
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.setPrimary('randy', pair.device.id);
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
+    ownerDeviceService: ownerDevices,
+    ownerConfigurationService: ownerConfiguration,
+    ownerDeliveryStore: ownerDeliveries,
+    ownerMessagesAdapter: adapter,
+    messagingProvider: messaging,
+  });
+  const auth = { Authorization: 'Bearer ' + activation.sessionToken };
+
+  await request(app).post(`/conversations/${created.conversation.id}/convert-to-text`);
+  const pending = await request(app)
+    .get(`/owner/devices/${pair.device.id}/deliveries`)
+    .set(auth);
+  const failed = await request(app)
+    .post(`/owner/devices/${pair.device.id}/deliveries/${pending.body[0].id}/failed`)
+    .set(auth)
+    .send({ error: 'Messages.app unavailable' });
+
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  const failureEvent = (await repository.getById(created.conversation.id))!.events.find((event) => event.type === 'owner.delivery.failed');
+  assert.deepEqual(failureEvent?.payload, {
+    messageId: pending.body[0].messageId,
+    deliveryId: pending.body[0].id,
+    error: 'Messages.app unavailable',
+    source: 'macos_messages',
+  });
 });
 
 test('authenticated owner inbox authorizes and mediates web messages', async () => {

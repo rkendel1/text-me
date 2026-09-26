@@ -52,13 +52,14 @@ test('macOS bridge filters chats and deduplicates observed owner replies', async
   });
 
   await bridge.start();
-  bridge.trackDelivery('delivery-1', 'John called about Friday.');
+  const sendResult = await adapter.send({ recipient: 'assistant-chat', body: 'John called about Friday.' });
+  bridge.trackDelivery('delivery-1', sendResult.providerRequestId);
   await adapter.observe({
     chatId: 'assistant-chat',
     sender: 'assistant',
     body: 'John called about Friday.',
     direction: 'outgoing',
-    externalId: 'message-out',
+    externalId: sendResult.providerRequestId,
     cursor: '0',
   });
   await adapter.observe({
@@ -79,6 +80,7 @@ test('macOS bridge filters chats and deduplicates observed owner replies', async
     body: 'Friday at 2 works.',
     direction: 'incoming',
     externalId: 'message-1',
+    replyToExternalId: sendResult.providerRequestId,
     cursor: '3',
   });
   await adapter.observe({
@@ -91,7 +93,7 @@ test('macOS bridge filters chats and deduplicates observed owner replies', async
   });
 
   assert.deepEqual(received, ['assistant-chat:message-1:Friday at 2 works.']);
-  assert.deepEqual(confirmed, ['delivery-1:message-out']);
+  assert.deepEqual(confirmed, [`delivery-1:${sendResult.providerRequestId}`]);
   assert.equal(cursor, '3');
   await bridge.stop();
 });
@@ -134,13 +136,59 @@ test('QR pairing is opaque, single-use, and device readiness requires explicit c
   assert.equal(ready.setupStatus, 'ready');
 });
 
-test('owner configuration is typed, revisioned, and channel toggles are durable', () => {
+
+test('owner configuration update surfaces optimistic concurrency conflicts', async () => {
+  class ConflictStore {
+    private configuration = {
+      ownerId: 'randy',
+      revision: 1,
+      assistant: {
+        assistantName: 'Assistant',
+        greeting: "Hi, this is Randy's assistant. How can I help?",
+        ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
+        tone: 'friendly' as const,
+        responseStyle: 'concise' as const,
+      },
+      calls: {
+        answerCalls: true,
+        collectCallerName: true,
+        collectReason: true,
+        offerSmsTransition: true,
+        requireSmsConsent: true,
+        voicemailFallback: false,
+      },
+      messages: {
+        webEnabled: true,
+        macosMessagesEnabled: true,
+        notifyOwner: true,
+        interruptOnlyWhenNeeded: true,
+        includeSummary: true,
+        includeSuggestedResponse: true,
+      },
+    };
+    async get() { return structuredClone(this.configuration); }
+    async create() {}
+    async update(_configuration: any, previousRevision: number) {
+      this.configuration.revision = 2;
+      if (previousRevision !== this.configuration.revision) throw new Error('Owner configuration update conflict');
+    }
+    async events() { return []; }
+  }
+
+  const service = new OwnerConfigurationService(new ConflictStore() as never);
+  await assert.rejects(
+    service.update('randy', { messages: { macosMessagesEnabled: false } }),
+    /Owner configuration update conflict/,
+  );
+});
+
+test('owner configuration is typed, revisioned, and channel toggles are durable', async () => {
   const service = new OwnerConfigurationService();
-  const initial = service.get('randy');
+  const initial = await service.get('randy');
   assert.equal(initial.messages.macosMessagesEnabled, true);
-  const updated = service.update('randy', { messages: { macosMessagesEnabled: false } });
+  const updated = await service.update('randy', { messages: { macosMessagesEnabled: false } });
   assert.equal(updated.revision, initial.revision + 1);
-  assert.equal(service.isChannelEnabled('randy', 'macos_messages'), false);
-  assert.equal(service.get('other').messages.macosMessagesEnabled, true);
-  assert.equal(service.events('randy')[0].type, 'owner.channel.disabled');
+  assert.equal(await service.isChannelEnabled('randy', 'macos_messages'), false);
+  assert.equal((await service.get('other')).messages.macosMessagesEnabled, true);
+  assert.equal((await service.events('randy')).at(-1)?.type, 'owner.channel.disabled');
 });
