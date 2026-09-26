@@ -4,6 +4,7 @@ import { HttpError } from '../errors.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 import type {
   IncomingCall,
+  IncomingSms,
   ProviderResponse,
   StatusUpdate,
   TelephonyProvider,
@@ -77,6 +78,17 @@ export class TwilioProvider implements TelephonyProvider {
     }
 
     throw new HttpError(400, `Unsupported Twilio call status: ${callStatus}`);
+  }
+
+  parseIncomingSms(payload: unknown): IncomingSms {
+    const record = asRecord(payload);
+    return {
+      provider: this.name,
+      providerMessageId: requiredString(record, 'MessageSid'),
+      from: normalizePhoneNumber(requiredString(record, 'From')),
+      body: requiredString(record, 'Body'),
+      payload: record,
+    };
   }
 
   answerCall(): ProviderResponse {

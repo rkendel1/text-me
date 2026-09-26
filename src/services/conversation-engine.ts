@@ -3,6 +3,7 @@ import type { ConversationRepository } from '../repositories/conversation-reposi
 import type { ConversationModel, ConversationTurn } from '../conversation/model.js';
 import type { AudioInput, SpeechProvider } from '../speech/provider.js';
 import type { VoiceProvider } from '../voice/provider.js';
+import type { MessagingProvider } from '../messaging/provider.js';
 
 const turnEvents = new Set(['speech.transcript', 'ai.response']);
 
@@ -12,6 +13,7 @@ export class ConversationEngine {
     private readonly speech: SpeechProvider,
     private readonly model: ConversationModel,
     private readonly voice: VoiceProvider,
+    private readonly messaging?: MessagingProvider,
   ) {}
 
   async respond(conversationId: string, input: AudioInput): Promise<Conversation> {
@@ -54,6 +56,32 @@ export class ConversationEngine {
       new Date(),
     );
     const text = await this.model.respond(history);
+    const currentConversation = await this.requireConversation(conversationId);
+    if (currentConversation.state === 'text_active' || currentConversation.events.some(
+      (event) => event.type === 'conversation.channel_transitioned',
+    )) {
+      const consent = [...currentConversation.events].reverse().find(
+        (event) => event.type === 'sms.consent.granted',
+      );
+      if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
+        throw new Error('SMS destination is unavailable');
+      }
+      const idempotencyKey = `conversation:${conversationId}:sms:turn:${input.callbackId}`;
+      const result = await this.messaging.sendMessage({
+        to: consent.payload.phoneNumber,
+        body: text,
+        idempotencyKey,
+      });
+      await this.repository.appendEvent(conversationId, 'assistant.message', {
+        text, channel: 'sms', idempotencyKey, providerMessageId: result.providerMessageId,
+      }, new Date());
+      await this.repository.appendEvent(conversationId, 'sms.sent', {
+        to: consent.payload.phoneNumber, body: text, idempotencyKey,
+        providerMessageId: result.providerMessageId,
+      }, new Date());
+      return this.requireConversation(conversationId);
+    }
+
     await this.repository.appendEvent(
       conversationId,
       'ai.response',

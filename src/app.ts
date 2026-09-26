@@ -14,6 +14,9 @@ import { FakeSpeechProvider } from './speech/fake-provider.js';
 import type { SpeechProvider } from './speech/provider.js';
 import { FakeVoiceProvider } from './voice/fake-provider.js';
 import type { VoiceProvider } from './voice/provider.js';
+import type { MessagingProvider } from './messaging/provider.js';
+import { FakeMessagingProvider } from './messaging/fake-provider.js';
+import twilio from 'twilio';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -22,6 +25,9 @@ export interface AppOptions {
   speechProvider?: SpeechProvider;
   conversationModel?: ConversationModel;
   voiceProvider?: VoiceProvider;
+  messagingProvider?: MessagingProvider;
+  ownerPhone?: string;
+  twilioAuthToken?: string;
 }
 
 function createProviderMap(
@@ -74,25 +80,51 @@ export function createApp(options: AppOptions): express.Express {
   const providers = createProviderMap(
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
   );
-  const service = new ConversationService(options.repository);
+  const messaging = options.messagingProvider ?? new FakeMessagingProvider();
+  const service = new ConversationService(options.repository, messaging, options.ownerPhone);
   const engine = new ConversationEngine(
     options.repository,
     options.speechProvider ?? new FakeSpeechProvider(),
     options.conversationModel ?? new FakeConversationModel(),
     options.voiceProvider ?? new FakeVoiceProvider(),
+    messaging,
   );
   const fakeRoutesEnabled = options.includeFakeProviderRoutes ?? true;
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  const twilio = providers.get('twilio');
-  if (!twilio) {
+  if (options.twilioAuthToken) {
+    app.use((request, _response, next) => {
+      if (!request.path.startsWith('/webhooks/twilio/')) return next();
+      const signature = request.header('X-Twilio-Signature');
+      const url = `${request.protocol}://${request.get('host')}${request.originalUrl}`;
+      if (!signature || !twilio.validateRequest(options.twilioAuthToken!, signature, url, request.body)) {
+        next(new HttpError(403, 'Invalid webhook signature'));
+        return;
+      }
+      next();
+    });
+  }
+
+  const twilioProvider = providers.get('twilio');
+  if (!twilioProvider) {
     throw new Error('Twilio provider is required');
   }
 
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilio, service);
-  registerStatusRoute(app, '/webhooks/twilio/status', twilio, service);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service);
+  registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
+
+  app.post('/webhooks/twilio/sms', async (request, response, next) => {
+    try {
+      if (!twilioProvider.parseIncomingSms) throw new HttpError(501, 'SMS is not supported');
+      const message = twilioProvider.parseIncomingSms(request.body);
+      const conversation = await service.receiveSms(message);
+      response.json(presentConversation(conversation));
+    } catch (error) {
+      next(error);
+    }
+  });
 
   if (fakeRoutesEnabled) {
     const fake = providers.get('fake');
@@ -137,6 +169,32 @@ export function createApp(options: AppOptions): express.Express {
       const conversation = await engine.respond(request.params.id, {
         callbackId,
         audio: request.body?.audio,
+      });
+
+      app.post('/conversations/:id/convert-to-text', async (request, response, next) => {
+        try {
+          const conversation = await service.convertToTextConversation(request.params.id);
+          response.json(presentConversation(conversation));
+        } catch (error) {
+          next(error);
+        }
+      });
+
+      app.post('/conversations/:id/sms-consent', async (request, response, next) => {
+        try {
+          const phone = request.body?.phoneNumber ?? request.body?.phone;
+          if (typeof phone !== 'string' || !phone.trim()) {
+            throw new HttpError(400, 'Missing required field: phoneNumber');
+          }
+          const conversation = await service.grantSmsConsent(
+            request.params.id,
+            phone,
+            typeof request.body?.displayName === 'string' ? request.body.displayName : undefined,
+          );
+          response.json(presentConversation(conversation));
+        } catch (error) {
+          next(error);
+        }
       });
       response.json(presentConversation(conversation));
     } catch (error) {

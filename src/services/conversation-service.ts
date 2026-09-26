@@ -1,7 +1,9 @@
 import type { Conversation, ConversationStatus } from '../domain/conversation.js';
 import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
-import type { IncomingCall, StatusUpdate } from '../telephony/provider.js';
+import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provider.js';
+import type { MessagingProvider } from '../messaging/provider.js';
+import { normalizePhoneNumber } from '../lib/phone.js';
 
 const allowedTransitions: Record<ConversationStatus, ConversationStatus[]> = {
   received: ['answered'],
@@ -17,7 +19,11 @@ function canTransition(
 }
 
 export class ConversationService {
-  constructor(private readonly repository: ConversationRepository) {}
+  constructor(
+    private readonly repository: ConversationRepository,
+    private readonly messaging?: MessagingProvider,
+    private readonly ownerPhone = process.env.OWNER_PHONE_NUMBER,
+  ) {}
 
   async incomingCall(input: IncomingCall): Promise<Conversation> {
     const occurredAt = new Date();
@@ -39,6 +45,124 @@ export class ConversationService {
     }
 
     return this.requireConversation(created.conversation.id);
+  }
+
+  async grantSmsConsent(
+    conversationId: string,
+    smsPhone: string,
+    displayName?: string,
+  ): Promise<Conversation> {
+    const conversation = await this.requireConversation(conversationId);
+    const phone = normalizePhoneNumber(smsPhone);
+    await this.repository.appendEvent(
+      conversationId,
+      'sms.consent.granted',
+      { phoneNumber: phone, displayName },
+      new Date(),
+    );
+    await this.repository.updateStatus(conversationId, conversation.status, {
+      state: 'awaiting_sms_consent',
+    });
+    return this.requireConversation(conversationId);
+  }
+
+  async convertToTextConversation(conversationId: string): Promise<Conversation> {
+    if (!this.messaging) throw new Error('Messaging provider is required');
+    const conversation = await this.requireConversation(conversationId);
+    if (conversation.state === 'text_active' || conversation.events.some(
+      (event) => event.type === 'conversation.channel_transitioned',
+    )) return conversation;
+    const consent = [...conversation.events]
+      .reverse()
+      .find((event) => event.type === 'sms.consent.granted');
+    if (!consent || typeof consent.payload.phoneNumber !== 'string') {
+      throw new HttpError(409, 'SMS consent is required');
+    }
+
+    const summary = this.voiceSummary(conversation);
+    if (!conversation.events.some((event) => event.type === 'conversation.summary.created')) {
+      await this.repository.appendEvent(conversationId, 'conversation.summary.created', {
+        summary,
+        source: 'voice',
+      }, new Date());
+    }
+
+    const callerKey = `conversation:${conversationId}:sms:introduction`;
+    const ownerKey = `conversation:${conversationId}:sms:owner-summary`;
+    await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
+      `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
+    if (!this.ownerPhone) throw new HttpError(409, 'Owner phone number is not configured');
+    await this.sendOnce(conversationId, ownerKey, this.ownerPhone,
+      `${consent.payload.displayName ?? 'Someone'} called about ${summary} Reply here and I'll take care of the conversation with them.`);
+
+    await this.repository.appendEvent(conversationId, 'conversation.channel_transitioned', {
+      from: 'voice',
+      to: 'sms',
+      reason: 'owner_prefers_text',
+    }, new Date());
+    await this.repository.updateStatus(conversationId, conversation.status, { state: 'text_active' });
+    return this.requireConversation(conversationId);
+  }
+
+  async receiveSms(input: IncomingSms): Promise<Conversation> {
+    const conversations = await this.repository.list();
+    const conversation = conversations.find((candidate) => {
+      if (candidate.state !== 'text_active' && !candidate.events.some(
+        (event) => event.type === 'conversation.channel_transitioned',
+      )) return false;
+      const consent = [...candidate.events].reverse().find(
+        (event) => event.type === 'sms.consent.granted',
+      );
+      return consent?.payload.phoneNumber === input.from ||
+        (this.ownerPhone === input.from && candidate.callerPhone !== input.from);
+    });
+    if (!conversation) throw new HttpError(404, 'Conversation not found');
+    if (conversation.events.some(
+      (event) => event.type === 'sms.received' &&
+        event.payload.providerMessageId === input.providerMessageId,
+    )) return conversation;
+
+    const owner = this.ownerPhone === input.from;
+    await this.repository.appendEvent(conversation.id, 'sms.received', {
+      providerMessageId: input.providerMessageId, from: input.from, body: input.body,
+    }, new Date());
+    await this.repository.appendEvent(conversation.id, owner ? 'owner.message' : 'caller.message', {
+      providerMessageId: input.providerMessageId, speaker: owner ? 'owner' : 'caller',
+      text: input.body, channel: 'sms',
+    }, new Date());
+    return this.requireConversation(conversation.id);
+  }
+
+  private voiceSummary(conversation: Conversation): string {
+    const transcript = conversation.events.find((event) => event.type === 'speech.transcript');
+    return transcript ? String(transcript.payload.text) : 'their request';
+  }
+
+  private async sendOnce(
+    conversationId: string,
+    key: string,
+    to: string,
+    body: string,
+  ): Promise<void> {
+    const conversation = await this.requireConversation(conversationId);
+    const sent = conversation.events.find(
+      (event) => event.type === 'sms.sent' && event.payload.idempotencyKey === key,
+    );
+    if (sent) return;
+    try {
+      const result = await this.messaging!.sendMessage({ to, body, idempotencyKey: key });
+      await this.repository.appendEvent(conversationId, 'sms.sent', {
+        to, body, idempotencyKey: key, providerMessageId: result.providerMessageId,
+      }, new Date());
+      await this.repository.appendEvent(conversationId, 'sms.invitation.sent', {
+        to, idempotencyKey: key, providerMessageId: result.providerMessageId,
+      }, new Date());
+    } catch (error) {
+      await this.repository.appendEvent(conversationId, 'sms.invitation.failed', {
+        to, idempotencyKey: key, error: error instanceof Error ? error.message : 'unknown',
+      }, new Date());
+      throw error;
+    }
   }
 
   async answerCall(

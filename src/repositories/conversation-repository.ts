@@ -1,4 +1,4 @@
-import type { Conversation, ConversationStatus } from '../domain/conversation.js';
+import type { Conversation, ConversationState, ConversationStatus } from '../domain/conversation.js';
 
 export interface CreateConversationInput {
   provider: string;
@@ -31,6 +31,7 @@ export interface ConversationRepository {
     patch: {
       endedAt?: Date | null;
       durationSeconds?: number | null;
+      state?: ConversationState;
     },
   ): Promise<void>;
 }

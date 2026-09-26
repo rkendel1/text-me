@@ -18,6 +18,7 @@ import { TwilioProvider } from '../src/telephony/twilio-provider.js';
 import { FakeConversationModel } from '../src/conversation/fake-model.js';
 import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
 import { FakeVoiceProvider } from '../src/voice/fake-provider.js';
+import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 
 class InMemoryConversationRepository implements ConversationRepository {
   private readonly conversations = new Map<string, Conversation>();
@@ -316,4 +317,64 @@ test('fake providers run ordered, idempotent conversational turns', async () => 
   assert.equal(duplicate.status, 200);
   assert.equal(duplicate.body.events.length, turn.body.events.length);
   assert.equal(voice.outputs.length, 1);
+});
+
+test('voice conversations bridge to one idempotent SMS conversation', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const app = createApp({
+    repository,
+    messagingProvider: messaging,
+    ownerPhone: '+15555550000',
+    speechProvider: new FakeSpeechProvider(),
+    conversationModel: new FakeConversationModel(['I can help with that.']),
+  });
+  const call = await request(app).post('/webhooks/fake/voice')
+    .send({ callId: 'bridge-1', callerPhone: '+15555550123' });
+  const id = (await request(app).get('/conversations')).body[0].id;
+  await request(app).post(`/conversations/${id}/turns`)
+    .send({ callbackId: 'bridge-turn', audio: 'Move tomorrow meeting to Friday.' });
+  await request(app).post(`/conversations/${id}/sms-consent`)
+    .send({ phoneNumber: '+15555550123', displayName: 'John' });
+
+  const first = await request(app).post(`/conversations/${id}/convert-to-text`);
+  const second = await request(app).post(`/conversations/${id}/convert-to-text`);
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(messaging.sentMessages.length, 2);
+  assert.equal(first.body.id, second.body.id);
+  assert.equal(first.body.primaryChannel, 'sms');
+  assert.deepEqual(first.body.channels, ['voice', 'sms']);
+  assert.equal(first.body.state, 'text_active');
+});
+
+test('text-active turns use messaging instead of voice', async () => {
+  const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
+  const voice = new FakeVoiceProvider();
+  const app = createApp({
+    repository,
+    messagingProvider: messaging,
+    ownerPhone: '+15555550000',
+    voiceProvider: voice,
+    speechProvider: new FakeSpeechProvider(),
+    conversationModel: new FakeConversationModel(['SMS reply']),
+  });
+  const call = await request(app).post('/webhooks/fake/voice')
+    .send({ callId: 'bridge-2', callerPhone: '+15555550123' });
+  const id = (await request(app).get('/conversations')).body[0].id;
+  await request(app).post(`/conversations/${id}/turns`)
+    .send({ callbackId: 'pre-bridge', audio: 'I need help.' });
+  await request(app).post(`/conversations/${id}/sms-consent`)
+    .send({ phoneNumber: '+15555550123' });
+  const bridge = await request(app).post(`/conversations/${id}/convert-to-text`);
+  assert.equal(bridge.status, 200, JSON.stringify(bridge.body));
+  assert.equal((await request(app).get(`/conversations/${id}`)).body.state, 'text_active');
+  voice.outputs.length = 0;
+  await request(app).post(`/conversations/${id}/turns`)
+    .send({ callbackId: 'sms-turn', audio: 'Friday works.' });
+
+  assert.equal(voice.outputs.length, 0);
+  assert.equal(messaging.sentMessages.length, 3);
 });

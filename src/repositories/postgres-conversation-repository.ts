@@ -2,7 +2,10 @@ import type { Pool } from 'pg';
 
 import type {
   Conversation,
+  ConversationChannel,
   ConversationEvent,
+  ConversationParticipant,
+  ConversationState,
   ConversationStatus,
 } from '../domain/conversation.js';
 import { createConversationId, createEventId } from '../lib/ids.js';
@@ -20,6 +23,10 @@ interface ConversationRow {
   started_at: Date;
   ended_at: Date | null;
   duration_seconds: number | null;
+  state: ConversationState | null;
+  channels: ConversationChannel[] | null;
+  primary_channel: ConversationChannel | null;
+  participants: ConversationParticipant[] | null;
 }
 
 interface EventRow {
@@ -44,6 +51,10 @@ export class PostgresConversationRepository implements ConversationRepository {
         started_at TIMESTAMPTZ NOT NULL,
         ended_at TIMESTAMPTZ,
         duration_seconds INTEGER,
+        state TEXT NOT NULL DEFAULT 'voice_active',
+        channels JSONB NOT NULL DEFAULT '["voice"]',
+        primary_channel TEXT NOT NULL DEFAULT 'voice',
+        participants JSONB NOT NULL DEFAULT '[]',
         UNIQUE (provider, provider_call_id)
       );
     `);
@@ -56,6 +67,13 @@ export class PostgresConversationRepository implements ConversationRepository {
         payload JSONB NOT NULL,
         occurred_at TIMESTAMPTZ NOT NULL
       );
+    `);
+    await this.pool.query(`
+      ALTER TABLE conversations
+        ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'voice_active',
+        ADD COLUMN IF NOT EXISTS channels JSONB NOT NULL DEFAULT '["voice"]',
+        ADD COLUMN IF NOT EXISTS primary_channel TEXT NOT NULL DEFAULT 'voice',
+        ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]';
     `);
   }
 
@@ -174,7 +192,11 @@ export class PostgresConversationRepository implements ConversationRepository {
   async updateStatus(
     conversationId: string,
     status: ConversationStatus,
-    patch: { endedAt?: Date | null; durationSeconds?: number | null },
+    patch: {
+      endedAt?: Date | null;
+      durationSeconds?: number | null;
+      state?: ConversationState;
+    },
   ): Promise<void> {
     await this.pool.query(
       `
@@ -182,7 +204,8 @@ export class PostgresConversationRepository implements ConversationRepository {
         SET
           status = $2,
           ended_at = COALESCE($3, ended_at),
-          duration_seconds = COALESCE($4, duration_seconds)
+          duration_seconds = COALESCE($4, duration_seconds),
+          state = COALESCE($5, state)
         WHERE id = $1
       `,
       [
@@ -190,6 +213,7 @@ export class PostgresConversationRepository implements ConversationRepository {
         status,
         patch.endedAt ?? null,
         patch.durationSeconds ?? null,
+        patch.state ?? null,
       ],
     );
   }
@@ -230,6 +254,10 @@ export class PostgresConversationRepository implements ConversationRepository {
       startedAt: new Date(row.started_at),
       endedAt: row.ended_at ? new Date(row.ended_at) : null,
       durationSeconds: row.duration_seconds,
+      state: row.state ?? 'voice_active',
+      channels: row.channels ?? ['voice'],
+      primaryChannel: row.primary_channel ?? 'voice',
+      participants: row.participants ?? [],
       events: eventsResult.rows.map((event) => ({
         id: event.id,
         conversationId: event.conversation_id,

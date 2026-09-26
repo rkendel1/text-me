@@ -1,4 +1,17 @@
 export type ConversationStatus = 'received' | 'answered' | 'completed';
+export type ConversationState =
+  | 'voice_active'
+  | 'awaiting_sms_consent'
+  | 'text_active'
+  | 'completed';
+export type ConversationChannel = 'voice' | 'sms';
+export type ParticipantRole = 'caller' | 'assistant' | 'owner';
+
+export interface ConversationParticipant {
+  role: ParticipantRole;
+  phoneNumber?: string;
+  displayName?: string;
+}
 
 export type ConversationEventType =
   | 'call.received'
@@ -9,7 +22,18 @@ export type ConversationEventType =
   | 'ai.thinking'
   | 'ai.response'
   | 'voice.started'
-  | 'voice.completed';
+  | 'voice.completed'
+  | 'conversation.summary.created'
+  | 'conversation.channel_transitioned'
+  | 'sms.consent.granted'
+  | 'sms.consent.denied'
+  | 'sms.invitation.sent'
+  | 'sms.invitation.failed'
+  | 'sms.received'
+  | 'sms.sent'
+  | 'caller.message'
+  | 'owner.message'
+  | 'assistant.message';
 
 export interface ConversationEvent {
   id: string;
@@ -29,4 +53,8 @@ export interface Conversation {
   endedAt: Date | null;
   durationSeconds: number | null;
   events: ConversationEvent[];
+  state?: ConversationState;
+  channels?: ConversationChannel[];
+  primaryChannel?: ConversationChannel;
+  participants?: ConversationParticipant[];
 }
