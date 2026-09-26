@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 
 import type { Conversation, ConversationState } from '../domain/conversation.js';
@@ -12,6 +11,7 @@ import { HttpError } from '../errors.js';
 import type { OwnerConfigurationService } from '../owner/configuration.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { ConversationRuntimeController } from './controller.js';
+import { InMemoryRuntimeEventBus, type RuntimeEventBus } from './event-bus.js';
 import {
   ConversationRuntimeEventStore,
   ConversationRuntimeStore,
@@ -39,8 +39,6 @@ export interface RuntimeConfigurationPatch {
 type RuntimeEventListener = (event: ReturnType<typeof createRuntimeEvent>) => void;
 
 export class RuntimeControlService {
-  private readonly events = new EventEmitter();
-
   constructor(
     private readonly repository: ConversationRepository,
     private readonly configuration: OwnerConfigurationService,
@@ -48,6 +46,7 @@ export class RuntimeControlService {
     private readonly eventStore: ConversationRuntimeEventStore,
     private readonly overrides: RuntimeOverrideStore,
     private readonly controller: ConversationRuntimeController,
+    private readonly bus: RuntimeEventBus = new InMemoryRuntimeEventBus(),
   ) {}
 
   async getRuntime(conversationId: string, ownerId: string): Promise<ConversationRuntime> {
@@ -67,9 +66,13 @@ export class RuntimeControlService {
   }
 
   subscribe(conversationId: string, listener: RuntimeEventListener): () => void {
-    const eventName = `runtime:${conversationId}`;
-    this.events.on(eventName, listener);
-    return () => this.events.off(eventName, listener);
+    return this.bus.subscribe(conversationId, listener as Parameters<RuntimeEventBus['subscribe']>[1]);
+  }
+
+  /** Ask the live call (on whichever instance holds it) to speak the owner's words to the caller. */
+  async requestOwnerSpeech(conversationId: string, ownerId: string, text: string): Promise<void> {
+    await this.requireOwnedConversation(conversationId, ownerId);
+    await this.persistEvent(conversationId, 'runtime.owner_speech', { text }, true);
   }
 
   async listEvents(conversationId: string, ownerId: string) {
@@ -546,7 +549,7 @@ export class RuntimeControlService {
   ): Promise<void> {
     const event = createRuntimeEvent(conversationId, type, payload, durable);
     await this.eventStore.append(event);
-    this.events.emit(`runtime:${conversationId}`, event);
+    await this.bus.publish(event);
   }
 
   private async emitEvent(

@@ -1,9 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
+import { fileURLToPath } from 'node:url';
 import { toDataURL } from 'qrcode';
 
 import { HttpError } from './errors.js';
 import { presentConversation, presentConversationSummary } from './http/presenters.js';
+import type { Conversation } from './domain/conversation.js';
 import type { ConversationRepository } from './repositories/conversation-repository.js';
 import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
@@ -34,6 +36,8 @@ import {
   type RuntimeOverrideStore,
 } from './runtime/store.js';
 import twilio from 'twilio';
+import type { RuntimeEventBus } from './runtime/event-bus.js';
+import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -58,6 +62,11 @@ export interface AppOptions {
   runtimeOverrideStore?: RuntimeOverrideStore;
   runtimeController?: ConversationRuntimeController;
   runtimeControlService?: RuntimeControlService;
+  runtimeEventBus?: RuntimeEventBus;
+  /** Answers phone calls with a realtime voice agent through the AI Gateway. */
+  realtimeVoice?: RealtimeVoiceService;
+  /** Resolved before any request is handled (e.g. lazy database setup on a cold start). */
+  beforeRequest?: Promise<void>;
 }
 
 function createProviderMap(
@@ -144,6 +153,7 @@ export function createApp(options: AppOptions): express.Express {
     options.runtimeEventStore ?? new InMemoryConversationRuntimeEventStore(),
     options.runtimeOverrideStore ?? new InMemoryRuntimeOverrideStore(),
     options.runtimeController ?? new InProcessConversationRuntimeController(),
+    options.runtimeEventBus,
   );
   const renderQrCode = options.qrCodeDataUrl ?? ((content: string) => toDataURL(content, {
     errorCorrectionLevel: 'M',
@@ -168,7 +178,25 @@ export function createApp(options: AppOptions): express.Express {
     runtime,
   );
   const fakeRoutesEnabled = options.includeFakeProviderRoutes ?? true;
+  const realtimeVoice = options.realtimeVoice;
+  realtimeVoice?.bind({
+    repository: options.repository,
+    runtime,
+    conversations: service,
+    configuration: ownerConfiguration,
+  });
+  const presentVoice = (conversation: Conversation) => ({
+    realtime: Boolean(realtimeVoice),
+    model: realtimeVoice?.modelId ?? null,
+    ...realtimeVoiceStatus(conversation),
+  });
 
+  if (options.beforeRequest) {
+    const ready = options.beforeRequest;
+    app.use((_request, _response, next) => {
+      ready.then(() => next(), next);
+    });
+  }
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
@@ -208,6 +236,22 @@ export function createApp(options: AppOptions): express.Express {
 
   registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service);
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
+
+  // Twilio continues here once a realtime media stream ends.
+  app.post('/webhooks/twilio/voice/continue', async (request, response, next) => {
+    try {
+      const conversationId = typeof request.query.conversationId === 'string' ? request.query.conversationId : '';
+      const conversation = conversationId ? await service.getConversation(conversationId) : null;
+      const twiml = new twilio.twiml.VoiceResponse();
+      if (!conversation || realtimeVoiceStatus(conversation).outcome === 'failed') {
+        twiml.say("Sorry, the assistant can't take your call right now. Please send a text to this number instead.");
+      }
+      twiml.hangup();
+      response.type('text/xml; charset=utf-8').send(twiml.toString());
+    } catch (error) {
+      next(error);
+    }
+  });
 
   app.post('/webhooks/twilio/sms', async (request, response, next) => {
     try {
@@ -544,16 +588,20 @@ export function createApp(options: AppOptions): express.Express {
       response.setHeader('Cache-Control', 'no-cache');
       response.setHeader('Connection', 'keep-alive');
       response.flushHeaders?.();
-      response.write(`event: runtime.state_changed\\n`);
-      response.write(`data: ${JSON.stringify({ runtime: presentRuntime(snapshot) })}\\n\\n`);
+      response.write(`event: runtime.state_changed\n`);
+      response.write(`data: ${JSON.stringify({ runtime: presentRuntime(snapshot) })}\n\n`);
       const unsubscribe = runtime.subscribe(String(request.params.id), (event) => {
-        response.write(`event: ${event.type}\\n`);
+        response.write(`event: ${event.type}\n`);
         response.write(`data: ${JSON.stringify({
           ...event,
           occurredAt: event.occurredAt.toISOString(),
-        })}\\n\\n`);
+        })}\n\n`);
       });
-      request.on('close', unsubscribe);
+      const keepAlive = setInterval(() => response.write(': ping\n\n'), 25_000);
+      request.on('close', () => {
+        clearInterval(keepAlive);
+        unsubscribe();
+      });
     } catch (error) {
       next(error);
     }
@@ -685,6 +733,7 @@ export function createApp(options: AppOptions): express.Express {
       response.json(await Promise.all(conversations.map(async (conversation) => ({
         ...presentConversationSummary(conversation),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        voice: presentVoice(conversation),
       }))));
     } catch (error) {
       next(error);
@@ -703,6 +752,7 @@ export function createApp(options: AppOptions): express.Express {
       response.json({
         ...presentConversation(refreshed!),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(refreshed!)),
+        voice: presentVoice(refreshed!),
       });
     } catch (error) {
       next(error);
@@ -724,52 +774,41 @@ export function createApp(options: AppOptions): express.Express {
       const key = typeof request.body?.idempotencyKey === 'string' && request.body.idempotencyKey.trim()
         ? request.body.idempotencyKey.trim()
         : `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-      const conversation = await engine.respondToOwner(String(request.params.id), body, key);
+      const conversationId = String(request.params.id);
+      const current = (await service.getConversation(conversationId))!;
+      let conversation: Conversation;
+      if (realtimeVoice && realtimeVoiceStatus(current).live) {
+        // The caller is on the phone: the assistant speaks the owner's words into the call.
+        if (!current.events.some((event) => event.type === 'owner.message' && event.payload.idempotencyKey === key)) {
+          await options.repository.appendEvent(conversationId, 'owner.message', {
+            text: body, speaker: 'owner', channel: 'voice', source: 'web', idempotencyKey: key,
+          }, new Date());
+          await runtime.requestOwnerSpeech(conversationId, (request as Request & { ownerId?: string }).ownerId!, body);
+        }
+        conversation = (await service.getConversation(conversationId))!;
+      } else {
+        conversation = await engine.respondToOwner(conversationId, body, key);
+      }
       response.json({
         ...presentConversation(conversation),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation)),
+        voice: presentVoice(conversation),
       });
     } catch (error) {
       next(error);
     }
   });
 
+  const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
   app.get('/', (_request, response) => {
-    response.type('html').send(`<!doctype html>
-<html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Live Control Plane</title><style>
-:root{color-scheme:light;--bg:#eef2f8;--surface:rgba(255,255,255,.72);--surface-strong:#fff;--text:#0f172a;--muted:#5f6c82;--line:rgba(148,163,184,.24);--blue:#1677ff;--blue-strong:#0a60ff;--danger:#ff453a;--success:#30d158;--shadow:0 24px 60px rgba(15,23,42,.12)}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}body{margin:0;min-height:100vh;font:16px/1.4 -apple-system,BlinkMacSystemFont,'SF Pro Display','SF Pro Text',system-ui,sans-serif;color:var(--text);background:radial-gradient(circle at top,#fdfefe 0,#eef3ff 40%,#e9eef5 100%) fixed}button,input{font:inherit}button{border:0;cursor:pointer;transition:transform .16s ease,opacity .16s ease,box-shadow .16s ease}button:active{transform:scale(.98)}main{min-height:100vh;padding:clamp(16px,3vw,28px);display:grid;grid-template-columns:minmax(300px,360px) minmax(0,1fr);gap:20px;max-width:1380px;margin:0 auto}
-.panel{background:var(--surface);backdrop-filter:blur(28px);border:1px solid rgba(255,255,255,.7);box-shadow:var(--shadow);border-radius:28px;overflow:hidden}.sidebar{display:flex;flex-direction:column}.sidebarHeader,.detailHeader{padding:20px 20px 16px;border-bottom:1px solid var(--line)}.eyebrow{font-size:.78rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}h1,h2,h3,p{margin:0}.title{font-size:clamp(1.4rem,2vw,2rem);font-weight:750;letter-spacing:-.03em}.subtitle{color:var(--muted);margin-top:6px}
-.actionRow,.quickActions,.runtimeGrid,.toggleGrid,.toolbar{display:grid;gap:12px}.actionRow{padding:18px 20px;border-bottom:1px solid var(--line)}.actionRow.two{grid-template-columns:repeat(2,minmax(0,1fr))}.button{border-radius:18px;padding:14px 16px;font-weight:700;box-shadow:0 12px 30px rgba(22,119,255,.2);background:linear-gradient(180deg,#3291ff,#1677ff);color:#fff}.button.secondary{background:rgba(255,255,255,.9);color:var(--text);box-shadow:none;border:1px solid rgba(148,163,184,.22)}.button.ghost{background:rgba(22,119,255,.1);color:var(--blue-strong);box-shadow:none}.button.danger{background:linear-gradient(180deg,#ff7369,#ff453a)}.button.small{padding:11px 14px;border-radius:14px;font-size:.95rem}.pairing,#devices{padding:0 20px 18px}.pairing img{max-width:100%;border-radius:22px;background:#fff;border:1px solid var(--line);padding:10px}.pairing code{display:block;word-break:break-all;font-size:.8rem;color:var(--muted);margin-top:10px}
-.list{padding:10px 14px 18px;overflow:auto}.item{width:100%;text-align:left;background:rgba(255,255,255,.78);border:1px solid transparent;color:inherit;border-radius:22px;padding:16px 16px 14px;box-shadow:0 10px 24px rgba(15,23,42,.06);margin-bottom:12px}.item.active{border-color:rgba(22,119,255,.36);background:rgba(230,240,255,.98)}.item strong,.item span{display:block}.itemTitle{display:flex;align-items:center;justify-content:space-between;gap:12px}.itemMeta{color:var(--muted);font-size:.93rem;margin-top:4px}.badge{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;font-size:.82rem;font-weight:700;background:rgba(255,255,255,.85);border:1px solid rgba(148,163,184,.22)}.badge.live::before,.dot::before{content:'';width:9px;height:9px;border-radius:999px;background:var(--success);box-shadow:0 0 0 4px rgba(48,209,88,.12)}.badge.paused::before{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.12)}.badge.stopped::before{background:var(--danger);box-shadow:0 0 0 4px rgba(255,69,58,.12)}.dot{display:inline-flex;align-items:center;gap:8px}
-.detail{display:flex;flex-direction:column;min-width:0;overflow:hidden}.detailBody{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:18px;padding:18px}.card{background:rgba(255,255,255,.86);border:1px solid rgba(148,163,184,.18);border-radius:24px;box-shadow:0 12px 30px rgba(15,23,42,.05)}.transcript{display:flex;flex-direction:column;min-height:0}.cardHeader{padding:18px 18px 0}.cardBody{padding:18px}.messages{padding:0 18px 18px;overflow:auto;display:flex;flex-direction:column;gap:12px;max-height:56vh}.message{max-width:min(82%,480px);padding:13px 15px;border-radius:20px;background:#eff3f8}.message.owner{margin-left:auto;background:rgba(22,119,255,.12);color:#0a2a63}.message.assistant{background:rgba(255,244,214,.92)}.role{font-size:.74rem;font-weight:700;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;margin-bottom:5px}
-.statusPanel{display:grid;gap:14px}.runtimeGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.stat{padding:14px;border-radius:18px;background:rgba(246,248,252,.92);border:1px solid rgba(148,163,184,.14)}.statLabel{font-size:.76rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}.statValue{margin-top:6px;font-size:1rem;font-weight:700}.quickActions{grid-template-columns:repeat(2,minmax(0,1fr))}.toggleGrid{grid-template-columns:repeat(2,minmax(0,1fr))}.toggle{padding:14px 16px;border-radius:18px;background:rgba(246,248,252,.92);border:1px solid rgba(148,163,184,.14);display:flex;align-items:center;justify-content:space-between;font-weight:650}.toggle em{font-style:normal;color:var(--muted);font-size:.9rem}.toggle.on{background:rgba(230,240,255,.82);border-color:rgba(22,119,255,.25)}
-.composer{display:flex;gap:10px;padding:18px;border-top:1px solid var(--line)}input{width:100%;padding:15px 16px;border:1px solid rgba(148,163,184,.25);border-radius:18px;background:rgba(255,255,255,.92)}.chipRow{display:flex;flex-wrap:wrap;gap:10px}.chip{padding:10px 12px;border-radius:999px;background:rgba(246,248,252,.92);font-weight:650;color:var(--muted);border:1px solid rgba(148,163,184,.14)}
-.empty{display:grid;place-items:center;padding:48px 24px;min-height:60vh;text-align:center}.empty .card{padding:28px;max-width:540px}
-@media (max-width:1040px){main{grid-template-columns:1fr}.detailBody{grid-template-columns:1fr}.messages{max-height:none}.statusPanel{order:-1}}
-@media (max-width:720px){body{background:linear-gradient(180deg,#f8fbff,#eef2f8)}main{padding:12px;gap:12px}.panel{border-radius:30px}.sidebarHeader,.detailHeader,.actionRow,.pairing,#devices,.detailBody,.composer{padding-left:16px;padding-right:16px}.detailHeader{padding-bottom:14px}.detailBody{padding-top:14px}.actionRow.two,.quickActions,.toggleGrid,.runtimeGrid{grid-template-columns:1fr 1fr}.detail.hidden,.sidebar.hidden{display:none}.toolbar{grid-template-columns:1fr}.title{font-size:1.55rem}}
-@media (max-width:560px){.actionRow.two,.quickActions,.toggleGrid,.runtimeGrid{grid-template-columns:1fr}.messages{padding:0 14px 14px}.message{max-width:100%}.button{width:100%}}
-</style></head><body><main id="app"><aside class="panel sidebar" id="sidebar"><div class="sidebarHeader"><div class="eyebrow">Control Plane</div><div class="title">Live Now</div><p class="subtitle">Operate calls in real time, switch channels, and take over instantly.</p></div><div class="actionRow two"><button class="button" id="pairButton">Pair Mac Messages</button><button class="button secondary" id="devicesButton">Connected Devices</button></div><div class="pairing" id="pairing"></div><div id="devices"></div><div class="list" id="list">Loading…</div></aside><section class="panel detail" id="thread"><div class="empty"><div class="card"><div class="eyebrow">Ready</div><h2 class="title" style="font-size:1.6rem;margin-top:8px">Open a live conversation</h2><p class="subtitle" style="margin-top:10px">The owner surface is optimized for touch — pause, stop, take over, or move to text without leaving this screen.</p></div></div></section></main>
-<script>
-const sidebar=document.querySelector('#sidebar'),list=document.querySelector('#list'),thread=document.querySelector('#thread'),pairing=document.querySelector('#pairing'),token=localStorage.getItem('ownerToken')||'';
-const headers=token?{Authorization:'Bearer '+token}:{},jsonHeaders={...headers,'Content-Type':'application/json'};let selected,currentConversation,currentRuntime,eventSource;const esc=s=>String(s??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));const titleCase=s=>String(s||'').replace(/_/g,' ').replace(/\\b\\w/g,ch=>ch.toUpperCase());
-function badgeClass(state){return state==='paused'?'paused':state==='stopped'?'stopped':'live'}
-function mobileSelected(open){if(window.innerWidth<=720){sidebar.classList.toggle('hidden',open)}}
-async function api(path,options={}){const response=await fetch(path,{...options,headers:options.headers||headers});if(!response.ok)throw new Error((await response.json().catch(()=>({}))).error||'Request failed');return response}
-async function loadList(){const r=await fetch('/conversations',{headers});if(r.status===401){list.textContent='Sign in to view conversations.';return}const data=await r.json();list.innerHTML='';if(!data.length){list.innerHTML='<div class=\"card\" style=\"padding:18px\"><div class=\"eyebrow\">Quiet for now</div><p class=\"subtitle\" style=\"margin-top:8px\">Active conversations will appear here as soon as they start.</p></div>';return}data.forEach(c=>{const runtime=c.runtime||{};const b=document.createElement('button');b.className='item'+(selected===c.id?' active':'');b.innerHTML='<div class=\"itemTitle\"><strong>'+esc((c.participant&&c.participant.name)||c.caller)+'</strong><span class=\"badge '+badgeClass(runtime.state)+'\">'+esc(titleCase(runtime.state||c.state||'live'))+'</span></div><span class=\"itemMeta\">'+esc(c.preview||'No transcript yet')+'</span><span class=\"itemMeta\">'+esc(runtime.currentActivity|| (c.needsOwner?'Needs owner response':'Ready'))+'</span>';b.onclick=()=>loadConversation(c.id);list.appendChild(b)})}
-function renderConversation(){if(!currentConversation||!currentRuntime)return;const caller=((currentConversation.participants||[]).find(p=>p.role==='caller')||{}).displayName||currentConversation.caller;const controls=currentRuntime.state==='paused'?[['Resume','/resume','button'],['Stop','/stop','button danger']]:[['Pause','/pause','button secondary'],['Stop','/stop','button danger']];controls.push(currentRuntime.aiMode==='owner_only'?['Return to Assistant','/return-to-assistant','button']:[ 'Take Over','/takeover','button' ]);controls.push(['Move to Text','/transition-to-sms','button ghost']);const toggles=[['Voice',currentRuntime.voiceEnabled,'voiceEnabled'],['Transcription',currentRuntime.transcriptionEnabled,'transcriptionEnabled'],['SMS Transition',currentRuntime.smsTransitionEnabled,'smsTransitionEnabled']];const transcriptMessages=(currentConversation.messages||[]).map(m=>'<div class=\"message '+esc(m.role)+'\"><div class=\"role\">'+esc(m.role==='owner'?'Owner':m.role)+'</div>'+esc(m.body)+'</div>').join('')||'<div class=\"subtitle\">Waiting for activity…</div>';thread.innerHTML='<div class=\"detailHeader\"><div class=\"eyebrow\">Live Interaction</div><div style=\"display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:8px\"><div><div class=\"title\">'+esc(caller)+'</div><p class=\"subtitle\">'+esc(currentConversation.caller)+' • '+esc(titleCase(currentRuntime.currentActivity||currentRuntime.state))+'</p></div><span class=\"badge '+badgeClass(currentRuntime.state)+'\">'+esc(titleCase(currentRuntime.state))+'</span></div></div><div class=\"detailBody\"><section class=\"card transcript\"><div class=\"cardHeader\"><div class=\"eyebrow\">Live Transcript</div></div><div class=\"messages\">'+transcriptMessages+'</div><form class=\"composer\" id=\"messageForm\"><input placeholder=\"Reply as the owner…\" required maxlength=\"2000\"><button class=\"button small\">Send</button></form></section><aside class=\"statusPanel\"><section class=\"card\"><div class=\"cardBody\"><div class=\"eyebrow\">Runtime</div><div class=\"runtimeGrid\" style=\"margin-top:14px\"><div class=\"stat\"><div class=\"statLabel\">Assistant</div><div class=\"statValue\">'+esc(currentRuntime.assistantEnabled?'Running':'Stopped')+'</div></div><div class=\"stat\"><div class=\"statLabel\">AI Mode</div><div class=\"statValue\">'+esc(titleCase(currentRuntime.aiMode))+'</div></div><div class=\"stat\"><div class=\"statLabel\">Voice</div><div class=\"statValue\">'+esc(currentRuntime.voiceEnabled?'On':'Off')+'</div></div><div class=\"stat\"><div class=\"statLabel\">STT</div><div class=\"statValue\">'+esc(currentRuntime.transcriptionEnabled?'On':'Off')+'</div></div></div><div class=\"chipRow\" style=\"margin-top:14px\"><span class=\"chip\">Style: '+esc(titleCase(currentRuntime.responseStyle))+'</span><span class=\"chip\">Verbosity: '+esc(titleCase(currentRuntime.verbosity))+'</span><span class=\"chip\">Ask Owner: '+esc(titleCase(currentRuntime.askOwnerWhen))+'</span></div></div></section><section class=\"card\"><div class=\"cardBody\"><div class=\"eyebrow\">Controls</div><div class=\"quickActions\" style=\"margin-top:14px\">'+controls.map(([label,path,klass])=>'<button class=\"'+klass+'\" data-runtime=\"'+path+'\">'+esc(label)+'</button>').join('')+'</div></div></section><section class=\"card\"><div class=\"cardBody\"><div class=\"eyebrow\">Live Settings</div><div class=\"toggleGrid\" style=\"margin-top:14px\">'+toggles.map(([label,value,key])=>'<button class=\"toggle '+(value?'on':'')+'\" data-toggle=\"'+key+'\"><span>'+esc(label)+'</span><em>'+esc(value?'On':'Off')+'</em></button>').join('')+'</div><div class=\"toolbar\" style=\"margin-top:12px\"><button class=\"toggle\" data-style=\"concise\"><span>Be concise</span><em>'+esc(currentRuntime.responseStyle==='concise'?'Applied':'Tap to apply')+'</em></button><button class=\"toggle\" data-ask=\"important\"><span>Ask me on important items</span><em>'+esc(currentRuntime.askOwnerWhen==='important'?'Applied':'Tap to apply')+'</em></button></div></div></section></aside></div>';
-thread.querySelector('#messageForm').onsubmit=sendMessage;thread.querySelectorAll('[data-runtime]').forEach(button=>button.onclick=()=>runtimeCommand(button.dataset.runtime));thread.querySelectorAll('[data-toggle]').forEach(button=>button.onclick=()=>toggleRuntime(button.dataset.toggle));thread.querySelectorAll('[data-style]').forEach(button=>button.onclick=()=>patchRuntime({responseStyle:button.dataset.style}));thread.querySelectorAll('[data-ask]').forEach(button=>button.onclick=()=>patchRuntime({askOwnerWhen:button.dataset.ask}));mobileSelected(true)}
-async function loadConversation(id){selected=id;const r=await fetch('/conversations/'+id,{headers});if(!r.ok){thread.innerHTML='<div class=\"empty\"><div class=\"card\"><h2>Conversation unavailable</h2></div></div>';return}currentConversation=await r.json();currentRuntime=currentConversation.runtime;renderConversation();openStream(id);loadList()}
-async function runtimeCommand(path){if(!selected||!currentRuntime)return;try{const r=await fetch('/conversations/'+selected+'/runtime'+path,{method:'POST',headers:jsonHeaders,body:JSON.stringify({expectedRevision:currentRuntime.revision})});const data=await r.json();if(!r.ok)throw new Error(data.error||'Command failed');currentRuntime=data;renderConversation();loadList()}catch(error){alert(error.message||'Command failed')}}
-async function patchRuntime(body){if(!selected||!currentRuntime)return;try{const r=await fetch('/conversations/'+selected+'/runtime',{method:'PATCH',headers:jsonHeaders,body:JSON.stringify({...body,expectedRevision:currentRuntime.revision})});const data=await r.json();if(!r.ok)throw new Error(data.error||'Could not apply change');currentRuntime=data;renderConversation();loadList()}catch(error){alert(error.message||'Could not apply change')}}
-async function toggleRuntime(field){if(!currentRuntime)return;await patchRuntime({[field]:!currentRuntime[field]})}
-async function sendMessage(e){e.preventDefault();const input=e.target.querySelector('input'),button=e.target.querySelector('button');button.disabled=true;const r=await fetch('/conversations/'+selected+'/messages',{method:'POST',headers:jsonHeaders,body:JSON.stringify({body:input.value})});if(r.ok){input.value='';await loadConversation(selected)}else{alert('Could not deliver response. Please retry.')}button.disabled=false}
-function openStream(id){if(eventSource){eventSource.close();eventSource=null}if(!token)return;eventSource=new EventSource('/conversations/'+id+'/runtime/events?token='+encodeURIComponent(token),{withCredentials:false});eventSource.onmessage=()=>undefined;['runtime.state_changed','runtime.transcript_final','runtime.ai_started','runtime.ai_completed','runtime.voice_started','runtime.voice_stopped','runtime.owner_needed','runtime.configuration_changed'].forEach(name=>eventSource.addEventListener(name,async()=>{if(selected===id)await loadConversation(id)}))}
-async function loadDevices(){const r=await fetch('/owner/devices',{headers});if(!r.ok)return;const data=await r.json();document.querySelector('#devices').innerHTML=data.map(d=>'<div class=\"item\"><div class=\"itemTitle\"><strong>'+esc(d.name)+'</strong><span class=\"badge '+(d.status==='active'?'live':'paused')+'\">'+esc(d.status==='active'?'Connected':'Pending')+'</span></div><span class=\"itemMeta\">Messages '+esc(d.health?.messagesAccess?'✓':'—')+' · Chat '+esc(d.health?.authorizedChat?'✓':'—')+' · '+esc(d.setupStatus)+'</span></div>').join('')}
-async function pairDevice(){pairing.innerHTML='<p class=\"subtitle\">Generating secure pairing QR…</p>';const r=await fetch('/owner/devices/pair/qr',{method:'POST',headers:jsonHeaders,body:JSON.stringify({name:'Mac Messages'})});if(r.status===401){pairing.textContent='Sign in to pair a Mac.';return}if(!r.ok){pairing.textContent='Could not create pairing QR.';return}const data=await r.json();pairing.innerHTML='<p class=\"subtitle\">Scan this from the Mac bridge to connect Messages as an owner takeover channel.</p><img alt=\"Mac pairing QR\" src=\"'+data.qrDataUrl+'\"><p class=\"itemMeta\">Expires '+esc(new Date(data.expiresAt).toLocaleString())+'</p><code>'+esc(data.pairingUri)+'</code>'}
-document.querySelector('#pairButton').onclick=pairDevice;document.querySelector('#devicesButton').onclick=loadDevices;window.addEventListener('resize',()=>mobileSelected(Boolean(selected)));loadList();loadDevices();setInterval(loadList,10000);setInterval(loadDevices,15000);
-</script></body></html>`);
+    response.setHeader('Cache-Control', 'no-cache');
+    response.sendFile('index.html', { root: publicDir });
+  });
+  app.get('/manifest.webmanifest', (_request, response) => {
+    response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir });
+  });
+  app.get('/icon.svg', (_request, response) => {
+    response.sendFile('icon.svg', { root: publicDir });
   });
 
   app.post('/conversations/:id/turns', async (request, response, next) => {
@@ -846,6 +885,7 @@ document.querySelector('#pairButton').onclick=pairDevice;document.querySelector(
         return;
       }
 
+      console.error(error);
       response.status(500).json({ error: 'Internal server error' });
     },
   );

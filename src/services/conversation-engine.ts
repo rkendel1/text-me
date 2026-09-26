@@ -1,3 +1,4 @@
+import { HttpError } from '../errors.js';
 import type { Conversation } from '../domain/conversation.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { ConversationModel, ConversationTurn } from '../conversation/model.js';
@@ -40,7 +41,11 @@ export class ConversationEngine {
     await this.runtime?.noteSpeechStarted(conversationId, input.callbackId);
 
     const transcript = await this.speech.transcribe(input);
-    if (!transcript.text.trim()) return this.requireConversation(conversationId);
+    if (!transcript.text.trim()) {
+      // Nothing was said; return the runtime to listening instead of leaving it transcribing.
+      await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
+      return this.requireConversation(conversationId);
+    }
 
     await this.repository.appendEvent(
       conversationId,
@@ -148,6 +153,9 @@ export class ConversationEngine {
     const existing = conversation.events.find(
       (event) => event.type === 'owner.message' && event.payload.idempotencyKey === idempotencyKey,
     );
+    if (!this.messaging || !conversation.events.some((event) => event.type === 'sms.consent.granted')) {
+      throw new HttpError(409, 'The caller has not agreed to continue over text yet');
+    }
     if (!existing) {
       await this.repository.appendEvent(conversationId, 'owner.message', {
         text: body, speaker: 'owner', channel: 'web', source, idempotencyKey,
@@ -162,7 +170,7 @@ export class ConversationEngine {
       (event) => event.type === 'sms.consent.granted',
     );
     if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
-      throw new Error('SMS destination is unavailable');
+      throw new HttpError(409, 'The caller has not agreed to continue over text yet');
     }
     const history = this.history(current);
     history.push({ speaker: 'owner', text: body, sequence: history.length + 1 });

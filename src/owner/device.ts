@@ -187,13 +187,14 @@ export class OwnerDeviceService {
     };
     const expiresAt = this.now() + 10 * 60 * 1000;
     const pairingCode = randomBytes(18).toString('base64url');
+    // The device row must exist before its pairing credential (FK in Postgres).
+    await this.store.save(device);
     await this.pairings.save({
       deviceId: device.id,
       ownerId,
       code: pairingCode,
       expiresAt,
     });
-    await this.store.save(device);
     return { device, pairingCode, pairingUri: `attn://pair/${pairingCode}`, expiresAt: new Date(expiresAt) };
   }
 

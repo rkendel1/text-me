@@ -4,11 +4,17 @@ export function presentConversation(conversation: Conversation): Record<string, 
   const lastRead = conversation.lastOwnerReadAt?.getTime() ??
     [...conversation.events].reverse().find((event) => event.type === 'owner.read')?.occurredAt.getTime() ?? 0;
   const messages = conversation.events
-    .filter((event) => ['caller.message', 'owner.message', 'assistant.message'].includes(event.type))
+    .filter((event) => ['caller.message', 'owner.message', 'assistant.message', 'speech.transcript', 'ai.response']
+      .includes(event.type))
     .map((event) => ({
       id: event.id,
-      role: event.type === 'caller.message' ? 'caller' : event.type === 'owner.message' ? 'owner' : 'assistant',
+      role: event.type === 'caller.message' || event.type === 'speech.transcript'
+        ? 'caller'
+        : event.type === 'owner.message' ? 'owner' : 'assistant',
       body: String(event.payload.text ?? event.payload.body ?? ''),
+      channel: event.type === 'speech.transcript' || event.type === 'ai.response'
+        ? 'voice'
+        : String(event.payload.channel ?? 'sms'),
       source: event.payload.source,
       occurredAt: event.occurredAt.toISOString(),
       deliveryFailed: event.type === 'assistant.message' &&
@@ -68,11 +74,13 @@ export function presentConversationSummary(
     endedAt: conversation.endedAt?.toISOString() ?? null,
     durationSeconds: conversation.durationSeconds,
     participant: {
-      name: conversation.participants?.find((participant) => participant.role === 'caller')?.displayName,
+      name: conversation.participants?.find((participant) => participant.role === 'caller')?.displayName ??
+        [...conversation.events].reverse().find((event) => event.type === 'sms.consent.granted' &&
+          typeof event.payload.displayName === 'string')?.payload.displayName,
       phoneNumber: conversation.callerPhone,
     },
     preview: [...conversation.events].reverse()
-      .find((event) => ['caller.message', 'owner.message', 'assistant.message', 'speech.transcript', 'conversation.summary.created'].includes(event.type))
+      .find((event) => ['caller.message', 'owner.message', 'assistant.message', 'speech.transcript', 'ai.response', 'conversation.summary.created'].includes(event.type))
       ?.payload.text ??
       [...conversation.events].find((event) => event.type === 'conversation.summary.created')?.payload.summary ??
       '',

@@ -1,5 +1,6 @@
 import twilio from 'twilio';
 
+import type { Conversation } from '../domain/conversation.js';
 import { HttpError } from '../errors.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 import type {
@@ -31,8 +32,17 @@ function requiredString(
   return value.trim();
 }
 
+export interface TwilioVoiceOptions {
+  /** wss:// URL of the realtime media stream; when set, calls are answered by the realtime voice agent. */
+  mediaStreamUrl?: string;
+  /** Webhook Twilio continues to once the media stream ends (goodbye or failure fallback). */
+  continueUrl?: string;
+}
+
 export class TwilioProvider implements TelephonyProvider {
   readonly name = 'twilio';
+
+  constructor(private readonly voice: TwilioVoiceOptions = {}) {}
 
   parseIncomingCall(payload: unknown): IncomingCall {
     const record = asRecord(payload);
@@ -91,8 +101,18 @@ export class TwilioProvider implements TelephonyProvider {
     };
   }
 
-  answerCall(): ProviderResponse {
+  answerCall(conversation?: Conversation): ProviderResponse {
     const response = new twilio.twiml.VoiceResponse();
+    if (this.voice.mediaStreamUrl && conversation) {
+      const stream = response.connect().stream({ url: this.voice.mediaStreamUrl });
+      stream.parameter({ name: 'conversationId', value: conversation.id });
+      if (this.voice.continueUrl) {
+        response.redirect({ method: 'POST' }, `${this.voice.continueUrl}?conversationId=${encodeURIComponent(conversation.id)}`);
+      } else {
+        response.hangup();
+      }
+      return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
+    }
     response.say(
       "Hi. This is Randy's assistant. He isn't taking calls right now. What can I help you with?",
     );

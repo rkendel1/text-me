@@ -103,6 +103,7 @@ export type ConversationRuntimeEventType =
   | 'runtime.voice_started'
   | 'runtime.voice_stopped'
   | 'runtime.owner_needed'
+  | 'runtime.owner_speech'
   | 'runtime.error';
 
 export interface ConversationRuntimeEvent {
