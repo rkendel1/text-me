@@ -7,7 +7,8 @@ export function presentConversation(conversation: Conversation): Record<string, 
     providerCallId: conversation.providerCallId,
     caller: conversation.callerPhone,
     status: conversation.status,
-    state: conversation.state ?? (conversation.status === 'completed' ? 'completed' : 'voice_active'),
+    state: conversation.state ?? (conversation.events.some((event) => event.type === 'conversation.channel_transitioned')
+      ? 'text_active' : conversation.status === 'completed' ? 'completed' : 'voice_active'),
     channels: conversation.channels ?? (conversation.events.some((event) => event.type === 'conversation.channel_transitioned') ? ['voice', 'sms'] : ['voice']),
     primaryChannel: conversation.primaryChannel ?? (conversation.events.some((event) => event.type === 'conversation.channel_transitioned') ? 'sms' : 'voice'),
     participants: conversation.participants ?? [
@@ -36,7 +37,7 @@ export function presentConversationSummary(
     providerCallId: conversation.providerCallId,
     caller: conversation.callerPhone,
     status: conversation.status,
-    state: conversation.state ?? 'voice_active',
+    state: conversation.state ?? (conversation.events.some((event) => event.type === 'conversation.channel_transitioned') ? 'text_active' : 'voice_active'),
     channels: conversation.channels ?? ['voice'],
     primaryChannel: conversation.primaryChannel ?? 'voice',
     startedAt: conversation.startedAt.toISOString(),

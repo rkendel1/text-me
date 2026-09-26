@@ -56,10 +56,11 @@ export class ConversationEngine {
       new Date(),
     );
     const text = await this.model.respond(history);
-    if (conversation.state === 'text_active' || conversation.events.some(
+    const currentConversation = await this.requireConversation(conversationId);
+    if (currentConversation.state === 'text_active' || currentConversation.events.some(
       (event) => event.type === 'conversation.channel_transitioned',
     )) {
-      const consent = [...conversation.events].reverse().find(
+      const consent = [...currentConversation.events].reverse().find(
         (event) => event.type === 'sms.consent.granted',
       );
       if (!this.messaging || typeof consent?.payload.phoneNumber !== 'string') {
