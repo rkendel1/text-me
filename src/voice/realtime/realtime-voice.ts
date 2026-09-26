@@ -57,7 +57,7 @@ export class RealtimeVoiceService {
   /** Accept Twilio media streams on the HTTP server's upgrade path. */
   attach(
     server: Server,
-    options: { twilioAuthToken?: string; publicBaseUrl?: string; beforeConnect?: Promise<void> } = {},
+    options: { twilioAuthToken?: string; publicBaseUrl?: string; beforeConnect?: Promise<void> | (() => Promise<void>) } = {},
   ): WebSocketServer {
     const wss = new WebSocketServer({ noServer: true });
     server.on('upgrade', (request, socket, head) => {
@@ -68,7 +68,7 @@ export class RealtimeVoiceService {
         socket.destroy();
         return;
       }
-      void (options.beforeConnect ?? Promise.resolve()).then(
+      void (typeof options.beforeConnect === 'function' ? options.beforeConnect() : options.beforeConnect ?? Promise.resolve()).then(
         () => wss.handleUpgrade(request, socket, head, (ws) => this.handleConnection(ws)),
         () => socket.destroy(),
       );

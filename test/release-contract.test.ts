@@ -346,8 +346,8 @@ test('production never falls back to in-memory state, fake providers or a fake m
     /Refusing to start in production without: runtime state store, .*AI text model/);
   assert.throws(() => createApp({ repository: new InMemoryConversationRepository(), production: true }), /Refusing to start in production/);
   const env = {
-    DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', TWILIO_PHONE_NUMBER: '+1',
-    OWNER_PHONE_NUMBER: '+2', OWNER_AUTH_TOKEN: 'k',
+    DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', TWILIO_PHONE_NUMBER: '+15550000000',
+    OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'k',
   };
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', PUBLIC_BASE_URL: 'https://x.test' }), /AI Gateway credential is required in production/);
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'http://x.test' }), /must be an https URL/);
@@ -410,7 +410,7 @@ test('keep your real number: the assistant line is optional config, and forwardi
   assert.match((await new PhoneNumberService(account([]), undefined, 'https://x.test').status()).error!, /no phone number yet/);
   assert.match((await new PhoneNumberService(account([line(), { ...line(), sid: 'PN2', phoneNumber: '+15550000001' }]), undefined, 'https://x.test').status()).error!,
     /Set TWILIO_PHONE_NUMBER/);
-  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', OWNER_PHONE_NUMBER: '+2', OWNER_AUTH_TOKEN: 'k' };
+  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'k' };
   assert.equal(getConfig(env).twilioPhoneNumber, undefined, 'TWILIO_PHONE_NUMBER is optional');
 
   // A call someone placed to the owner's real number, forwarded by the carrier.
@@ -430,4 +430,64 @@ test('keep your real number: the assistant line is optional config, and forwardi
   assert.ok(phone.lastForwardedAt);
   const [conversation] = await repository.list();
   assert.ok(conversation.events.some((event) => event.type === 'call.forwarded' && event.payload.from === '+15551112222'));
+});
+
+test('a misconfigured deployment explains itself instead of crashing', async () => {
+  const { ConfigurationError } = await import('../src/config.js');
+  const { startupFailureServer } = await import('../src/startup-failure.js');
+  let caught: unknown;
+  try {
+    getConfig({ VERCEL: '1', VERCEL_PROJECT_PRODUCTION_URL: 'text-me-five.vercel.app', TWILIO_AUTH_TOKEN: 'secret-value', OWNER_PHONE_NUMBER: '555 111 2222', APNS_KEY_ID: 'K' });
+  } catch (error) { caught = error; }
+  assert.ok(caught instanceof ConfigurationError);
+  const problems = (caught as InstanceType<typeof ConfigurationError>).problems.join('\n');
+  // Every problem at once, each with what to do.
+  for (const expected of [/DATABASE_URL is missing/, /TWILIO_ACCOUNT_SID is missing/, /OWNER_AUTH_TOKEN is missing/,
+    /OWNER_PHONE_NUMBER must be in international format/, /iOS push is partly configured: also set APNS_TEAM_ID, APNS_PRIVATE_KEY, APNS_BUNDLE_ID/]) {
+    assert.match(problems, expected);
+  }
+  assert.ok(!problems.includes('secret-value'), 'values are never echoed');
+
+  const server = startupFailureServer(caught);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const page = await fetch(`${base}/`, { headers: { Accept: 'text/html' } });
+    assert.equal(page.status, 503);
+    const html = await page.text();
+    assert.match(html, /Almost there/);
+    assert.match(html, /OWNER_AUTH_TOKEN is missing/);
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    const ready = await fetch(`${base}/health/ready`);
+    assert.equal(ready.status, 503);
+    assert.equal((await ready.json()).status, 'not_configured');
+    const apiCall = await fetch(`${base}/owner/control-plane`);
+    assert.equal((await apiCall.json()).code, 'not_configured');
+    // Anything that isn't a configuration problem stays in the logs.
+    const other = startupFailureServer(new Error('password=hunter2'));
+    await new Promise<void>((resolve) => other.listen(0, '127.0.0.1', resolve));
+    const otherReady = await (await fetch(`http://127.0.0.1:${(other.address() as AddressInfo).port}/health/ready`)).json();
+    assert.ok(!JSON.stringify(otherReady).includes('hunter2'));
+    other.close();
+  } finally {
+    server.close();
+  }
+});
+
+test('database setup is retried after a failure, and the app shell loads meanwhile', async () => {
+  let attempts = 0;
+  const app = createApp({
+    repository: new InMemoryConversationRepository(),
+    ownerAuthToken: ACCESS_KEY,
+    beforeRequest: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('connection refused');
+    },
+  });
+  const headers = { Authorization: `Bearer ${ACCESS_KEY}` };
+  assert.equal((await request(app).get('/')).status, 200, 'the app itself still loads');
+  const down = await request(app).get('/owner/control-plane').set(headers);
+  assert.equal(down.status, 503);
+  assert.equal(down.body.code, 'database_unavailable');
+  assert.equal((await request(app).get('/owner/control-plane').set(headers)).status, 200, 'the next request retries and succeeds');
 });

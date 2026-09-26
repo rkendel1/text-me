@@ -1,10 +1,20 @@
+import type { Server } from 'node:http';
+
 // Vercel's Express preset serves the entry file that imports express; this is
 // the entry (the HTTP server with the media-stream WebSocket), so say so. Erased at build.
 import type {} from 'express';
 
 import { buildServer } from './bootstrap.js';
+import { startupFailureServer } from './startup-failure.js';
 
-const { server } = buildServer();
+let server: Server;
+try {
+  ({ server } = buildServer());
+} catch (error) {
+  // A crash here would surface only as INTERNAL_FUNCTION_INVOCATION_FAILED; say what's wrong instead.
+  console.error('Startup failed:', error);
+  server = startupFailureServer(error);
+}
 
 // Always listen: on Vercel the Node runtime intercepts listen() to capture this
 // server (Express app + media-stream WebSocket); everywhere else it binds the port.
