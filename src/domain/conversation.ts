@@ -5,6 +5,8 @@ export type ConversationState =
   | 'text_active'
   | 'completed';
 export type ConversationChannel = 'voice' | 'sms' | 'web';
+export type MessageTransport = 'voice' | 'sms' | 'imessage';
+export type OwnerChannelType = 'web' | 'macos_messages';
 export type ParticipantRole = 'caller' | 'assistant' | 'owner';
 
 export interface ConversationParticipant {
@@ -33,6 +35,11 @@ export type ConversationEventType =
   | 'sms.sent'
   | 'caller.message'
   | 'owner.message'
+  | 'owner.message.created'
+  | 'owner.delivery.requested'
+  | 'owner.delivery.sent'
+  | 'owner.delivery.failed'
+  | 'owner.message.received'
   | 'assistant.message'
   | 'assistant.failed'
   | 'owner.read';

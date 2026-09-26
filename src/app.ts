@@ -16,6 +16,7 @@ import { FakeVoiceProvider } from './voice/fake-provider.js';
 import type { VoiceProvider } from './voice/provider.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
+import type { OwnerChannel } from './owner/channel.js';
 import twilio from 'twilio';
 
 export interface AppOptions {
@@ -30,6 +31,7 @@ export interface AppOptions {
   twilioAuthToken?: string;
   ownerId?: string;
   ownerAuthToken?: string;
+  ownerChannel?: OwnerChannel;
 }
 
 function createProviderMap(
@@ -84,7 +86,9 @@ export function createApp(options: AppOptions): express.Express {
   );
   const messaging = options.messagingProvider ?? new FakeMessagingProvider();
   const ownerId = options.ownerId ?? process.env.OWNER_ID ?? 'owner';
-  const service = new ConversationService(options.repository, messaging, options.ownerPhone, ownerId);
+  const service = new ConversationService(
+    options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
+  );
   const engine = new ConversationEngine(
     options.repository,
     options.speechProvider ?? new FakeSpeechProvider(),
