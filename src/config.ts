@@ -155,7 +155,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioPhoneNumber: env.TWILIO_PHONE_NUMBER?.trim() || undefined,
     ownerPhone: env.OWNER_PHONE_NUMBER!.trim(),
     ownerId: env.OWNER_ID ?? 'owner',
-    ownerAuthToken: env.OWNER_AUTH_TOKEN ?? '',
+    ownerAuthToken: env.OWNER_AUTH_TOKEN?.trim() ?? '',
     realtimeVoice: resolveRealtimeVoice(env),
   };
 }

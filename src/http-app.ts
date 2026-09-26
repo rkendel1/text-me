@@ -156,6 +156,12 @@ function createProviderMap(
   return new Map(providers.map((provider) => [provider.name, provider]));
 }
 
+function bearerToken(request: Request): string | undefined {
+  const authorization = request.header('Authorization') ?? '';
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1].trim() || undefined;
+}
+
 function registerIncomingCallRoute(
   app: express.Express,
   path: string,
@@ -478,11 +484,10 @@ export function createApp(options: AppOptions): express.Express {
     expired: 'Your session expired. Sign in again.', revoked: 'This device was signed out. Sign in again.',
   } as const;
   const ownerAuth = (request: Request, _response: Response, next: NextFunction): void => {
-    const header = request.header('Authorization') ?? '';
     // EventSource can't set headers, so live streams (and only they) accept ?token=.
     const streamToken = request.method === 'GET' && request.path.endsWith('/events') && typeof request.query?.token === 'string'
       ? request.query.token : undefined;
-    const token = header.startsWith('Bearer ') ? header.slice(7) : streamToken;
+    const token = bearerToken(request) ?? streamToken;
     auth.authenticate(token).then((result) => {
       if (!result.ok) {
         next(new HttpError(401, authMessages[result.reason], result.reason === 'expired' || result.reason === 'revoked' ? `session_${result.reason}` : 'unauthenticated'));
@@ -699,8 +704,7 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   const deviceAuth = async (request: Request) => {
-    const authorization = request.header('Authorization') ?? '';
-    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const token = bearerToken(request) ?? '';
     const device = await ownerDevices.authenticate(token);
     if (!device || device.id !== String(request.params.id)) throw new HttpError(401, 'Device authentication required');
     return { device, token };

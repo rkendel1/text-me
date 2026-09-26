@@ -164,6 +164,7 @@ test('one sign-in model for every surface: the access key becomes a session, nev
   assert.notEqual(web.token, ACCESS_KEY);
   assert.equal(web.session.platform, 'web');
   assert.equal(ios.session.platform, 'ios');
+  assert.equal((await request(p.app).get('/conversations').set({ authorization: `bearer ${web.token}` })).status, 200);
   const me = await request(p.app).get('/owner/me').set(ios.headers);
   assert.deepEqual({ ownerId: me.body.ownerId, name: me.body.name, platform: me.body.session.platform }, { ownerId: 'owner', name: 'Randy', platform: 'ios' });
   const current = await request(p.app).get('/auth/session').set(web.headers);
