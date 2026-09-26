@@ -11,6 +11,11 @@ export function presentConversation(conversation: Conversation): Record<string, 
     endedAt: conversation.endedAt?.toISOString() ?? null,
     durationSeconds: conversation.durationSeconds,
     events: conversation.events.map((event) => event.type),
+    eventLog: conversation.events.map((event) => ({
+      type: event.type,
+      payload: event.payload,
+      occurredAt: event.occurredAt.toISOString(),
+    })),
   };
 }
 

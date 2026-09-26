@@ -1,0 +1,109 @@
+import type { Conversation } from '../domain/conversation.js';
+import type { ConversationRepository } from '../repositories/conversation-repository.js';
+import type { ConversationModel, ConversationTurn } from '../conversation/model.js';
+import type { AudioInput, SpeechProvider } from '../speech/provider.js';
+import type { VoiceProvider } from '../voice/provider.js';
+
+const turnEvents = new Set(['speech.transcript', 'ai.response']);
+
+export class ConversationEngine {
+  constructor(
+    private readonly repository: ConversationRepository,
+    private readonly speech: SpeechProvider,
+    private readonly model: ConversationModel,
+    private readonly voice: VoiceProvider,
+  ) {}
+
+  async respond(conversationId: string, input: AudioInput): Promise<Conversation> {
+    const conversation = await this.requireConversation(conversationId);
+    const existingTranscript = conversation.events.find(
+      (event) =>
+        event.type === 'speech.transcript' &&
+        event.payload.callbackId === input.callbackId,
+    );
+    if (existingTranscript) return conversation;
+
+    const sequence = this.nextSequence(conversation);
+    await this.repository.appendEvent(
+      conversationId,
+      'speech.started',
+      { callbackId: input.callbackId, sequence },
+      new Date(),
+    );
+
+    const transcript = await this.speech.transcribe(input);
+    if (!transcript.text.trim()) return this.requireConversation(conversationId);
+
+    await this.repository.appendEvent(
+      conversationId,
+      'speech.transcript',
+      {
+        callbackId: input.callbackId,
+        speaker: 'caller',
+        text: transcript.text,
+        sequence,
+      },
+      new Date(),
+    );
+
+    const history = this.history(await this.requireConversation(conversationId));
+    await this.repository.appendEvent(
+      conversationId,
+      'ai.thinking',
+      { callbackId: input.callbackId, sequence: sequence + 1 },
+      new Date(),
+    );
+    const text = await this.model.respond(history);
+    await this.repository.appendEvent(
+      conversationId,
+      'ai.response',
+      {
+        callbackId: input.callbackId,
+        speaker: 'assistant',
+        text,
+        sequence: sequence + 1,
+      },
+      new Date(),
+    );
+
+    await this.repository.appendEvent(
+      conversationId,
+      'voice.started',
+      { callbackId: input.callbackId, sequence: sequence + 1 },
+      new Date(),
+    );
+    await this.voice.speak(text);
+    await this.repository.appendEvent(
+      conversationId,
+      'voice.completed',
+      { callbackId: input.callbackId, text, sequence: sequence + 1 },
+      new Date(),
+    );
+
+    return this.requireConversation(conversationId);
+  }
+
+  private history(conversation: Conversation): ConversationTurn[] {
+    return conversation.events
+      .filter((event) => turnEvents.has(event.type))
+      .map((event) => ({
+        speaker: event.payload.speaker as ConversationTurn['speaker'],
+        text: String(event.payload.text),
+        sequence: Number(event.payload.sequence),
+      }))
+      .sort((left, right) => left.sequence - right.sequence);
+  }
+
+  private nextSequence(conversation: Conversation): number {
+    const lastSequence = conversation.events
+      .filter((event) => turnEvents.has(event.type))
+      .reduce((max, event) => Math.max(max, Number(event.payload.sequence) || 0), 2);
+    return lastSequence + 1;
+  }
+
+  private async requireConversation(id: string): Promise<Conversation> {
+    const conversation = await this.repository.getById(id);
+    if (!conversation) throw new Error(`Conversation not found: ${id}`);
+    return conversation;
+  }
+}

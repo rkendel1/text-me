@@ -209,7 +209,7 @@ export class PostgresConversationRepository implements ConversationRepository {
           SELECT *
           FROM conversation_events
           WHERE conversation_id = $1
-          ORDER BY occurred_at ASC
+          ORDER BY occurred_at ASC, id ASC
         `,
         [id],
       ),

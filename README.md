@@ -26,6 +26,12 @@ The service exposes:
 - `POST /webhooks/twilio/status`
 - `GET /conversations`
 - `GET /conversations/:id`
+- `POST /conversations/:id/turns` (with `callbackId` and audio/text input)
+
+Conversation turns are provider-independent. Speech, conversation-model, and
+voice providers can be replaced through `createApp` options; deterministic fake
+providers are used by default for local testing. Transcript, model, and voice
+milestones are stored in the append-only conversation event log.
 
 When `NODE_ENV` is not `production`, local webhook simulation is also available:
 
