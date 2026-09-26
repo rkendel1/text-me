@@ -30,6 +30,8 @@ import {
   PostgresOwnerSurfaceDeviceStore,
 } from './attention/postgres.js';
 import { VapidPushSender } from './attention/surfaces.js';
+import { PostgresOwnerAuthSessionStore } from './auth/sessions.js';
+import { HttpApnsSender } from './attention/apns.js';
 import { PhoneNumberService, TwilioPhoneNumberClient } from './telephony/phone-number.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
@@ -64,6 +66,7 @@ export function buildServer(
   const surfaceDevices = new PostgresOwnerSurfaceDeviceStore(pool);
   const appSecrets = new PostgresAppSecretStore(pool);
   const runtimeEventBus = new PostgresRuntimeEventBus(pool, config.databaseListenUrl);
+  const authSessions = new PostgresOwnerAuthSessionStore(pool);
 
   const ready = (async () => {
     await repository.initialize();
@@ -80,6 +83,7 @@ export function buildServer(
     await notificationDeliveries.initialize();
     await surfaceDevices.initialize();
     await appSecrets.initialize();
+    await authSessions.initialize();
   })();
   ready.catch((error) => console.error('Database initialization failed', error));
 
@@ -94,10 +98,16 @@ export function buildServer(
     ? new RealtimeVoiceService(new GatewayRealtimeConnector(config.realtimeVoice), { voice: config.realtimeVoice.voice })
     : undefined;
   // AI SDK is the AI boundary: realtime voice and text both go through AI Gateway.
-  const ai = config.realtimeVoice;
+  const ai = config.aiGateway;
   const textAgent = ai
     ? new AiSdkTextAgent(createGateway({ apiKey: ai.apiKey, baseURL: ai.baseURL, teamIdOrSlug: ai.teamIdOrSlug })(ai.textModelId))
     : undefined;
+  const phoneNumbers = new PhoneNumberService(
+    new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
+    config.twilioPhoneNumber,
+    config.publicBaseUrl,
+    config.ownerPhone,
+  );
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 
   const app = createApp({
@@ -107,13 +117,15 @@ export function buildServer(
         mediaStreamUrl,
         continueUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/continue`,
       } : {}),
-      new FakeTelephonyProvider(),
+      // The fake provider exists for local development only; production never registers it.
+      ...(config.production ? [] : [new FakeTelephonyProvider()]),
     ],
     includeFakeProviderRoutes: config.enableFakeProviderRoutes,
+    // Texts come from the assistant line (configured, or the account's only number).
     messagingProvider: new TwilioMessagingProvider(
       config.twilioAccountSid,
       config.twilioAuthToken,
-      config.twilioPhoneNumber,
+      config.twilioPhoneNumber ?? (() => phoneNumbers.assistantLine()),
     ),
     ownerPhone: config.ownerPhone,
     ownerId: config.ownerId,
@@ -129,11 +141,7 @@ export function buildServer(
     runtimeEventBus,
     runtimeCommandStore: runtimeCommands,
     publicBaseUrl: config.publicBaseUrl,
-    phoneNumbers: new PhoneNumberService(
-      new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
-      config.twilioPhoneNumber,
-      config.publicBaseUrl,
-    ),
+    phoneNumbers,
     attentionStore,
     notificationDeliveryStore: notificationDeliveries,
     surfaceDeviceStore: surfaceDevices,
@@ -147,6 +155,12 @@ export function buildServer(
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),
     beforeRequest: ready,
+    authSessionStore: authSessions,
+    apnsSender: config.apns ? new HttpApnsSender(config.apns) : undefined,
+    appleTeamId: config.appleTeamId,
+    production: config.production,
+    release: config.release,
+    healthCheck: async () => { await pool.query('SELECT 1'); },
     ...overrides,
   });
 

@@ -6,8 +6,12 @@ import type { OwnerChannel } from '../owner/channel.js';
 import { attentionUrl, type NotificationDelivery, type OwnerAttention, type OwnerSurfaceKind } from './model.js';
 import type { NotificationPreferences } from './router.js';
 import type { AppSecretStore, OwnerSurfaceDeviceStore } from './stores.js';
+import { ApnsError, apnsMessage, type ApnsSender } from './apns.js';
 
-export type SurfaceResult = Pick<NotificationDelivery, 'status' | 'deviceId' | 'error' | 'providerId'>;
+export type SurfaceResult = Pick<NotificationDelivery, 'status' | 'deviceId' | 'error' | 'providerId'> & {
+  /** Set when one surface reaches devices through different services (Web Push and APNs). */
+  surface?: OwnerSurfaceKind;
+};
 
 /**
  * A place the owner can be reached and act from. Conversations never know
@@ -104,14 +108,23 @@ export function pushPayload(attention: OwnerAttention): string {
   });
 }
 
+/**
+ * Phone notifications: Web Push for the browser and Home Screen app, APNs for
+ * the native iOS app. Both get the same attention, text and deep link.
+ */
 export class WebPushSurface implements OwnerSurface {
   readonly kind = 'web_push' as const;
 
-  constructor(private readonly devices: OwnerSurfaceDeviceStore, private readonly sender: PushSender) {}
+  constructor(
+    private readonly devices: OwnerSurfaceDeviceStore,
+    private readonly sender: PushSender,
+    private readonly apns?: ApnsSender,
+  ) {}
 
   private async targets(ownerId: string) {
     return (await this.devices.list(ownerId)).filter((device) =>
-      device.status === 'active' && device.platform === 'web' && device.capabilities.includes('push'));
+      device.status === 'active' && device.capabilities.includes('push') &&
+      (device.platform === 'web' || (device.platform === 'ios' && Boolean(this.apns))));
   }
 
   async available(ownerId: string): Promise<boolean> {
@@ -121,6 +134,7 @@ export class WebPushSurface implements OwnerSurface {
   async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
     const payload = pushPayload(attention);
     return Promise.all((await this.targets(attention.ownerId)).map(async (device): Promise<SurfaceResult> => {
+      if (device.platform === 'ios') return this.deliverNative(attention, device.id, device.deviceToken);
       try {
         const result = await this.sender.send(JSON.parse(device.deviceToken) as PushSubscriptionJSON, payload, {
           ttlSeconds: attention.priority === 'interrupt' ? 600 : 3600,
@@ -135,6 +149,16 @@ export class WebPushSurface implements OwnerSurface {
         return { status: 'failed', deviceId: device.id, error: statusCode ? `push service ${statusCode}` : (error as Error).message };
       }
     }));
+  }
+
+  private async deliverNative(attention: OwnerAttention, deviceId: string, token: string): Promise<SurfaceResult> {
+    try {
+      const result = await this.apns!.send(token, apnsMessage(attention));
+      return { status: 'sent', deviceId, providerId: result.apnsId ?? '200', surface: 'apns' };
+    } catch (error) {
+      if (error instanceof ApnsError && error.deviceGone) await this.devices.setStatus(deviceId, 'expired');
+      return { status: 'failed', deviceId, error: (error as Error).message, surface: 'apns' };
+    }
   }
 }
 

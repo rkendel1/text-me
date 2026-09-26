@@ -98,7 +98,7 @@ export class InMemoryOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
   async upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice> {
     const existing = [...this.items.values()].find((item) => item.ownerId === device.ownerId && item.deviceToken === device.deviceToken);
     const next = existing
-      ? { ...existing, capabilities: device.capabilities, label: device.label ?? existing.label, status: 'active' as const, lastSeenAt: new Date() }
+      ? { ...existing, capabilities: device.capabilities, label: device.label ?? existing.label, sessionId: device.sessionId, status: 'active' as const, lastSeenAt: new Date() }
       : device;
     this.items.set(next.id, structuredClone(next));
     return structuredClone(next);

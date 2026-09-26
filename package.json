@@ -8,7 +8,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
-    "bridge:macos": "node dist/owner/macos-bridge-runtime.js"
+    "bridge:macos": "node dist/owner/macos-bridge-runtime.js",
+    "acceptance": "node scripts/acceptance.mjs"
   },
   "repository": {
     "type": "git",
@@ -39,6 +40,7 @@
     "@types/supertest": "^7.2.1",
     "@types/web-push": "^3.6.4",
     "@types/ws": "^8.18.1",
+    "playwright-core": "1.63",
     "supertest": "^7.3.0",
     "tsx": "^4.23.15",
     "typescript": "~5.9.3"

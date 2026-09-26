@@ -6,18 +6,22 @@ authority.** A client never holds AI, telephony, durable conversation state or
 owner authority. It renders state, registers for notifications and sends
 commands.
 
-All routes need `Authorization: Bearer <owner token>`. EventSource can't set
-headers, so the live streams also accept `?token=`.
+All routes need `Authorization: Bearer <session>`. EventSource can't set
+headers, so the live streams (`…/events`) also accept `?token=<session>`.
 
 ## 1. Authentication
 
 | | |
 |---|---|
-| `GET /conversations` → `200` | the token is valid |
-| any route → `401` | sign in again |
+| `POST /auth/sessions {accessKey, platform: 'web'\|'ios', label}` | `201 {token, session}`. Keep the token (Keychain on iOS); never keep the access key |
+| `GET /auth/session`, `DELETE /auth/session` | Who am I / sign out |
+| `GET /auth/sessions`, `DELETE /auth/sessions/:id` | Signed-in devices; signing one out also stops its notifications |
+| any route → `401 {code: session_expired \| session_revoked}` | Sign in again, showing why |
 
-The owner token identifies the owner. Everything below is scoped to that owner
-server-side, and the ids a client sends are always re-checked against it.
+Sessions last 30 days and slide while used. Everything below is scoped to the
+session's owner server-side, and the ids a client sends are always re-checked
+against it. `GET /owner/control-plane` is the one snapshot every surface
+bootstraps from; see `docs/release-audit.md` §2.
 
 ## 2. Conversation state
 

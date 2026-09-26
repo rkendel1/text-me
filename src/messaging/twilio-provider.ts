@@ -8,7 +8,8 @@ export class TwilioMessagingProvider implements MessagingProvider {
   constructor(
     accountSid: string,
     authToken: string,
-    private readonly from: string,
+    /** The assistant line; resolved lazily when it isn't configured. */
+    private readonly from: string | (() => Promise<string>),
   ) {
     this.client = twilio(accountSid, authToken);
   }
@@ -16,7 +17,7 @@ export class TwilioMessagingProvider implements MessagingProvider {
   async sendMessage(input: MessagingInput): Promise<{ providerMessageId: string }> {
     const message = await this.client.messages.create({
       to: input.to,
-      from: this.from,
+      from: typeof this.from === 'string' ? this.from : await this.from(),
       body: input.body,
     });
     return { providerMessageId: message.sid };

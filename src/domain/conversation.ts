@@ -58,6 +58,7 @@ export type ConversationEventType =
   | 'caller.identified'
   | 'assistant.activity'
   | 'call.declined'
+  | 'call.forwarded'
   | 'voicemail.recorded';
 
 export interface ConversationEvent {

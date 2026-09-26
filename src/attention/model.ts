@@ -40,7 +40,7 @@ export interface OwnerAttention {
   resolvedAt?: Date;
 }
 
-export type OwnerSurfaceKind = 'web_push' | 'mac_messages' | 'owner_sms';
+export type OwnerSurfaceKind = 'web_push' | 'apns' | 'mac_messages' | 'owner_sms';
 
 export interface NotificationDelivery {
   id: string;
@@ -66,6 +66,8 @@ export interface OwnerSurfaceDevice {
   deviceToken: string;
   capabilities: OwnerDeviceCapability[];
   label?: string;
+  /** The sign-in session that registered it; signing that session out stops its notifications. */
+  sessionId?: string;
   status: 'active' | 'expired' | 'revoked';
   createdAt: Date;
   lastSeenAt: Date;

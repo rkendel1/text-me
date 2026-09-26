@@ -63,24 +63,21 @@ and the audit checklist.
    `LISTEN/NOTIFY`). Tables are created automatically on first request.
 3. **AI Gateway** authenticates with Vercel OIDC automatically on Vercel. No
    key is needed. Elsewhere, set `AI_GATEWAY_API_KEY`.
-4. **Set environment variables** (Project → Settings → Environment Variables):
-
-   | Variable | Purpose |
-   |---|---|
-   | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` | Twilio account and number (the auth token also validates webhook signatures) |
-   | `OWNER_PHONE_NUMBER` | Where owner notifications go by SMS, and where owner SMS replies come from |
-   | `OWNER_AUTH_TOKEN` | The owner's sign-in token for the control plane |
-   | `REALTIME_MODEL` *(optional)* | Voice model, default `openai/gpt-realtime-2` |
-   | `REALTIME_VOICE_NAME` *(optional)* | Voice id for the realtime model |
-   | `TEXT_MODEL` *(optional)* | Text model, default `anthropic/claude-haiku-4.5` |
-   | `PUBLIC_BASE_URL` *(optional)* | Defaults to `https://<project>.vercel.app` |
-   | `REALTIME_VOICE=off` *(optional)* | Fall back to the non-realtime voice flow |
-
-5. **On your iPhone, open `https://<project>.vercel.app` in Safari**, sign in,
-   and follow first run. **Connect My Number** points your Twilio number at
-   the deployment for you. Then add the app to your Home Screen and turn on
-   notifications. Web Push keys are generated once and stored in Neon;
-   `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` are optional overrides.
+4. **Set environment variables** (Project → Settings → Environment Variables).
+   Every variable, and exactly where to get it, is in
+   [`docs/release-audit.md` §6](docs/release-audit.md#6-environment-variables-where-to-get-each-one).
+   The required ones: `OWNER_AUTH_TOKEN` (your access key), `OWNER_PHONE_NUMBER`
+   (your real mobile number), `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`.
+5. **Check it:** `https://<project>.vercel.app/health/ready` must return 200.
+   Production refuses to start with fakes or in-memory state and says what's
+   missing.
+6. **On your iPhone, open `https://<project>.vercel.app`**, sign in with the
+   access key, and follow first run. **Keep your number** connects the
+   assistant line and shows the forwarding code for your carrier: callers keep
+   dialing your real number, and calls you don't take go to your assistant.
+7. **Run the acceptance journey** against the deployment:
+   `npm run acceptance -- --url https://<project>.vercel.app --key <access key>`.
+8. *Optional:* the native iOS app is in [`ios/`](ios/README.md).
 
 ## Run locally
 

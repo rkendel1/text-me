@@ -343,7 +343,7 @@ test('call and assistant settings change the next call, with no Mac involved', a
   // Answering off, voicemail off: they're asked to text.
   await request(plane.app).patch('/owner/configuration').set(auth).send({ calls: { voicemailFallback: false } });
   const texted = await start('a4');
-  assert.match(texted.answer.text, /Please send a text message to this number instead/);
+  assert.match(texted.answer.text, /Please send a text message instead/);
 });
 
 test('settings: defaults, persistence, revisions, conflicts, audit, and owner isolation', async () => {
