@@ -78,11 +78,11 @@ class BackendOwnerBridgeClient {
     if (!response.ok) throw new Error(`Delivery failure update failed: ${response.status}`);
   }
 
-  async submitReply(deviceId: string, externalId: string, body: string, deliveryId?: string): Promise<void> {
+  async submitReply(deviceId: string, externalId: string, body: string, deliveryId?: string, replyToExternalId?: string): Promise<void> {
     const response = await fetch(this.url(`/owner/devices/${deviceId}/messages/replies`), {
       method: 'POST',
       headers: { ...this.headers(), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ externalId, body, deliveryId }),
+      body: JSON.stringify({ externalId, body, deliveryId, replyToExternalId }),
     });
     if (!response.ok) throw new Error(`Owner reply submit failed: ${response.status}`);
   }
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
       currentChatId = device.assistantChat.chatId;
       bridge = new MacOSMessagesBridge(adapter, {
         async submitOwnerMessage(input) {
-          await backend.submitReply(state.deviceId!, input.externalId, input.body, input.deliveryId);
+          await backend.submitReply(state.deviceId!, input.externalId, input.body, input.deliveryId, input.replyToExternalId);
         },
         async confirmOwnerDelivery(input) {
           await backend.markObserved(state.deviceId!, input.deliveryId, input.externalId);

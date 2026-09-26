@@ -215,7 +215,6 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
             messages_identity = EXCLUDED.messages_identity,
             is_primary = EXCLUDED.is_primary,
             bridge_version = EXCLUDED.bridge_version,
-            created_at = EXCLUDED.created_at,
             updated_at = EXCLUDED.updated_at,
             last_seen_at = EXCLUDED.last_seen_at,
             revoked_at = EXCLUDED.revoked_at
@@ -689,7 +688,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
     return result.rows[0] ? hydrateDelivery(result.rows[0]) : null;
   }
 
-  async claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string): Promise<OwnerMessageDeliveryRecord | null> {
+  async claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string, replyToExternalId?: string): Promise<OwnerMessageDeliveryRecord | null> {
     const result = await this.pool.query<OwnerMessageDeliveryRow>(
       `
         WITH target AS (
@@ -698,7 +697,8 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
            WHERE device_id = $1
              AND status IN ('sent', 'observed')
              AND ($3::text IS NULL OR id = $3)
-           ORDER BY created_at ASC
+             AND ($4::text IS NULL OR observed_external_id = $4 OR provider_request_id = $4)
+           ORDER BY created_at DESC
            LIMIT 1
            FOR UPDATE SKIP LOCKED
         )
@@ -708,7 +708,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
          WHERE deliveries.id = target.id
          RETURNING deliveries.*
       `,
-      [deviceId, externalId, deliveryId ?? null],
+      [deviceId, externalId, deliveryId ?? null, replyToExternalId ?? null],
     );
     return result.rows[0] ? hydrateDelivery(result.rows[0]) : null;
   }

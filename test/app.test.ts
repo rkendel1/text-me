@@ -517,11 +517,19 @@ test('device delivery queue and Mac replies bridge owner messages back to the ca
     .set(auth)
     .send({ externalId: 'request-1' });
   assert.equal(observed.status, 200, JSON.stringify(observed.body));
+  const sentEvent = (await repository.getById(created.conversation.id))!.events.find((event) => event.type === 'owner.delivery.sent');
+  assert.deepEqual(sentEvent?.payload, {
+    messageId: pending.body[0].messageId,
+    deliveryId: pending.body[0].id,
+    externalId: 'request-1',
+    providerRequestId: 'request-1',
+    source: 'macos_messages',
+  });
 
   const reply = await request(app)
     .post(`/owner/devices/${pair.device.id}/messages/replies`)
     .set(auth)
-    .send({ externalId: 'reply-1', body: 'Friday at 2 works.' });
+    .send({ externalId: 'reply-1', body: 'Friday at 2 works.', deliveryId: pending.body[0].id, replyToExternalId: 'request-1' });
   assert.equal(reply.status, 200, JSON.stringify(reply.body));
   assert.equal(messaging.sentMessages.length, 2);
   assert.equal(messaging.sentMessages[1]?.body, 'Randy says Friday at 2 works.');
@@ -529,6 +537,66 @@ test('device delivery queue and Mac replies bridge owner messages back to the ca
     message.role === 'owner' && message.body === 'Friday at 2 works.'), true);
   assert.equal(reply.body.messages.some((message: { role: string; body: string }) =>
     message.role === 'assistant' && message.body === 'Randy says Friday at 2 works.'), true);
+});
+
+
+test('delivery failure route records a durable owner delivery failure event', async () => {
+  const repository = new InMemoryConversationRepository();
+  const created = await repository.createIfAbsent({
+    provider: 'fake',
+    providerCallId: 'mac-failure',
+    callerPhone: '+15555550123',
+    status: 'answered',
+    startedAt: new Date(),
+    ownerId: 'randy',
+  });
+  await repository.appendEvent(created.conversation.id, 'sms.consent.granted', {
+    phoneNumber: '+15555550123',
+  }, new Date());
+  await repository.updateStatus(created.conversation.id, 'answered', { state: 'awaiting_sms_consent' });
+
+  const messaging = new FakeMessagingProvider();
+  const adapter = new FakeMacMessagesAdapter();
+  adapter.chats = [{ id: 'assistant-chat', service: 'imessage', displayName: 'Assistant', address: 'assistant@example.test' }];
+  const ownerDevices = new OwnerDeviceService();
+  const ownerConfiguration = new OwnerConfigurationService();
+  const ownerDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const pair = await ownerDevices.pair('randy', 'Randy Mac');
+  const activation = await ownerDevices.activate(pair.device.id, pair.pairingCode);
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.discoverChats(activation.sessionToken, adapter);
+  await ownerDevices.authorizeChat('randy', pair.device.id, 'assistant-chat', 'imessage');
+  await ownerDevices.heartbeat(activation.sessionToken, await adapter.checkCapabilities());
+  await ownerDevices.setPrimary('randy', pair.device.id);
+  const app = createApp({
+    repository,
+    ownerId: 'randy',
+    ownerChannel: new QueuedMacMessagesOwnerChannel(ownerDeliveries, ownerDevices, ownerConfiguration),
+    ownerDeviceService: ownerDevices,
+    ownerConfigurationService: ownerConfiguration,
+    ownerDeliveryStore: ownerDeliveries,
+    ownerMessagesAdapter: adapter,
+    messagingProvider: messaging,
+  });
+  const auth = { Authorization: 'Bearer ' + activation.sessionToken };
+
+  await request(app).post(`/conversations/${created.conversation.id}/convert-to-text`);
+  const pending = await request(app)
+    .get(`/owner/devices/${pair.device.id}/deliveries`)
+    .set(auth);
+  const failed = await request(app)
+    .post(`/owner/devices/${pair.device.id}/deliveries/${pending.body[0].id}/failed`)
+    .set(auth)
+    .send({ error: 'Messages.app unavailable' });
+
+  assert.equal(failed.status, 200, JSON.stringify(failed.body));
+  const failureEvent = (await repository.getById(created.conversation.id))!.events.find((event) => event.type === 'owner.delivery.failed');
+  assert.deepEqual(failureEvent?.payload, {
+    messageId: pending.body[0].messageId,
+    deliveryId: pending.body[0].id,
+    error: 'Messages.app unavailable',
+    source: 'macos_messages',
+  });
 });
 
 test('authenticated owner inbox authorizes and mediates web messages', async () => {

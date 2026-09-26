@@ -380,7 +380,8 @@ export function createApp(options: AppOptions): express.Express {
       const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
       if (!externalId || !body) throw new HttpError(400, 'externalId and body are required');
       const deliveryId = typeof request.body?.deliveryId === 'string' ? request.body.deliveryId : undefined;
-      const delivery = await ownerDeliveries.claimReplyTarget(device.id, externalId, deliveryId);
+      const replyToExternalId = typeof request.body?.replyToExternalId === 'string' ? request.body.replyToExternalId : undefined;
+      const delivery = await ownerDeliveries.claimReplyTarget(device.id, externalId, deliveryId, replyToExternalId);
       if (!delivery) throw new HttpError(409, 'No owner delivery is awaiting a reply');
       await options.repository.appendEvent(delivery.conversationId, 'owner.message.received', {
         deliveryId: delivery.id,

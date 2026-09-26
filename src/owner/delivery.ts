@@ -32,7 +32,7 @@ export interface OwnerMessageDeliveryStore {
   markSent(deviceId: string, deliveryId: string, providerRequestId: string): Promise<OwnerMessageDeliveryRecord | null>;
   markObserved(deviceId: string, deliveryId: string, observedExternalId: string): Promise<OwnerMessageDeliveryRecord | null>;
   markFailed(deviceId: string, deliveryId: string, error: string): Promise<OwnerMessageDeliveryRecord | null>;
-  claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string): Promise<OwnerMessageDeliveryRecord | null>;
+  claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string, replyToExternalId?: string): Promise<OwnerMessageDeliveryRecord | null>;
 }
 
 export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliveryStore {
@@ -101,13 +101,15 @@ export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
     return structuredClone(delivery);
   }
 
-  async claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string): Promise<OwnerMessageDeliveryRecord | null> {
+  async claimReplyTarget(deviceId: string, externalId: string, deliveryId?: string, replyToExternalId?: string): Promise<OwnerMessageDeliveryRecord | null> {
     const delivery = deliveryId
       ? this.deliveries.get(deliveryId)
-      : [...this.deliveries.values()]
-        .filter((candidate) => candidate.deviceId === deviceId &&
-          (candidate.status === 'observed' || candidate.status === 'sent'))
-        .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())[0];
+      : replyToExternalId
+        ? [...this.deliveries.values()].find((candidate) =>
+          candidate.deviceId === deviceId &&
+          (candidate.status === 'observed' || candidate.status === 'sent') &&
+          (candidate.observedExternalId === replyToExternalId || candidate.providerRequestId === replyToExternalId))
+        : undefined;
     if (!delivery || delivery.deviceId !== deviceId || (delivery.status !== 'observed' && delivery.status !== 'sent')) return null;
     delivery.status = 'replied';
     delivery.repliedExternalId = externalId;
