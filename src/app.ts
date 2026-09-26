@@ -630,14 +630,23 @@ export function createApp(options: AppOptions): express.Express {
         !['commandId', 'expectedRevision', 'expiresAt'].includes(field),
       ) as [keyof RuntimeConfigurationPatch, unknown][];
       if (fields.length === 0) throw new HttpError(400, 'At least one runtime field is required');
+      if (patch.expiresAt !== undefined &&
+        (typeof patch.expiresAt !== 'string' || !Number.isFinite(new Date(patch.expiresAt).getTime()))) {
+        throw new HttpError(400, 'expiresAt must be a valid date');
+      }
       let snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
-      for (const [field, value] of fields) {
+      const commandInput = runtimeInput(request);
+      for (const [index, [field, value]] of fields.entries()) {
         snapshot = await runtime.setTemporaryOverride(
           String(request.params.id),
           runtimeOwner(request),
           field as Parameters<RuntimeControlService['setTemporaryOverride']>[2],
           value,
-          runtimeInput(request),
+          {
+            ...commandInput,
+            commandId: index === 0 ? commandInput.commandId : undefined,
+            expectedRevision: snapshot.configurationRevision,
+          },
           typeof patch.expiresAt === 'string' ? new Date(patch.expiresAt) : undefined,
         );
       }

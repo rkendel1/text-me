@@ -213,6 +213,10 @@ export class RuntimeControlService {
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
     this.assertRevision(runtime, input.expectedRevision);
+    this.validateOverride(field, value);
+    if (expiresAt && !Number.isFinite(expiresAt.getTime())) {
+      throw new HttpError(400, 'expiresAt must be a valid date');
+    }
     const override: RuntimeOverride = {
       conversationId,
       field,
@@ -247,6 +251,7 @@ export class RuntimeControlService {
     if (existing) return this.ensureRuntime(conversation);
     const runtime = await this.ensureRuntime(conversation);
     this.assertRevision(runtime, input.expectedRevision);
+    this.validateOverrideField(field);
     await this.overrides.delete(conversationId, field);
     const refreshed = await this.ensureRuntime(conversation, true);
     await this.controller.update(conversationId, refreshed);
@@ -458,6 +463,44 @@ export class RuntimeControlService {
         ...current,
         [override.field]: override.value,
       }), runtime);
+  }
+
+  private validateOverrideField(field: RuntimeOverrideField): void {
+    const fields: RuntimeOverrideField[] = [
+      'assistantEnabled',
+      'aiMode',
+      'responseStyle',
+      'verbosity',
+      'askOwnerWhen',
+      'allowCommitments',
+      'allowScheduling',
+      'allowCallerFollowups',
+      'customInstructions',
+      'voiceEnabled',
+      'transcriptionEnabled',
+      'smsTransitionEnabled',
+    ];
+    if (!fields.includes(field)) throw new HttpError(400, 'Invalid runtime field');
+  }
+
+  private validateOverride(field: RuntimeOverrideField, value: unknown): void {
+    this.validateOverrideField(field);
+    const validValues: Record<RuntimeOverrideField, readonly unknown[]> = {
+      assistantEnabled: [true, false],
+      aiMode: ['automatic', 'owner_assist', 'owner_only'],
+      responseStyle: ['concise', 'friendly', 'professional', 'custom'],
+      verbosity: ['short', 'normal', 'detailed'],
+      askOwnerWhen: ['never', 'uncertain', 'important', 'always'],
+      allowCommitments: [true, false],
+      allowScheduling: [true, false],
+      allowCallerFollowups: [true, false],
+      customInstructions: [],
+      voiceEnabled: [true, false],
+      transcriptionEnabled: [true, false],
+      smsTransitionEnabled: [true, false],
+    };
+    if (field === 'customInstructions' && typeof value === 'string') return;
+    if (!validValues[field].includes(value)) throw new HttpError(400, `Invalid value for ${field}`);
   }
 
   private bump(runtime: ConversationRuntime, patch: Partial<ConversationRuntime>, incrementRevision = true): ConversationRuntime {

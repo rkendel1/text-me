@@ -63,10 +63,15 @@ export interface ConversationRuntime {
 }
 
 export type RuntimeOverrideField =
+  | 'assistantEnabled'
   | 'aiMode'
   | 'responseStyle'
   | 'verbosity'
   | 'askOwnerWhen'
+  | 'allowCommitments'
+  | 'allowScheduling'
+  | 'allowCallerFollowups'
+  | 'customInstructions'
   | 'voiceEnabled'
   | 'transcriptionEnabled'
   | 'smsTransitionEnabled';
