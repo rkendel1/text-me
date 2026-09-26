@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
+import rateLimit from 'express-rate-limit';
 
 import { HttpError } from './errors.js';
 import { presentConversation, presentConversationSummary } from './http/presenters.js';
@@ -18,6 +19,8 @@ import type { MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
 import type { OwnerChannel } from './owner/channel.js';
 import { OwnerDeviceService } from './owner/device.js';
+import type { MacMessagesAdapter } from './owner/mac-messages-adapter.js';
+import { OwnerConfigurationService, type OwnerConfigurationPatch } from './owner/configuration.js';
 import twilio from 'twilio';
 
 export interface AppOptions {
@@ -34,6 +37,8 @@ export interface AppOptions {
   ownerAuthToken?: string;
   ownerChannel?: OwnerChannel;
   ownerDeviceService?: OwnerDeviceService;
+  ownerMessagesAdapter?: MacMessagesAdapter;
+  ownerConfigurationService?: OwnerConfigurationService;
 }
 
 function createProviderMap(
@@ -89,6 +94,13 @@ export function createApp(options: AppOptions): express.Express {
   const messaging = options.messagingProvider ?? new FakeMessagingProvider();
   const ownerId = options.ownerId ?? process.env.OWNER_ID ?? 'owner';
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
+  const ownerConfiguration = options.ownerConfigurationService ?? new OwnerConfigurationService();
+  const ownerDeviceRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 60,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+  });
   const service = new ConversationService(
     options.repository, messaging, options.ownerPhone, ownerId, options.ownerChannel,
   );
@@ -166,8 +178,26 @@ export function createApp(options: AppOptions): express.Express {
         typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
       );
       response.status(201).json({
-        ...result,
+        pairingUri: result.pairingUri,
+        deviceId: result.device.id,
         device: { ...result.device, createdAt: result.device.createdAt.toISOString() },
+        expiresAt: result.expiresAt.toISOString(),
+      });
+
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/owner/devices/pair/qr', ownerAuth, async (request, response, next) => {
+    try {
+      const result = await ownerDevices.pair(
+        (request as Request & { ownerId?: string }).ownerId!,
+        typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
+      );
+      response.status(201).json({
+        deviceId: result.device.id,
+        pairingUri: result.pairingUri,
         expiresAt: result.expiresAt.toISOString(),
       });
     } catch (error) {
@@ -177,7 +207,9 @@ export function createApp(options: AppOptions): express.Express {
 
   app.post('/owner/devices/:id/activate', async (request, response, next) => {
     try {
-      const code = typeof request.body?.pairingCode === 'string' ? request.body.pairingCode : '';
+      const code = typeof request.body?.pairingCredential === 'string'
+        ? request.body.pairingCredential.replace(/^attn:\/\/pair\//, '')
+        : typeof request.body?.pairingCode === 'string' ? request.body.pairingCode : '';
       const result = await ownerDevices.activate(String(request.params.id), code);
       response.json({
         ...result,
@@ -187,8 +219,90 @@ export function createApp(options: AppOptions): express.Express {
           lastSeenAt: result.device.lastSeenAt?.toISOString() ?? null,
         },
       });
+
+      app.post('/owner/devices/activate', async (request, response, next) => {
+        try {
+          const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
+          const result = await ownerDevices.activatePairing(credential);
+          response.json(result);
+        } catch (error) {
+          next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
+        }
+      });
+
     } catch (error) {
       next(new HttpError(401, error instanceof Error ? error.message : 'Pairing failed'));
+    }
+  });
+
+  const deviceAuth = async (request: Request): Promise<import('./owner/device.js').OwnerDevice> => {
+    const authorization = request.header('Authorization') ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const device = await ownerDevices.authenticate(token);
+    if (!device || device.id !== String(request.params.id)) throw new HttpError(401, 'Device authentication required');
+    return device;
+  };
+
+  app.post('/owner/devices/:id/heartbeat', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      await deviceAuth(request);
+      if (!options.ownerMessagesAdapter?.checkCapabilities) throw new HttpError(501, 'Messages capability checks are unavailable');
+      response.json(await ownerDevices.heartbeat(
+        (request.header('Authorization') ?? '').slice(7),
+        await options.ownerMessagesAdapter.checkCapabilities(),
+      ));
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Device authentication required'));
+    }
+  });
+
+  app.get('/owner/devices/:id/messages/chats', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      await deviceAuth(request);
+      if (!options.ownerMessagesAdapter) throw new HttpError(501, 'Messages chat discovery is unavailable');
+      const chats = await ownerDevices.discoverChats((request.header('Authorization') ?? '').slice(7), options.ownerMessagesAdapter);
+      response.json(chats.map(({ id, service, displayName, address }) => ({ id, service, displayName, address })));
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(401, error instanceof Error ? error.message : 'Chat discovery failed'));
+    }
+  });
+
+  app.post('/owner/devices/:id/messages/chat', ownerDeviceRateLimit, ownerAuth, async (request, response, next) => {
+    try {
+      const service = request.body?.service;
+      const chatId = request.body?.chatId;
+      if ((service !== 'imessage' && service !== 'sms') || typeof chatId !== 'string' || !chatId.trim()) {
+        throw new HttpError(400, 'chatId and service are required');
+      }
+      response.json(await ownerDevices.authorizeChat(
+        (request as Request & { ownerId?: string }).ownerId!, String(request.params.id), chatId, service,
+      ));
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Chat authorization failed'));
+    }
+  });
+
+  app.get('/owner/configuration', ownerAuth, async (request, response) => {
+    response.json(ownerConfiguration.get((request as Request & { ownerId?: string }).ownerId!));
+  });
+
+  app.patch('/owner/configuration', ownerAuth, async (request, response, next) => {
+    try {
+      response.json(ownerConfiguration.update(
+        (request as Request & { ownerId?: string }).ownerId!,
+        request.body as OwnerConfigurationPatch,
+      ));
+    } catch (error) {
+      next(new HttpError(400, error instanceof Error ? error.message : 'Invalid configuration'));
+    }
+  });
+
+  app.get('/owner/devices/:id/configuration', ownerDeviceRateLimit, async (request, response, next) => {
+    try {
+      const device = await deviceAuth(request);
+      response.json({ deviceId: device.id, ownerId: device.ownerId, configuration: ownerConfiguration.get(device.ownerId) });
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(401, 'Device authentication required'));
     }
   });
 
@@ -210,6 +324,18 @@ export function createApp(options: AppOptions): express.Express {
       response.status(204).send();
     } catch (error) {
       next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
+    }
+  });
+
+  app.post('/owner/devices/:id/primary', ownerAuth, async (request, response, next) => {
+    try {
+      const device = await ownerDevices.setPrimary(
+        (request as Request & { ownerId?: string }).ownerId!,
+        String(request.params.id),
+      );
+      response.json(device);
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Device cannot be primary'));
     }
   });
 
@@ -282,7 +408,7 @@ button{border:0;border-radius:6px;background:#1769aa;color:white;padding:.65rem 
 #thread{display:flex;flex-direction:column;min-width:0}.messages{padding:1rem;overflow:auto;flex:1}.message{max-width:75%;padding:.7rem .9rem;margin:.6rem 0;border-radius:12px;background:#eef1f4}.message.owner{margin-left:auto;background:#d9f2d9}.message.assistant{margin-right:auto;background:#fff3cd}.role{font-size:.75rem;font-weight:700;color:#59636e}
 form{display:flex;gap:.5rem;padding:1rem;border-top:1px solid #dfe4ea}input{flex:1;padding:.7rem;border:1px solid #c7ced6;border-radius:6px}
 @media(max-width:650px){main{display:block}.detail{display:none}main.open aside{display:none}main.open .detail{display:flex;height:100vh}.detail h2{display:flex;justify-content:space-between}.back{display:block}aside h1{position:sticky;top:0;background:white}.item{padding:1.2rem 1rem}}
-</style></head><body><main id="app"><aside><h1>Conversations</h1><div id="list">Loading…</div></aside><section class="detail" id="thread"><h2>Select a conversation</h2></section></main>
+</style></head><body><main id="app"><aside><h1>Conversations</h1><button id="devicesButton">Connected Devices</button><div id="devices"></div><div id="list">Loading…</div></aside><section class="detail" id="thread"><h2>Select a conversation</h2></section></main>
 <script>
 const app=document.querySelector('#app'),list=document.querySelector('#list'),thread=document.querySelector('#thread'),token=localStorage.getItem('ownerToken')||'';
 const headers=token?{Authorization:'Bearer '+token}:{};
@@ -290,7 +416,8 @@ let selected;
 async function loadList(){const r=await fetch('/conversations',{headers});if(r.status===401){list.textContent='Sign in to view conversations.';return}const data=await r.json();list.innerHTML='';data.forEach(c=>{const b=document.createElement('button');b.className='item';b.innerHTML='<strong>'+((c.participant&&c.participant.name)||c.caller)+'</strong><span>'+c.preview+'</span><span>'+(c.needsOwner?'● Needs your response':c.unread?'New activity':'')+'</span>';b.onclick=()=>loadConversation(c.id);list.appendChild(b)})}
 async function loadConversation(id){selected=id;const r=await fetch('/conversations/'+id,{headers});if(!r.ok){thread.innerHTML='<h2>Conversation unavailable</h2>';return}const c=await r.json();app.classList.add('open');thread.innerHTML='<h2><button class="back" onclick="app.classList.remove(\\'open\\')">Back</button>'+((c.participants||[]).find(p=>p.role==='caller')||{}).displayName||c.caller+'</h2><div class="messages">'+(c.messages||[]).map(m=>'<div class="message '+m.role+'"><div class="role">'+(m.role==='owner'?'Randy':m.role[0].toUpperCase()+m.role.slice(1))+'</div>'+m.body+'</div>').join('')+'</div><form><input placeholder="Type a message…" required maxlength="2000"><button>Send</button></form>';thread.querySelector('form').onsubmit=sendMessage}
 async function sendMessage(e){e.preventDefault();const input=e.target.querySelector('input'),button=e.target.querySelector('button');button.disabled=true;const r=await fetch('/conversations/'+selected+'/messages',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({body:input.value})});if(r.ok)loadConversation(selected);else alert('Could not deliver response. Please retry.');button.disabled=false}
-loadList();setInterval(loadList,15000);
+async function loadDevices(){const r=await fetch('/owner/devices',{headers});if(!r.ok)return;const data=await r.json();document.querySelector('#devices').innerHTML=data.map(d=>'<div class="item"><strong>'+d.name+'</strong><span>'+(d.status==='active'?'Connected ✓':d.status)+'</span><span>Messages '+(d.health?.messagesAccess?'✓':'—')+' · Chat '+(d.health?.authorizedChat?'✓':'—')+' · '+(d.setupStatus+'</span>')).join('')}
+document.querySelector('#devicesButton').onclick=loadDevices;loadList();loadDevices();setInterval(loadList,15000);setInterval(loadDevices,15000);
 </script></body></html>`);
   });
 
