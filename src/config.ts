@@ -16,7 +16,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is required');
   }
-  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'OWNER_PHONE_NUMBER'];
+  const required = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'OWNER_PHONE_NUMBER', 'OWNER_AUTH_TOKEN'];
   for (const key of required) {
     if (!env[key]) throw new Error(`${key} is required`);
   }
