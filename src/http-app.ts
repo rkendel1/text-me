@@ -310,6 +310,12 @@ export function createApp(options: AppOptions): express.Express {
     standardHeaders: 'draft-8',
     legacyHeaders: false,
   });
+  const staticAssetRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: 300,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+  });
   // Owner attention: surfaces are optional add-ons; none of them is required for a conversation to work.
   const attentionStore = options.attentionStore ?? new InMemoryOwnerAttentionStore();
   const surfaceDevices = options.surfaceDeviceStore ?? new InMemoryOwnerSurfaceDeviceStore();
@@ -1633,27 +1639,27 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   const publicDir = fileURLToPath(new URL('../public/', import.meta.url));
-  app.get('/', (_request, response, next) => {
+  app.get('/', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.sendFile('index.html', { root: publicDir }, next);
   });
   // Deep link from a notification straight into one live conversation (the app loads it, no inbox step).
-  app.get('/conversations/:id/live', (_request, response, next) => {
+  app.get('/conversations/:id/live', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.sendFile('index.html', { root: publicDir }, next);
   });
-  app.get('/sw.js', (_request, response, next) => {
+  app.get('/sw.js', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Service-Worker-Allowed', '/');
     response.type('application/javascript').sendFile('sw.js', { root: publicDir }, next);
   });
-  app.get(/^\/icon-(180|192|512)\.png$/, (request, response, next) => {
+  app.get(/^\/icon-(180|192|512)\.png$/, staticAssetRateLimit, (request, response, next) => {
     response.sendFile(request.path.slice(1), { root: publicDir }, next);
   });
-  app.get('/manifest.webmanifest', (_request, response, next) => {
+  app.get('/manifest.webmanifest', staticAssetRateLimit, (_request, response, next) => {
     response.type('application/manifest+json').sendFile('manifest.webmanifest', { root: publicDir }, next);
   });
-  app.get('/icon.svg', (_request, response, next) => {
+  app.get('/icon.svg', staticAssetRateLimit, (_request, response, next) => {
     response.sendFile('icon.svg', { root: publicDir }, next);
   });
 
