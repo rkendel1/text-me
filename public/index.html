@@ -565,6 +565,16 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 </style>
 </head>
 <body>
+ 
+<div class="signin landing" id="landing">
+  <img class="app-icon" src="/icon.svg" alt="">
+  <h1>Just Text Me</h1>
+  <p>Your own intelligent number that keeps you informed and lets you take control when you need to.</p>
+  <p style="font-size:20px;font-weight:600;margin:12px 0 22px">$19.99/month <span style="font-size:14px;font-weight:400;color:var(--label-2)">· one simple plan</span></p>
+  <p style="color:var(--label-2);max-width:420px;margin:0 auto 22px">Your assistant answers your number, keeps you updated, and brings you in when it matters. No setup call required.</p>
+  <button class="btn-primary" type="button" id="landingStart">Create Account</button>
+  <button class="btn" type="button" id="landingSignIn" style="color:var(--blue);margin-top:4px">Already have an account? Sign in</button>
+</div>
 
 <div class="signin" id="signin" hidden>
   <img class="app-icon" src="/icon.svg" alt="">
@@ -1037,11 +1047,16 @@ $('#signinSwitch').onclick = () => setSigninMode(signinMode === 'signin' ? 'sign
 function showSignIn(message) {
   // Keep the first reason shown (expired / signed out); later unauthenticated requests don't erase it.
   if (message || $('#signin').hidden) $('#signinError').textContent = message || '';
-  $('#signin').hidden = false; $('#app').hidden = true; $('#onboard').hidden = true;
+  $('#landing').hidden = true; $('#signin').hidden = false; $('#app').hidden = true; $('#onboard').hidden = true;
   closeStream(); if (ownerStream) { ownerStream.close(); ownerStream = null; }
   postNative({ type: 'signedOut' });
   setTimeout(() => $(signinMode === 'signup' ? '#nameInput' : '#emailInput').focus(), 50);
 }
+function showLanding() {
+  $('#landing').hidden = false; $('#signin').hidden = true; $('#app').hidden = true; $('#onboard').hidden = true;
+}
+$('#landingStart').onclick = () => { $('#landing').hidden = true; setSigninMode('signup'); $('#signin').hidden = false; $('#nameInput').focus(); };
+$('#landingSignIn').onclick = () => { setSigninMode('signin'); $('#landing').hidden = true; $('#signin').hidden = false; $('#emailInput').focus(); };
 $('#signinForm').onsubmit = async (event) => {
   event.preventDefault();
   const button = $('#signinButton'); button.disabled = true; $('#signinError').textContent = '';
@@ -2331,7 +2346,12 @@ if ('serviceWorker' in navigator && !NATIVE) {
 let booted = false;
 async function boot() {
   await sessionReady;
-  if (!state.token) { showSignIn(); return; }
+  if (!state.token) {
+    if (location.pathname === '/signup') { setSigninMode('signup'); showSignIn(); } 
+    else if (location.pathname === '/signin') showSignIn();
+    else showLanding();
+    return;
+  }
   let me;
   try { me = await refreshMe(); } catch { return; /* api() already showed sign-in or offline */ }
   if (!me.activeAccountId) { showAccountPicker(); return; }

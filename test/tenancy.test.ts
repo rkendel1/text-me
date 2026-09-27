@@ -53,6 +53,15 @@ test('anyone can sign up: a user, an account with an opaque id, an owner members
   assert.equal(again.body.account.id, created.body.account.id, 'signing in resumes the same account');
 });
 
+test('rate-limited auth accepts Vercel forwarded client addresses', async () => {
+  const { app } = saas();
+  const response = await request(app)
+    .post('/auth/signup')
+    .set('X-Forwarded-For', '203.0.113.10')
+    .send({ email: 'forwarded@example.test', password: PASSWORD });
+  assert.equal(response.status, 201, JSON.stringify(response.body));
+});
+
 test('onboarding is a state machine derived from durable facts, and the UI can show what is left', async () => {
   const { app, messaging } = saas();
   const { headers } = await signUp(app, { name: 'Sam' });

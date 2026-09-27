@@ -313,6 +313,9 @@ export function createApp(options: AppOptions): express.Express {
     ? options.beforeRequest()
     : options.beforeRequest ?? Promise.resolve();
   const app = express();
+  // Vercel places one proxy in front of the app and forwards the client IP.
+  // This is required for express-rate-limit to safely use X-Forwarded-For.
+  app.set('trust proxy', 1);
   app.use((request, response, next) => {
     const startedAt = Date.now();
     const requestId = request.header('x-vercel-id') ?? request.header('x-request-id');
