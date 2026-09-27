@@ -1214,6 +1214,7 @@ export function createApp(options: AppOptions): express.Express {
 
   // ---- The control-plane contract: the browser and the iOS app use exactly these routes ----
   const signInLimit = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+  const billingLimit = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false });
   const presentSession = (session: AuthSession, current?: AuthSession) => ({
     id: session.id, platform: session.platform, label: session.label, accountId: session.accountId,
     createdAt: session.createdAt.toISOString(), lastUsedAt: session.lastUsedAt.toISOString(),
@@ -1293,7 +1294,7 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/billing/checkout', principal, async (request, response, next) => {
+  app.post('/billing/checkout', billingLimit, principal, async (request, response, next) => {
     try {
       if (!options.stripe) throw new HttpError(503, 'Billing is not configured.', 'billing_unavailable');
       const session = currentSession(request)!;
@@ -1323,7 +1324,7 @@ export function createApp(options: AppOptions): express.Express {
     } catch (error) { next(error); }
   });
 
-  app.post('/billing/portal', tenant('account.manage'), async (request, response, next) => {
+  app.post('/billing/portal', billingLimit, tenant('account.manage'), async (request, response, next) => {
     try {
       const subscription = await tenancy.getSubscription(accountOf(request));
       if (!options.stripe || !subscription?.stripeCustomerId) throw new HttpError(409, 'No Stripe customer is associated with this account.', 'billing_not_ready');
@@ -1331,7 +1332,7 @@ export function createApp(options: AppOptions): express.Express {
     } catch (error) { next(error); }
   });
 
-  app.post('/webhooks/stripe', async (request, response) => {
+  app.post('/webhooks/stripe', billingLimit, async (request, response) => {
     if (!options.stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
       response.status(503).json({ error: 'Stripe webhooks are not configured.' });
       return;
