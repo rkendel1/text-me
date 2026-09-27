@@ -420,8 +420,8 @@ test('the deployed app shell and static assets return through Express', async (t
 
 test('auth forms return to the app root after signing in from a deep link', async () => {
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
-  assert.match(html, /location\.replace\('\\/'\);/);
-  assert.doesNotMatch(html, /location\.replace\(location\.pathname/);
+  assert.ok(html.includes("location.replace('/');"));
+  assert.ok(!html.includes('location.replace(location.pathname'));
 });
 
 test('keep your real number: the account’s line comes from the platform pool, and forwarding is proven by a forwarded call', async () => {
