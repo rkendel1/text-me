@@ -62,6 +62,8 @@ export interface TenancyStore {
   savePlane(plane: Plane): Promise<void>;
 
   getSubscription(accountId: string): Promise<Subscription | null>;
+  findSubscriptionByStripeId(id: string): Promise<Subscription | null>;
+  updateSubscription(accountId: string, patch: Partial<Pick<Subscription, 'status' | 'stripeCustomerId' | 'stripeSubscriptionId' | 'stripePriceId' | 'currentPeriodEnd'>>): Promise<Subscription | null>;
   getProviderConfiguration(accountId: string): Promise<ProviderConfiguration | null>;
 
   recordAudit(event: AuditEvent): Promise<void>;
@@ -198,6 +200,18 @@ export class InMemoryTenancyStore implements TenancyStore {
 
   async getSubscription(accountId: string): Promise<Subscription | null> {
     return structuredClone(this.subscriptions.get(accountId) ?? null);
+  }
+
+  async findSubscriptionByStripeId(id: string): Promise<Subscription | null> {
+    return structuredClone([...this.subscriptions.values()].find((item) =>
+      item.stripeCustomerId === id || item.stripeSubscriptionId === id) ?? null);
+  }
+
+  async updateSubscription(accountId: string, patch: Partial<Pick<Subscription, 'status' | 'stripeCustomerId' | 'stripeSubscriptionId' | 'stripePriceId' | 'currentPeriodEnd'>>): Promise<Subscription | null> {
+    const subscription = this.subscriptions.get(accountId);
+    if (!subscription) return null;
+    Object.assign(subscription, structuredClone(patch), { updatedAt: new Date() });
+    return structuredClone(subscription);
   }
 
   async getProviderConfiguration(accountId: string): Promise<ProviderConfiguration | null> {

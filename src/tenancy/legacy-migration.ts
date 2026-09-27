@@ -110,7 +110,7 @@ export async function migrateLegacyDeployment(
     await tenancyStore.createAccount({
       account: { id: ids.accountId, name: (input.accountName ?? input.name).trim(), onboardingState: 'account_created', createdAt: now, updatedAt: now },
       membership: { id: ids.membershipId, accountId: ids.accountId, userId: ids.userId, role: 'owner', createdAt: now },
-      subscription: { accountId: ids.accountId, plan: 'standard', status: 'active', entitlements: DEFAULT_ENTITLEMENTS, createdAt: now, updatedAt: now },
+      subscription: { accountId: ids.accountId, plan: 'just-text-me', status: 'active', entitlements: DEFAULT_ENTITLEMENTS, createdAt: now, updatedAt: now },
       providerConfiguration: { accountId: ids.accountId, telephonyProvider: 'twilio', messagingProvider: 'twilio', settings: { migratedFrom: 'single_owner' }, updatedAt: now },
     });
   }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Text Me</title>
-<meta name="description" content="Live control for your phone assistant.">
+<meta name="description" content="Your own intelligent number, keeping you informed and in control.">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Text Me">
@@ -568,8 +568,10 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 
 <div class="signin" id="signin" hidden>
   <img class="app-icon" src="/icon.svg" alt="">
-  <h1 id="signinTitle">Text Me</h1>
-  <p id="signinLede">Sign in to see and control your assistant’s calls. This device stays signed in.</p>
+  <h1 id="signinTitle">Just Text Me</h1>
+  <p id="signinLede">Your own intelligent number that keeps you informed and lets you take control when you need to.</p>
+  <p style="font-size:20px;font-weight:600;margin:12px 0 22px">$19.99/month <span style="font-size:14px;font-weight:400;color:var(--label-2)">· one simple plan</span></p>
+  <p style="color:var(--label-2);max-width:420px;margin:0 auto 22px">Your assistant answers your number, keeps you updated, and brings you in when it matters. No setup call required.</p>
   <form id="signinForm" autocomplete="on">
     <div class="group">
       <label class="row" id="nameRow" hidden><span class="sr">Your name</span>
@@ -796,6 +798,7 @@ const state = {
   filter: 'all', search: '', tab: 'live', config: null, devices: [], plane: null,
   stream: null, streamId: null, sending: false, outbox: [],
 };
+const IOS_APP_STATUS = 'not_yet_available';
 
 class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
 
@@ -1024,7 +1027,7 @@ function setSigninMode(mode) {
   $('#nameRow').hidden = !signup;
   $('#nameInput').required = signup;
   $('#signinTitle').textContent = signup ? 'Create your account' : 'Text Me';
-  $('#signinLede').textContent = signup ? 'Your own assistant line, your own control plane. Nothing to install.' : 'Sign in to see and control your assistant’s calls. This device stays signed in.';
+  $('#signinLede').textContent = signup ? 'Create your Just Text Me account and get your own intelligent number.' : 'Your own intelligent number, ready when you are.';
   $('#signinButton').textContent = signup ? 'Create Account' : 'Sign In';
   $('#signinSwitch').textContent = signup ? 'Already have an account? Sign in' : 'New here? Create an account';
   $('#passwordInput').autocomplete = signup ? 'new-password' : 'current-password';
@@ -2027,6 +2030,19 @@ async function showSetup() {
   const node = $('#onboard'); node.hidden = false; $('#app').hidden = true;
   const me = state.me || await refreshMe();
   const onboarding = me.onboarding;
+  if (me.account?.subscription !== 'active') {
+    node.innerHTML = `<div class="inner"><img class="app-icon" src="/icon.svg" alt=""><h1>Welcome to Just Text Me</h1>
+      <p class="lede">Choose the $19.99/month plan to activate your account and continue setup.</p>
+      <div class="grow"></div><button class="btn filled" id="startBilling">Get Started — $19.99/month</button>
+      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSignOut">Sign Out</button>
+      <div class="err" id="obError"></div></div>`;
+    $('#startBilling').onclick = async () => {
+      try { const result = await api('/billing/checkout', { method: 'POST', body: {} }); window.location.href = result.url; }
+      catch (error) { setupError(error); }
+    };
+    $('#obSignOut').onclick = async () => { await api('/auth/session', { method: 'DELETE' }).catch(() => {}); resetToSignedOut(); };
+    return false;
+  }
   if (onboarding && onboarding.ready) { node.hidden = true; $('#app').hidden = false; return true; }
   const firstName = (me.user.name || '').split(' ')[0];
   node.innerHTML = `<div class="inner">
@@ -2120,6 +2136,7 @@ async function setupStep(step) {
     node.innerHTML = `<div class="inner"><div class="hero" style="padding-top:12px"><div class="shield" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)">${I.bell}</div></div>
       <h1 style="font-size:28px">Turn on notifications</h1>
       <p class="lede">You’ll only hear from your assistant when it needs you — like “Jordan needs you: Can you do Friday at 2?”</p>
+      <p class="lede" style="margin-top:8px"><b>iPhone app</b> · ${IOS_APP_STATUS === 'not_yet_available' ? 'Not yet available in the App Store.' : 'Download the app.'} You can skip this and use Just Text Me on the web.</p>
       <div class="err" id="obError"></div><div class="grow"></div>
       <button class="btn filled" id="obEnable" ${support === 'supported' ? '' : 'hidden'}>Turn On Notifications</button>
       ${phone.ownerNumber ? `<button class="btn tinted" id="obSms" style="margin-top:8px">Text Me at ${esc(formatPhone(phone.ownerNumber))}</button>` : ''}

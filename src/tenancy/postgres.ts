@@ -25,6 +25,11 @@ interface PhoneNumberRow {
   verification_expires_at: Date | null; verification_attempts: number; verified_at: Date | null; created_at: Date; updated_at: Date;
 }
 interface PlaneRow { id: string; account_id: string; name: string; status: Plane['status']; created_at: Date; updated_at: Date }
+interface SubscriptionRow {
+  account_id: string; plan: string; status: Subscription['status']; stripe_customer_id: string | null;
+  stripe_subscription_id: string | null; stripe_price_id: string | null; current_period_end: Date | null;
+  entitlements: Subscription['entitlements']; created_at: Date; updated_at: Date;
+}
 
 const toUser = (row: UserRow): User => ({ id: row.id, name: row.name, email: row.email, createdAt: row.created_at, updatedAt: row.updated_at });
 const toAccount = (row: AccountRow): Account => ({
@@ -131,11 +136,19 @@ export class PostgresTenancyStore implements TenancyStore {
           account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
           plan TEXT NOT NULL,
           status TEXT NOT NULL,
+          stripe_customer_id TEXT,
+          stripe_subscription_id TEXT,
+          stripe_price_id TEXT,
+          current_period_end TIMESTAMPTZ,
           entitlements JSONB NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL
         )
       `);
+      await db.query('ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT');
+      await db.query('ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT');
+      await db.query('ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS stripe_price_id TEXT');
+      await db.query('ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS current_period_end TIMESTAMPTZ');
       await db.query(`
         CREATE TABLE IF NOT EXISTS provider_configurations (
           account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
@@ -202,8 +215,8 @@ export class PostgresTenancyStore implements TenancyStore {
         [membership.id, membership.accountId, membership.userId, membership.role, membership.createdAt],
       );
       await client.query(
-        'INSERT INTO subscriptions (account_id, plan, status, entitlements, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)',
-        [account.id, subscription.plan, subscription.status, JSON.stringify(subscription.entitlements), subscription.createdAt, subscription.updatedAt],
+        'INSERT INTO subscriptions (account_id, plan, status, stripe_customer_id, stripe_subscription_id, stripe_price_id, current_period_end, entitlements, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [account.id, subscription.plan, subscription.status, subscription.stripeCustomerId ?? null, subscription.stripeSubscriptionId ?? null, subscription.stripePriceId ?? null, subscription.currentPeriodEnd ?? null, JSON.stringify(subscription.entitlements), subscription.createdAt, subscription.updatedAt],
       );
       await client.query(
         'INSERT INTO provider_configurations (account_id, telephony_provider, messaging_provider, settings, updated_at) VALUES ($1, $2, $3, $4, $5)',
@@ -324,10 +337,44 @@ export class PostgresTenancyStore implements TenancyStore {
   }
 
   async getSubscription(accountId: string): Promise<Subscription | null> {
-    const result = await this.pool.query<{ account_id: string; plan: string; status: Subscription['status']; entitlements: Subscription['entitlements']; created_at: Date; updated_at: Date }>(
+    const result = await this.pool.query<SubscriptionRow>(
       'SELECT * FROM subscriptions WHERE account_id = $1', [accountId]);
     const row = result.rows[0];
-    return row ? { accountId: row.account_id, plan: row.plan, status: row.status, entitlements: row.entitlements, createdAt: row.created_at, updatedAt: row.updated_at } : null;
+    return row ? {
+      accountId: row.account_id, plan: row.plan, status: row.status, entitlements: row.entitlements,
+      ...(row.stripe_customer_id ? { stripeCustomerId: row.stripe_customer_id } : {}),
+      ...(row.stripe_subscription_id ? { stripeSubscriptionId: row.stripe_subscription_id } : {}),
+      ...(row.stripe_price_id ? { stripePriceId: row.stripe_price_id } : {}),
+      ...(row.current_period_end ? { currentPeriodEnd: row.current_period_end } : {}),
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    } : null;
+  }
+
+  async updateSubscription(accountId: string, patch: Partial<Pick<Subscription, 'status' | 'stripeCustomerId' | 'stripeSubscriptionId' | 'stripePriceId' | 'currentPeriodEnd'>>): Promise<Subscription | null> {
+    const current = await this.getSubscription(accountId);
+    if (!current) return null;
+    const next = { ...current, ...patch, updatedAt: new Date() };
+    await this.pool.query(
+      `UPDATE subscriptions SET status = $2, stripe_customer_id = $3, stripe_subscription_id = $4,
+       stripe_price_id = $5, current_period_end = $6, updated_at = $7 WHERE account_id = $1`,
+      [accountId, next.status, next.stripeCustomerId ?? null, next.stripeSubscriptionId ?? null,
+        next.stripePriceId ?? null, next.currentPeriodEnd ?? null, next.updatedAt],
+    );
+    return next;
+  }
+
+  async findSubscriptionByStripeId(id: string): Promise<Subscription | null> {
+    const result = await this.pool.query<SubscriptionRow>(
+      'SELECT * FROM subscriptions WHERE stripe_customer_id = $1 OR stripe_subscription_id = $1 LIMIT 1', [id]);
+    const row = result.rows[0];
+    return row ? {
+      accountId: row.account_id, plan: row.plan, status: row.status, entitlements: row.entitlements,
+      ...(row.stripe_customer_id ? { stripeCustomerId: row.stripe_customer_id } : {}),
+      ...(row.stripe_subscription_id ? { stripeSubscriptionId: row.stripe_subscription_id } : {}),
+      ...(row.stripe_price_id ? { stripePriceId: row.stripe_price_id } : {}),
+      ...(row.current_period_end ? { currentPeriodEnd: row.current_period_end } : {}),
+      createdAt: row.created_at, updatedAt: row.updated_at,
+    } : null;
   }
 
   async getProviderConfiguration(accountId: string): Promise<ProviderConfiguration | null> {

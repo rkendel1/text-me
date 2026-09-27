@@ -92,7 +92,11 @@ export interface Entitlements {
 export interface Subscription {
   accountId: string;
   plan: string;
-  status: 'active' | 'past_due' | 'canceled';
+  status: 'pending' | 'active' | 'past_due' | 'canceled' | 'unpaid' | 'incomplete';
+  stripeCustomerId?: string;
+  stripeSubscriptionId?: string;
+  stripePriceId?: string;
+  currentPeriodEnd?: Date;
   entitlements: Entitlements;
   createdAt: Date;
   updatedAt: Date;

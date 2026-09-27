@@ -64,6 +64,7 @@ import { InMemoryTenancyStore, type TenancyStore } from './tenancy/store.js';
 import { TenancyService } from './tenancy/service.js';
 import { NotificationChannelResolver } from './tenancy/channels.js';
 import { assertJobOwnership, authorize, type TenantAction, type TenantContext } from './tenancy/authorization.js';
+import { checkout, portal, verifyWebhook, type StripeBilling } from './billing/stripe.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -125,6 +126,7 @@ export interface AppOptions {
   healthCheck?: () => Promise<void>;
   /** Shown by /health: which build is running. */
   release?: { environment: string; commit?: string };
+  stripe?: StripeBilling;
 }
 
 /** What production must be given explicitly; the in-memory defaults exist only for tests and local demos. */
@@ -522,7 +524,9 @@ export function createApp(options: AppOptions): express.Express {
       });
     });
   }
-  app.use(express.json());
+  app.use(express.json({ verify: (request, _response, buffer) => {
+    (request as Request & { rawBody?: string }).rawBody = buffer.toString('utf8');
+  } }));
   app.use(express.urlencoded({ extended: false }));
 
   const auth = new AuthService(options.authSessionStore ?? new InMemoryAuthSessionStore());
@@ -1251,7 +1255,10 @@ export function createApp(options: AppOptions): express.Express {
       user: presentUser(user),
       memberships: memberships.map((membership) => ({ accountId: membership.accountId, accountName: membership.accountName, role: membership.role })),
       activeAccountId: active ? session.accountId : null,
-      account: account ? { id: account.id, name: account.name, role: active!.role } : null,
+      account: account ? {
+        id: account.id, name: account.name, role: active!.role,
+        subscription: (await tenancy.getSubscription(account.id))?.status ?? 'pending',
+      } : null,
       onboarding: account ? await tenancy.refreshOnboarding(account.id) : null,
       session: presentSession(session, session),
     };
@@ -1283,6 +1290,71 @@ export function createApp(options: AppOptions): express.Express {
       response.status(201).json({ token, ...(await describeMe(session)) });
     } catch (error) {
       next(error);
+    }
+  });
+
+  app.post('/billing/checkout', principal, async (request, response, next) => {
+    try {
+      if (!options.stripe) throw new HttpError(503, 'Billing is not configured.', 'billing_unavailable');
+      const session = currentSession(request)!;
+      const user = await tenancy.getUser(session.userId);
+      if (!user) throw new HttpError(401, 'Authentication required', 'unauthenticated');
+      const subscription = await tenancy.getSubscription(session.accountId);
+      if (subscription?.status === 'active') {
+        response.status(409).json({ error: 'This account already has an active subscription.', code: 'already_subscribed' });
+        return;
+      }
+      const result = await checkout(options.stripe, { accountId: session.accountId, email: user.email });
+      await tenancyStore.updateSubscription(session.accountId, {
+        stripeCustomerId: result.customer,
+      });
+      response.json({ url: result.url, status: 'pending' });
+    } catch (error) { next(error); }
+  });
+
+  app.get('/billing', tenant('account.read'), async (request, response, next) => {
+    try {
+      const subscription = await tenancy.getSubscription(accountOf(request));
+      response.json(subscription ? {
+        plan: 'Just Text Me', price: '$19.99/month', status: subscription.status,
+        nextBillingDate: subscription.currentPeriodEnd?.toISOString() ?? null,
+        manageBilling: Boolean(options.stripe && subscription.stripeCustomerId),
+      } : null);
+    } catch (error) { next(error); }
+  });
+
+  app.post('/billing/portal', tenant('account.manage'), async (request, response, next) => {
+    try {
+      const subscription = await tenancy.getSubscription(accountOf(request));
+      if (!options.stripe || !subscription?.stripeCustomerId) throw new HttpError(409, 'No Stripe customer is associated with this account.', 'billing_not_ready');
+      response.json({ url: await portal(options.stripe, subscription.stripeCustomerId) });
+    } catch (error) { next(error); }
+  });
+
+  app.post('/webhooks/stripe', async (request, response) => {
+    if (!options.stripe || !process.env.STRIPE_WEBHOOK_SECRET) {
+      response.status(503).json({ error: 'Stripe webhooks are not configured.' });
+      return;
+    }
+    try {
+      const event = verifyWebhook((request as Request & { rawBody?: string }).rawBody ?? '', request.header('stripe-signature') ?? '', process.env.STRIPE_WEBHOOK_SECRET);
+      const object = (event.data as { object?: Record<string, unknown> } | undefined)?.object;
+      const customer = typeof object?.customer === 'string' ? object.customer : undefined;
+      const subscriptionId = typeof object?.id === 'string' ? object.id : undefined;
+      const existing = customer ? await tenancyStore.findSubscriptionByStripeId(customer) : subscriptionId ? await tenancyStore.findSubscriptionByStripeId(subscriptionId) : null;
+      if (existing) {
+        const statuses: Record<string, 'pending' | 'active' | 'past_due' | 'canceled' | 'unpaid' | 'incomplete'> = {
+          active: 'active', past_due: 'past_due', canceled: 'canceled', unpaid: 'unpaid', incomplete: 'incomplete',
+        };
+        const status = statuses[String(object?.status)] ?? (event.type === 'customer.subscription.deleted' ? 'canceled' : existing.status);
+        await tenancyStore.updateSubscription(existing.accountId, {
+          status, ...(subscriptionId ? { stripeSubscriptionId: subscriptionId } : {}),
+          ...(typeof object?.current_period_end === 'number' ? { currentPeriodEnd: new Date(object.current_period_end * 1000) } : {}),
+        });
+      }
+      response.json({ received: true });
+    } catch {
+      response.status(400).json({ error: 'Invalid Stripe webhook.' });
     }
   });
 
@@ -2003,6 +2075,12 @@ export function createApp(options: AppOptions): express.Express {
     response.setHeader('Cache-Control', 'no-cache');
     response.sendFile('index.html', { root: publicDir }, next);
   });
+  for (const path of ['/signup', '/signin', '/checkout', '/setup', '/app', '/billing']) {
+    app.get(path, staticAssetRateLimit, (_request, response, next) => {
+      response.setHeader('Cache-Control', 'no-cache');
+      response.sendFile('index.html', { root: publicDir }, next);
+    });
+  }
   // Deep link from a notification straight into one live conversation (the app loads it, no inbox step).
   app.get('/conversations/:id/live', staticAssetRateLimit, (_request, response, next) => {
     response.setHeader('Cache-Control', 'no-cache');
