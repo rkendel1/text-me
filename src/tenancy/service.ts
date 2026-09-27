@@ -107,7 +107,7 @@ export class TenancyService {
     await this.store.createAccount({
       account,
       membership,
-      subscription: { accountId: account.id, plan: 'standard', status: 'active', entitlements: DEFAULT_ENTITLEMENTS, createdAt: now, updatedAt: now },
+      subscription: { accountId: account.id, plan: 'just-text-me', status: 'pending', entitlements: DEFAULT_ENTITLEMENTS, createdAt: now, updatedAt: now },
       providerConfiguration: { accountId: account.id, telephonyProvider: 'twilio', messagingProvider: 'twilio', settings: {}, updatedAt: now },
     });
     await this.audit(account.id, 'account.created', { membershipId: membership.id }, userId);
