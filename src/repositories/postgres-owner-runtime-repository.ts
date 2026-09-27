@@ -20,11 +20,12 @@ import type {
   OwnerMessageDeliveryStore,
 } from '../owner/delivery.js';
 import type { MessagesChat } from '../owner/mac-messages-adapter.js';
-import { migrate } from './schema-lock.js';
+import { migrate, renameOwnerColumn } from './schema-lock.js';
 
 interface OwnerDeviceRow {
   id: string;
-  owner_id: string;
+  account_id: string;
+  user_id: string | null;
   type: OwnerDevice['type'];
   name: string;
   status: OwnerDevice['status'];
@@ -52,7 +53,7 @@ interface OwnerMessageChatRow {
 
 interface OwnerPairingRow {
   device_id: string;
-  owner_id: string;
+  account_id: string;
   credential: string;
   expires_at: Date;
 }
@@ -60,13 +61,13 @@ interface OwnerPairingRow {
 interface OwnerSessionRow {
   token: string;
   device_id: string;
-  owner_id: string;
+  account_id: string;
   created_at: Date;
   last_seen_at: Date;
 }
 
 interface OwnerConfigurationRow {
-  owner_id: string;
+  account_id: string;
   revision: number;
   assistant: OwnerConfiguration['assistant'];
   calls: OwnerConfiguration['calls'];
@@ -75,7 +76,7 @@ interface OwnerConfigurationRow {
 }
 
 interface OwnerAuditRow {
-  owner_id: string;
+  account_id: string;
   revision: number;
   type: string;
   source: string;
@@ -84,7 +85,7 @@ interface OwnerAuditRow {
 
 interface OwnerMessageDeliveryRow {
   id: string;
-  owner_id: string;
+  account_id: string;
   device_id: string;
   conversation_id: string;
   message_id: string;
@@ -113,7 +114,8 @@ function hydrateDevice(row: OwnerDeviceRow, chats: OwnerMessageChatRow[]): Owner
   const authorizedChat = chats.find((chat) => chat.is_authorized);
   return {
     id: row.id,
-    ownerId: row.owner_id,
+    accountId: row.account_id,
+    ...(row.user_id ? { userId: row.user_id } : {}),
     type: row.type,
     name: row.name,
     status: row.status,
@@ -141,7 +143,7 @@ function hydrateDevice(row: OwnerDeviceRow, chats: OwnerMessageChatRow[]): Owner
 function hydrateDelivery(row: OwnerMessageDeliveryRow): OwnerMessageDeliveryRecord {
   return {
     id: row.id,
-    ownerId: row.owner_id,
+    accountId: row.account_id,
     deviceId: row.device_id,
     conversationId: row.conversation_id,
     messageId: row.message_id,
@@ -168,7 +170,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_devices (
           id TEXT PRIMARY KEY,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           type TEXT NOT NULL,
           name TEXT NOT NULL,
           status TEXT NOT NULL,
@@ -183,7 +185,10 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           revoked_at TIMESTAMPTZ
         )
       `);
+      await renameOwnerColumn(db, 'owner_devices');
       await db.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS probe JSONB');
+      await db.query('ALTER TABLE owner_devices ADD COLUMN IF NOT EXISTS user_id TEXT');
+      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_devices_account ON owner_devices (account_id)');
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_messages_chats (
           device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
@@ -206,16 +211,16 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
       await client.query(
         `
           INSERT INTO owner_devices (
-            id, owner_id, type, name, status, setup_status, health,
+            id, account_id, type, name, status, setup_status, health,
             messages_identity, is_primary, bridge_version,
-            created_at, updated_at, last_seen_at, revoked_at, probe
+            created_at, updated_at, last_seen_at, revoked_at, probe, user_id
           ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10,
-            $11, $12, $13, $14, $15
+            $11, $12, $13, $14, $15, $16
           )
           ON CONFLICT (id) DO UPDATE SET
-            owner_id = EXCLUDED.owner_id,
+            user_id = COALESCE(EXCLUDED.user_id, owner_devices.user_id),
             type = EXCLUDED.type,
             name = EXCLUDED.name,
             status = EXCLUDED.status,
@@ -231,7 +236,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
         `,
         [
           device.id,
-          device.ownerId,
+          device.accountId,
           device.type,
           device.name,
           device.status,
@@ -245,6 +250,7 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
           device.lastSeenAt,
           device.revokedAt,
           device.probe ? JSON.stringify(device.probe) : null,
+          device.userId ?? null,
         ],
       );
       await client.query('DELETE FROM owner_messages_chats WHERE device_id = $1', [device.id]);
@@ -305,17 +311,17 @@ export class PostgresOwnerDeviceStore implements OwnerDeviceStore {
     return hydrateDevice(row, chatsResult.rows);
   }
 
-  async list(ownerId: string): Promise<OwnerDevice[]> {
+  async list(accountId: string): Promise<OwnerDevice[]> {
     const deviceResult = await this.pool.query<OwnerDeviceRow>(
-      'SELECT * FROM owner_devices WHERE owner_id = $1 ORDER BY created_at ASC',
-      [ownerId],
+      'SELECT * FROM owner_devices WHERE account_id = $1 ORDER BY created_at ASC',
+      [accountId],
     );
     const chatResult = await this.pool.query<OwnerMessageChatRow>(
       `SELECT chats.*
          FROM owner_messages_chats chats
          JOIN owner_devices devices ON devices.id = chats.device_id
-        WHERE devices.owner_id = $1`,
-      [ownerId],
+        WHERE devices.account_id = $1`,
+      [accountId],
     );
     return deviceResult.rows.map((row) => hydrateDevice(row, chatResult.rows.filter((chat) => chat.device_id === row.id)));
   }
@@ -329,58 +335,59 @@ export class PostgresOwnerPairingCredentialStore implements OwnerPairingCredenti
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_pairing_credentials (
           device_id TEXT PRIMARY KEY REFERENCES owner_devices(id) ON DELETE CASCADE,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           credential TEXT NOT NULL UNIQUE,
           expires_at TIMESTAMPTZ NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      await renameOwnerColumn(db, 'owner_pairing_credentials');
     });
   }
 
   async save(record: OwnerPairingCredentialRecord): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO owner_pairing_credentials (device_id, owner_id, credential, expires_at)
+        INSERT INTO owner_pairing_credentials (device_id, account_id, credential, expires_at)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (device_id) DO UPDATE SET
-          owner_id = EXCLUDED.owner_id,
+          account_id = EXCLUDED.account_id,
           credential = EXCLUDED.credential,
           expires_at = EXCLUDED.expires_at
       `,
-      [record.deviceId, record.ownerId, record.code, new Date(record.expiresAt)],
+      [record.deviceId, record.accountId, record.code, new Date(record.expiresAt)],
     );
   }
 
   async getByDeviceId(deviceId: string): Promise<OwnerPairingCredentialRecord | null> {
     const result = await this.pool.query<OwnerPairingRow>(
-      'SELECT device_id, owner_id, credential, expires_at FROM owner_pairing_credentials WHERE device_id = $1',
+      'SELECT device_id, account_id, credential, expires_at FROM owner_pairing_credentials WHERE device_id = $1',
       [deviceId],
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
+    return { deviceId: row.device_id, accountId: row.account_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
   }
 
   async consume(code: string, now: number): Promise<OwnerPairingCredentialRecord | null> {
     // DELETE … RETURNING is atomic: of two simultaneous scans, exactly one gets the row.
     const result = await this.pool.query<OwnerPairingRow>(
-      'DELETE FROM owner_pairing_credentials WHERE credential = $1 RETURNING device_id, owner_id, credential, expires_at',
+      'DELETE FROM owner_pairing_credentials WHERE credential = $1 RETURNING device_id, account_id, credential, expires_at',
       [code],
     );
     const row = result.rows[0];
     if (!row || new Date(row.expires_at).getTime() <= now) return null;
-    return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
+    return { deviceId: row.device_id, accountId: row.account_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
   }
 
   async getByCode(code: string): Promise<OwnerPairingCredentialRecord | null> {
     const result = await this.pool.query<OwnerPairingRow>(
-      'SELECT device_id, owner_id, credential, expires_at FROM owner_pairing_credentials WHERE credential = $1',
+      'SELECT device_id, account_id, credential, expires_at FROM owner_pairing_credentials WHERE credential = $1',
       [code],
     );
     const row = result.rows[0];
     if (!row) return null;
-    return { deviceId: row.device_id, ownerId: row.owner_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
+    return { deviceId: row.device_id, accountId: row.account_id, code: row.credential, expiresAt: new Date(row.expires_at).getTime() };
   }
 
   async delete(deviceId: string): Promise<void> {
@@ -397,26 +404,27 @@ export class PostgresOwnerDeviceSessionStore implements OwnerDeviceSessionStore 
         CREATE TABLE IF NOT EXISTS owner_device_sessions (
           token TEXT PRIMARY KEY,
           device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           last_seen_at TIMESTAMPTZ NOT NULL
         )
       `);
+      await renameOwnerColumn(db, 'owner_device_sessions');
     });
   }
 
   async save(record: OwnerDeviceSessionRecord): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO owner_device_sessions (token, device_id, owner_id, created_at, last_seen_at)
+        INSERT INTO owner_device_sessions (token, device_id, account_id, created_at, last_seen_at)
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (token) DO UPDATE SET
           device_id = EXCLUDED.device_id,
-          owner_id = EXCLUDED.owner_id,
+          account_id = EXCLUDED.account_id,
           created_at = EXCLUDED.created_at,
           last_seen_at = EXCLUDED.last_seen_at
       `,
-      [record.token, record.deviceId, record.ownerId, new Date(record.createdAt), new Date(record.lastSeenAt)],
+      [record.token, record.deviceId, record.accountId, new Date(record.createdAt), new Date(record.lastSeenAt)],
     );
   }
 
@@ -427,7 +435,7 @@ export class PostgresOwnerDeviceSessionStore implements OwnerDeviceSessionStore 
     return {
       token: row.token,
       deviceId: row.device_id,
-      ownerId: row.owner_id,
+      accountId: row.account_id,
       createdAt: new Date(row.created_at).getTime(),
       lastSeenAt: new Date(row.last_seen_at).getTime(),
     };
@@ -453,7 +461,7 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
     await migrate(this.pool, async (db) => {
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_configurations (
-          owner_id TEXT PRIMARY KEY,
+          account_id TEXT PRIMARY KEY,
           revision INTEGER NOT NULL,
           assistant JSONB NOT NULL,
           calls JSONB NOT NULL,
@@ -461,41 +469,44 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      await renameOwnerColumn(db, 'owner_configurations');
       await db.query(
         "ALTER TABLE owner_configurations ADD COLUMN IF NOT EXISTS onboarding JSONB NOT NULL DEFAULT '{}'::jsonb",
       );
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_configuration_revisions (
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           revision INTEGER NOT NULL,
           assistant JSONB NOT NULL,
           calls JSONB NOT NULL,
           messages JSONB NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          PRIMARY KEY (owner_id, revision)
+          PRIMARY KEY (account_id, revision)
         )
       `);
+      await renameOwnerColumn(db, 'owner_configuration_revisions');
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_configuration_audit (
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           revision INTEGER NOT NULL,
           type TEXT NOT NULL,
           source TEXT NOT NULL,
           occurred_at TIMESTAMPTZ NOT NULL
         )
       `);
+      await renameOwnerColumn(db, 'owner_configuration_audit');
     });
   }
 
-  async get(ownerId: string): Promise<OwnerConfiguration | null> {
+  async get(accountId: string): Promise<OwnerConfiguration | null> {
     const result = await this.pool.query<OwnerConfigurationRow>(
-      'SELECT owner_id, revision, assistant, calls, messages, onboarding FROM owner_configurations WHERE owner_id = $1',
-      [ownerId],
+      'SELECT account_id, revision, assistant, calls, messages, onboarding FROM owner_configurations WHERE account_id = $1',
+      [accountId],
     );
     const row = result.rows[0];
     if (!row) return null;
     return {
-      ownerId: row.owner_id,
+      accountId: row.account_id,
       revision: row.revision,
       assistant: row.assistant,
       calls: row.calls,
@@ -510,12 +521,12 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
       await client.query('BEGIN');
       await client.query(
         `
-          INSERT INTO owner_configurations (owner_id, revision, assistant, calls, messages, onboarding, updated_at)
+          INSERT INTO owner_configurations (account_id, revision, assistant, calls, messages, onboarding, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, NOW())
-          ON CONFLICT (owner_id) DO NOTHING
+          ON CONFLICT (account_id) DO NOTHING
         `,
         [
-          configuration.ownerId,
+          configuration.accountId,
           configuration.revision,
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
@@ -525,12 +536,12 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
       );
       await client.query(
         `
-          INSERT INTO owner_configuration_revisions (owner_id, revision, assistant, calls, messages)
+          INSERT INTO owner_configuration_revisions (account_id, revision, assistant, calls, messages)
           VALUES ($1, $2, $3, $4, $5)
-          ON CONFLICT (owner_id, revision) DO NOTHING
+          ON CONFLICT (account_id, revision) DO NOTHING
         `,
         [
-          configuration.ownerId,
+          configuration.accountId,
           configuration.revision,
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
@@ -538,8 +549,8 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
         ],
       );
       await client.query(
-        'INSERT INTO owner_configuration_audit (owner_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
-        [event.ownerId, event.revision, event.type, event.source, event.occurredAt],
+        'INSERT INTO owner_configuration_audit (account_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
+        [event.accountId, event.revision, event.type, event.source, event.occurredAt],
       );
       await client.query('COMMIT');
     } catch (error) {
@@ -563,10 +574,10 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
                  messages = $5,
                  onboarding = $7,
                  updated_at = NOW()
-           WHERE owner_id = $1 AND revision = $6
+           WHERE account_id = $1 AND revision = $6
         `,
         [
-          configuration.ownerId,
+          configuration.accountId,
           configuration.revision,
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
@@ -580,11 +591,11 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
       }
       await client.query(
         `
-          INSERT INTO owner_configuration_revisions (owner_id, revision, assistant, calls, messages)
+          INSERT INTO owner_configuration_revisions (account_id, revision, assistant, calls, messages)
           VALUES ($1, $2, $3, $4, $5)
         `,
         [
-          configuration.ownerId,
+          configuration.accountId,
           configuration.revision,
           JSON.stringify(configuration.assistant),
           JSON.stringify(configuration.calls),
@@ -592,8 +603,8 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
         ],
       );
       await client.query(
-        'INSERT INTO owner_configuration_audit (owner_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
-        [event.ownerId, event.revision, event.type, event.source, event.occurredAt],
+        'INSERT INTO owner_configuration_audit (account_id, revision, type, source, occurred_at) VALUES ($1, $2, $3, $4, $5)',
+        [event.accountId, event.revision, event.type, event.source, event.occurredAt],
       );
       await client.query('COMMIT');
     } catch (error) {
@@ -604,13 +615,13 @@ export class PostgresOwnerConfigurationStore implements OwnerConfigurationStore 
     }
   }
 
-  async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
+  async events(accountId: string): Promise<OwnerConfigurationAuditEvent[]> {
     const result = await this.pool.query<OwnerAuditRow>(
-      'SELECT owner_id, revision, type, source, occurred_at FROM owner_configuration_audit WHERE owner_id = $1 ORDER BY revision ASC, occurred_at ASC',
-      [ownerId],
+      'SELECT account_id, revision, type, source, occurred_at FROM owner_configuration_audit WHERE account_id = $1 ORDER BY revision ASC, occurred_at ASC',
+      [accountId],
     );
     return result.rows.map((row) => ({
-      ownerId: row.owner_id,
+      accountId: row.account_id,
       revision: row.revision,
       type: row.type,
       source: row.source,
@@ -627,7 +638,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_message_deliveries (
           id TEXT PRIMARY KEY,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           device_id TEXT NOT NULL REFERENCES owner_devices(id) ON DELETE CASCADE,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           message_id TEXT NOT NULL,
@@ -645,6 +656,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
           error TEXT
         )
       `);
+      await renameOwnerColumn(db, 'owner_message_deliveries');
     });
   }
 
@@ -654,7 +666,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
     const record = await this.pool.query<OwnerMessageDeliveryRow>(
       `
         INSERT INTO owner_message_deliveries (
-          id, owner_id, device_id, conversation_id, message_id, body,
+          id, account_id, device_id, conversation_id, message_id, body,
           correlation_key, status, provider_request_id, observed_external_id,
           replied_external_id, created_at, updated_at, observed_at, replied_at, failed_at, error
         ) VALUES (
@@ -666,7 +678,7 @@ export class PostgresOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
       `,
       [
         randomUUID(),
-        input.ownerId,
+        input.accountId,
         input.deviceId,
         input.conversationId,
         input.messageId,

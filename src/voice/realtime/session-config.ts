@@ -76,7 +76,7 @@ function escalationGuidance(runtime: ConversationRuntime, owner: string): string
     always: `Use ask_owner for every request that needs an answer from ${owner}.`,
   };
   const askMe = runtime.aiMode === 'owner_assist'
-    ? `Ask-me mode is on: keep the conversation going, but check with ${owner} (ask_owner) before any decision or answer on his behalf. `
+    ? `Ask-me mode is on: keep the conversation going, but check with ${owner} (ask_owner) before any decision or answer on their behalf. `
     : '';
   return askMe + when[runtime.askOwnerWhen];
 }
@@ -112,7 +112,7 @@ export function buildInstructions(
     escalationGuidance(runtime, owner),
     styleGuidance[runtime.responseStyle],
     verbosityGuidance[runtime.verbosity],
-    runtime.allowCommitments ? '' : `Never commit to anything on ${owner}'s behalf without asking him first.`,
+    runtime.allowCommitments ? '' : `Never commit to anything on ${owner}'s behalf without asking them first.`,
     runtime.allowScheduling ? '' : 'Do not book, move or confirm appointments yourself; ask the owner instead.',
     runtime.allowCallerFollowups ? '' : 'Do not promise that anyone will follow up.',
     channel === 'voice'

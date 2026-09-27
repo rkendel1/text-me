@@ -2,7 +2,7 @@ import type { Conversation, ConversationStatus } from '../domain/conversation.js
 import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provider.js';
-import type { MessagingProvider } from '../messaging/provider.js';
+import type { AccountMessaging } from '../messaging/provider.js';
 import type { OwnerAttentionService, RaiseAttentionInput } from '../attention/service.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 import { randomUUID } from 'node:crypto';
@@ -41,11 +41,12 @@ function canTransition(
 export class ConversationService {
   constructor(
     private readonly repository: ConversationRepository,
-    private readonly messaging?: MessagingProvider,
-    private readonly ownerPhone = process.env.OWNER_PHONE_NUMBER,
-    private readonly ownerId = process.env.OWNER_ID ?? 'owner',
+    /** Sends as the conversation's account, from that account's own assistant line. */
+    private readonly messaging?: AccountMessaging,
     /** Where "the owner should know" goes; surfaces (phone, Mac, SMS) are the router's business. */
     private readonly attention?: OwnerAttentionService,
+    /** How the account's owner is named to callers (from the account's own configuration). */
+    private readonly ownerNameFor: (accountId: string) => Promise<string> = async () => '',
   ) {}
 
   async recordEvent(conversationId: string, type: Conversation['events'][number]['type'], payload: Record<string, unknown>): Promise<void> {
@@ -56,20 +57,22 @@ export class ConversationService {
   async resolveAttention(conversationId: string, types: Parameters<OwnerAttentionService['resolve']>[2], reason: string): Promise<void> {
     if (!this.attention) return;
     const conversation = await this.repository.getById(conversationId);
-    await this.attention.resolve(conversation?.ownerId ?? this.ownerId, conversationId, types, reason).catch(() => undefined);
+    if (!conversation?.accountId) return;
+    await this.attention.resolve(conversation.accountId, conversationId, types, reason).catch(() => undefined);
   }
 
   /** Raise owner attention for a conversation; never fails the conversation itself. */
-  async raiseAttention(conversationId: string, input: Omit<RaiseAttentionInput, 'ownerId' | 'conversationId' | 'title'> & {
+  async raiseAttention(conversationId: string, input: Omit<RaiseAttentionInput, 'accountId' | 'conversationId' | 'title'> & {
     title: (callerName: string) => string;
   }): Promise<string | null> {
     if (!this.attention) return null;
     try {
       const conversation = await this.requireConversation(conversationId);
+      if (!conversation.accountId) throw new Error('conversation has no account');
       const attention = await this.attention.raise({
         ...input,
         title: input.title(callerDisplayName(conversation)),
-        ownerId: conversation.ownerId ?? this.ownerId,
+        accountId: conversation.accountId,
         conversationId,
       });
       return attention.id;
@@ -79,7 +82,9 @@ export class ConversationService {
     }
   }
 
-  async incomingCall(input: IncomingCall): Promise<Conversation> {
+  /** A call to one of the account's lines; the account comes from the called number, resolved by the caller of this. */
+  async incomingCall(input: IncomingCall, accountId: string): Promise<Conversation> {
+    if (!accountId) throw new HttpError(404, 'No account for this line');
     const occurredAt = new Date();
     const created = await this.repository.createIfAbsent({
       provider: input.provider,
@@ -87,8 +92,10 @@ export class ConversationService {
       callerPhone: input.callerPhone,
       status: 'received',
       startedAt: occurredAt,
-      ownerId: this.ownerId,
+      accountId,
     });
+    // Provider call ids are global; a replayed webhook can never attach a call to a different account.
+    if (created.conversation.accountId !== accountId) throw new HttpError(409, 'Call belongs to another account');
 
     if (created.created) {
       await this.repository.appendEvent(
@@ -144,8 +151,10 @@ export class ConversationService {
 
     const callerKey = `conversation:${conversationId}:sms:introduction`;
     const ownerKey = `conversation:${conversationId}:sms:owner-summary`;
+    const owner = (await this.ownerNameFor(conversation.accountId)).trim();
+    const whose = owner ? `${owner}'s` : 'the';
     await this.sendOnce(conversationId, callerKey, String(consent.payload.phoneNumber),
-      `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is Randy's assistant. We're continuing our conversation here because Randy prefers text. You can reply here and I'll take care of the conversation.`);
+      `Hi${consent.payload.displayName ? ` ${consent.payload.displayName}` : ''} — this is ${whose} assistant. We're continuing our conversation here because ${owner || 'they'} prefer${owner ? 's' : ''} text. You can reply here and I'll take care of the conversation.`);
     await this.raiseAttention(conversationId, {
       type: 'conversation_transferred',
       title: (name) => `${firstName(name)} is now texting`,
@@ -163,17 +172,18 @@ export class ConversationService {
     return this.requireConversation(conversationId);
   }
 
-  async receiveSms(input: IncomingSms): Promise<Conversation> {
-    const conversations = await this.repository.list();
+  /** A caller texted this account's line: only this account's text conversations are candidates. */
+  async receiveSms(accountId: string, input: IncomingSms): Promise<Conversation> {
+    const conversations = await this.repository.list(accountId);
     const conversation = conversations.find((candidate) => {
+      if (candidate.accountId !== accountId) return false;
       if (candidate.state !== 'text_active' && !candidate.events.some(
         (event) => event.type === 'conversation.channel_transitioned',
       )) return false;
       const consent = [...candidate.events].reverse().find(
         (event) => event.type === 'sms.consent.granted',
       );
-      return consent?.payload.phoneNumber === input.from ||
-        (this.ownerPhone === input.from && candidate.callerPhone !== input.from);
+      return consent?.payload.phoneNumber === input.from;
     });
     if (!conversation) throw new HttpError(404, 'Conversation not found');
     if (conversation.events.some(
@@ -181,12 +191,11 @@ export class ConversationService {
         event.payload.providerMessageId === input.providerMessageId,
     )) return conversation;
 
-    const owner = this.ownerPhone === input.from;
     await this.repository.appendEvent(conversation.id, 'sms.received', {
       providerMessageId: input.providerMessageId, from: input.from, body: input.body,
     }, new Date());
-    await this.repository.appendEvent(conversation.id, owner ? 'owner.message' : 'caller.message', {
-      providerMessageId: input.providerMessageId, speaker: owner ? 'owner' : 'caller',
+    await this.repository.appendEvent(conversation.id, 'caller.message', {
+      providerMessageId: input.providerMessageId, speaker: 'caller',
       text: input.body, channel: 'sms',
     }, new Date());
     return this.requireConversation(conversation.id);
@@ -230,9 +239,9 @@ export class ConversationService {
     return openOwnerRequest(conversation);
   }
 
-  /** Where an owner reply without an explicit conversation (SMS, Messages) should go. */
-  async findConversationForOwnerReply(): Promise<Conversation | null> {
-    const conversations = await this.repository.list();
+  /** Where an owner reply without an explicit conversation (SMS) should go: only within their own account. */
+  async findConversationForOwnerReply(accountId: string): Promise<Conversation | null> {
+    const conversations = (await this.repository.list(accountId)).filter((conversation) => conversation.accountId === accountId);
     const waiting = conversations
       .map((conversation) => ({ conversation, request: this.openOwnerRequest(conversation) }))
       .filter((candidate) => candidate.request)
@@ -245,8 +254,10 @@ export class ConversationService {
   /** Earlier conversations with the same caller, newest first. */
   async priorConversations(conversationId: string, limit = 3): Promise<Conversation[]> {
     const conversation = await this.requireConversation(conversationId);
-    return (await this.repository.list())
-      .filter((candidate) => candidate.id !== conversationId && candidate.callerPhone === conversation.callerPhone)
+    // A caller's history is the account's own: calls the same person made to another account never appear.
+    return (await this.repository.list(conversation.accountId))
+      .filter((candidate) => candidate.accountId === conversation.accountId &&
+        candidate.id !== conversationId && candidate.callerPhone === conversation.callerPhone)
       .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())
       .slice(0, limit);
   }
@@ -268,7 +279,7 @@ export class ConversationService {
     );
     if (sent) return;
     try {
-      const result = await this.messaging!.sendMessage({ to, body, idempotencyKey: key });
+      const result = await this.messaging!.send(conversation.accountId, { to, body, idempotencyKey: key });
       await this.repository.appendEvent(conversationId, 'sms.sent', {
         to, body, idempotencyKey: key, providerMessageId: result.providerMessageId,
       }, new Date());
@@ -351,22 +362,23 @@ export class ConversationService {
     return this.repository.getById(id);
   }
 
-  listConversations(): Promise<Conversation[]> {
-    return this.repository.list();
+  listConversations(accountId: string): Promise<Conversation[]> {
+    return this.repository.list(accountId);
   }
 
-  async markOwnerRead(conversationId: string, ownerId: string): Promise<Conversation> {
-    const conversation = await this.requireOwnedConversation(conversationId, ownerId);
+  async markOwnerRead(conversationId: string, accountId: string): Promise<Conversation> {
+    const conversation = await this.requireOwnedConversation(conversationId, accountId);
     const readAt = new Date();
     if (this.repository.markOwnerRead) {
-      await this.repository.markOwnerRead(conversationId, ownerId, readAt);
+      await this.repository.markOwnerRead(conversationId, accountId, readAt);
     }
     return this.requireConversation(conversation.id);
   }
 
-  async requireOwnedConversation(conversationId: string, ownerId: string): Promise<Conversation> {
+  async requireOwnedConversation(conversationId: string, accountId: string): Promise<Conversation> {
     const conversation = await this.requireConversation(conversationId);
-    if (conversation.ownerId !== ownerId) {
+    // Fail closed: a conversation with no account, or another account's, doesn't exist for this caller.
+    if (!accountId || !conversation.accountId || conversation.accountId !== accountId) {
       throw new HttpError(404, 'Conversation not found');
     }
     return conversation;

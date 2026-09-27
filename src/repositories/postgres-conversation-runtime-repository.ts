@@ -11,7 +11,7 @@ import type {
   RuntimeOverrideStore,
 } from '../runtime/store.js';
 import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from '../runtime/commands.js';
-import { migrate } from './schema-lock.js';
+import { migrate, renameOwnerColumn } from './schema-lock.js';
 
 interface ConversationRuntimeRow {
   conversation_id: string;
@@ -82,6 +82,30 @@ function hydrateRuntime(row: ConversationRuntimeRow): ConversationRuntime {
   };
 }
 
+const UPDATE_COLUMNS = [
+  'state',
+  'assistant_enabled',
+  'voice_enabled',
+  'transcription_enabled',
+  'ai_mode',
+  'response_style',
+  'verbosity',
+  'ask_owner_when',
+  'allow_commitments',
+  'allow_scheduling',
+  'allow_caller_followups',
+  'custom_instructions',
+  'sms_transition_enabled',
+  'started_at',
+  'paused_at',
+  'stopped_at',
+  'current_turn_id',
+  'current_activity',
+  'configuration_revision',
+  'applied_revision',
+  'updated_at',
+].map((column) => `${column} = EXCLUDED.${column}`).join(', ');
+
 export class PostgresConversationRuntimeStore implements ConversationRuntimeStore {
   constructor(private readonly pool: Pool) {}
 
@@ -124,8 +148,11 @@ export class PostgresConversationRuntimeStore implements ConversationRuntimeStor
     return result.rows[0] ? hydrateRuntime(result.rows[0]) : null;
   }
 
-  async save(runtime: ConversationRuntime): Promise<void> {
-    await this.pool.query(
+  async save(runtime: ConversationRuntime, expectedRevision?: number | null): Promise<boolean> {
+    // Compare-and-set in one statement: the row is written only if nobody changed it since it was read.
+    const guard = expectedRevision === null ? 'DO NOTHING'
+      : `DO UPDATE SET ${UPDATE_COLUMNS}${typeof expectedRevision === 'number' ? ' WHERE conversation_runtimes.configuration_revision = $23' : ''}`;
+    const result = await this.pool.query(
       `
         INSERT INTO conversation_runtimes (
           conversation_id, state, assistant_enabled, voice_enabled, transcription_enabled,
@@ -142,28 +169,7 @@ export class PostgresConversationRuntimeStore implements ConversationRuntimeStor
           $15, $16, $17, $18, $19,
           $20, $21, $22
         )
-        ON CONFLICT (conversation_id) DO UPDATE SET
-          state = EXCLUDED.state,
-          assistant_enabled = EXCLUDED.assistant_enabled,
-          voice_enabled = EXCLUDED.voice_enabled,
-          transcription_enabled = EXCLUDED.transcription_enabled,
-          ai_mode = EXCLUDED.ai_mode,
-          response_style = EXCLUDED.response_style,
-          verbosity = EXCLUDED.verbosity,
-          ask_owner_when = EXCLUDED.ask_owner_when,
-          allow_commitments = EXCLUDED.allow_commitments,
-          allow_scheduling = EXCLUDED.allow_scheduling,
-          allow_caller_followups = EXCLUDED.allow_caller_followups,
-          custom_instructions = EXCLUDED.custom_instructions,
-          sms_transition_enabled = EXCLUDED.sms_transition_enabled,
-          started_at = EXCLUDED.started_at,
-          paused_at = EXCLUDED.paused_at,
-          stopped_at = EXCLUDED.stopped_at,
-          current_turn_id = EXCLUDED.current_turn_id,
-          current_activity = EXCLUDED.current_activity,
-          configuration_revision = EXCLUDED.configuration_revision,
-          applied_revision = EXCLUDED.applied_revision,
-          updated_at = EXCLUDED.updated_at
+        ON CONFLICT (conversation_id) ${guard}
       `,
       [
         runtime.conversationId,
@@ -188,8 +194,10 @@ export class PostgresConversationRuntimeStore implements ConversationRuntimeStor
         runtime.configurationRevision,
         runtime.appliedRevision,
         runtime.updatedAt,
+        ...(typeof expectedRevision === 'number' ? [expectedRevision] : []),
       ],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async list(conversationIds?: string[]): Promise<ConversationRuntime[]> {
@@ -336,7 +344,7 @@ export class PostgresRuntimeOverrideStore implements RuntimeOverrideStore {
 interface RuntimeCommandRow {
   id: string;
   conversation_id: string;
-  owner_id: string;
+  account_id: string;
   type: RuntimeCommand['type'];
   payload: Record<string, unknown>;
   status: RuntimeCommand['status'];
@@ -351,7 +359,7 @@ const toCommand = (row: RuntimeCommandRow): RuntimeCommand => ({
   id: row.id,
   conversationId: row.conversation_id,
   runtimeId: row.runtime_id ?? runtimeIdFor(row.conversation_id),
-  ownerId: row.owner_id,
+  accountId: row.account_id,
   type: row.type,
   payload: row.payload,
   status: row.status,
@@ -371,7 +379,7 @@ export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
         CREATE TABLE IF NOT EXISTS runtime_commands (
           id TEXT PRIMARY KEY,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           type TEXT NOT NULL,
           payload JSONB NOT NULL,
           status TEXT NOT NULL,
@@ -381,21 +389,23 @@ export class PostgresRuntimeCommandStore implements RuntimeCommandStore {
           applied_live_at TIMESTAMPTZ
         )
       `);
+      await renameOwnerColumn(db, 'runtime_commands');
       await db.query('CREATE INDEX IF NOT EXISTS idx_runtime_commands_conversation ON runtime_commands (conversation_id, created_at)');
       await db.query('ALTER TABLE runtime_commands ADD COLUMN IF NOT EXISTS runtime_id TEXT');
     });
   }
 
-  async record(command: RuntimeCommand): Promise<void> {
-    await this.pool.query(
+  async record(command: RuntimeCommand): Promise<boolean> {
+    const result = await this.pool.query(
       `
-        INSERT INTO runtime_commands (id, conversation_id, owner_id, type, payload, status, error, created_at, processed_at, applied_live_at, runtime_id)
+        INSERT INTO runtime_commands (id, conversation_id, account_id, type, payload, status, error, created_at, processed_at, applied_live_at, runtime_id)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (id) DO NOTHING
       `,
-      [command.id, command.conversationId, command.ownerId, command.type, command.payload, command.status,
+      [command.id, command.conversationId, command.accountId, command.type, command.payload, command.status,
         command.error ?? null, command.createdAt, command.processedAt ?? null, command.appliedLiveAt ?? null, command.runtimeId],
     );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async update(id: string, patch: Parameters<RuntimeCommandStore['update']>[1]): Promise<void> {

@@ -51,7 +51,7 @@ export class FileOwnerBridgeCheckpointStore implements OwnerBridgeCheckpointStor
 
 export interface OwnerBridgeBackend {
   submitOwnerMessage(input: {
-    ownerId: string;
+    accountId: string;
     deviceId: string;
     chatId: string;
     externalId: string;
@@ -61,7 +61,7 @@ export interface OwnerBridgeBackend {
     replyToExternalId?: string;
   }): Promise<void>;
   confirmOwnerDelivery?(input: {
-    ownerId: string;
+    accountId: string;
     deviceId: string;
     deliveryId: string;
     externalId: string;
@@ -69,7 +69,7 @@ export interface OwnerBridgeBackend {
 }
 
 export interface MacOSMessagesBridgeOptions {
-  ownerId: string;
+  accountId: string;
   deviceId: string;
   assistantChatId: string;
   ownerSender: string;
@@ -111,7 +111,7 @@ export class MacOSMessagesBridge {
       const deliveryId = this.pendingDeliveries.get(message.externalId);
       if (deliveryId && this.backend.confirmOwnerDelivery) {
         await this.backend.confirmOwnerDelivery({
-          ownerId: this.options.ownerId,
+          accountId: this.options.accountId,
           deviceId: this.options.deviceId,
           deliveryId,
           externalId: message.externalId,
@@ -134,7 +134,7 @@ export class MacOSMessagesBridge {
     const deliveryId = replyToExternalId ? this.replyTargets.get(replyToExternalId) : undefined;
     if (replyToExternalId && deliveryId) this.replyTargets.delete(replyToExternalId);
     await this.backend.submitOwnerMessage({
-      ownerId: this.options.ownerId,
+      accountId: this.options.accountId,
       deviceId: this.options.deviceId,
       chatId: message.chatId,
       externalId: message.externalId,

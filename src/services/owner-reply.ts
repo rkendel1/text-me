@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Conversation } from '../domain/conversation.js';
-import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { RuntimeControlService } from '../runtime/service.js';
 import { realtimeVoiceStatus } from '../voice/realtime/realtime-voice.js';
@@ -26,13 +25,13 @@ export class OwnerReplyService {
 
   async reply(input: {
     conversationId: string;
-    ownerId: string;
+    accountId: string;
     body: string;
     idempotencyKey: string;
     source: OwnerReplySource;
   }): Promise<Conversation> {
-    const conversation = await this.conversations.getConversation(input.conversationId);
-    if (!conversation) throw new HttpError(404, 'Conversation not found');
+    // The reply acts as the given account; a conversation of any other account doesn't exist for it.
+    const conversation = await this.conversations.requireOwnedConversation(input.conversationId, input.accountId);
     const requestId = this.conversations.openOwnerRequest(conversation)?.requestId;
     const messageId = `msg_${randomUUID()}`;
     await this.conversations.resolveAttention(input.conversationId, ['assistant_needs_owner'], `owner replied via ${input.source}`);
@@ -45,7 +44,7 @@ export class OwnerReplyService {
           text: input.body, speaker: 'owner', channel: 'voice', source: input.source,
           idempotencyKey: input.idempotencyKey, messageId, ...(requestId ? { requestId } : {}),
         }, new Date());
-        await this.runtime.requestOwnerSpeech(input.conversationId, input.ownerId, input.body, { messageId, requestId });
+        await this.runtime.requestOwnerSpeech(input.conversationId, input.accountId, input.body, { messageId, requestId });
         await this.runtime.noteOwnerResponse(input.conversationId);
       }
       return (await this.conversations.getConversation(input.conversationId))!;

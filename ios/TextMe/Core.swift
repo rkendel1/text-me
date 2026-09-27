@@ -31,13 +31,15 @@ enum AppConfig {
     }
 }
 
-/// The sign-in session. The access key is never stored: the page exchanges it for a
-/// session with POST /auth/sessions and hands the session to the app, which keeps it
-/// in the Keychain so notification actions work without opening the app.
+/// The sign-in session. Nothing about the customer is compiled into the app: the user
+/// signs in (or signs up) on the page with their email and password, the server returns
+/// a session for their account, and the page hands the session to the app, which keeps
+/// it in the Keychain so notification actions work without opening the app. Signing in
+/// to a different account replaces it; the same binary serves every customer.
 final class SessionStore {
     static let shared = SessionStore()
     private let service = "app.textme.session"
-    private let account = "owner"
+    private let account = "session"
 
     var token: String? {
         get {

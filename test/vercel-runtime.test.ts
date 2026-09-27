@@ -17,9 +17,6 @@ const baseEnv = {
   DATABASE_URL: 'postgres://pooled.neon.test/db',
   TWILIO_ACCOUNT_SID: 'AC1',
   TWILIO_AUTH_TOKEN: 'token',
-  TWILIO_PHONE_NUMBER: '+15550000000',
-  OWNER_PHONE_NUMBER: '+15551112222',
-  OWNER_AUTH_TOKEN: 'owner',
 };
 
 test('on Vercel the default domain, Neon URLs and Gateway OIDC are picked up automatically', () => {
@@ -170,10 +167,10 @@ test('runtime commands persist in Postgres and never regress from applied_live',
   const store = new PostgresRuntimeCommandStore(pool);
   await store.initialize();
   const { conversation } = await conversations.createIfAbsent({
-    provider: 'fake', providerCallId: `cmd-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: 'owner',
+    provider: 'fake', providerCallId: `cmd-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), accountId: 'owner',
   });
   const id = `cmd_${Date.now()}`;
-  await store.record({ id, conversationId: conversation.id, runtimeId: 'rt_test', ownerId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
+  await store.record({ id, conversationId: conversation.id, runtimeId: 'rt_test', accountId: 'owner', type: 'stop', payload: {}, status: 'accepted', createdAt: new Date() });
   await store.update(id, { status: 'applied_live', appliedLiveAt: new Date() });
   await store.update(id, { status: 'applied', processedAt: new Date() });
   const [stored] = await store.list(conversation.id);
@@ -197,18 +194,18 @@ test('owner attention, deliveries, surface devices and push keys persist in Neon
   for (const store of [attention, deliveries, devices, secrets]) await store.initialize();
   const owner = `owner-${Date.now()}`;
   const { conversation } = await conversations.createIfAbsent({
-    provider: 'fake', providerCallId: `att-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), ownerId: owner,
+    provider: 'fake', providerCallId: `att-${Date.now()}`, callerPhone: '+15550001111', status: 'answered', startedAt: new Date(), accountId: owner,
   });
   const now = new Date();
   const base = {
-    ownerId: owner, conversationId: conversation.id, type: 'assistant_needs_owner' as const, priority: 'interrupt' as const,
+    accountId: owner, conversationId: conversation.id, type: 'assistant_needs_owner' as const, priority: 'interrupt' as const,
     title: 'Sam needs you', body: '“Friday?”', actions: ['reply' as const, 'take_over' as const], status: 'pending' as const,
     dedupeKey: 'owner-request:req_1', metadata: { requestId: 'req_1' }, createdAt: now, updatedAt: now,
   };
   const first = await attention.create({ ...base, id: `att_${Date.now()}a` });
   const duplicate = await attention.create({ ...base, id: `att_${Date.now()}b` });
   assert.equal(duplicate.id, first.id, 'dedupe key makes raising idempotent');
-  await deliveries.record({ id: `ntf_${Date.now()}`, attentionId: first.id, ownerId: owner, surface: 'web_push', deviceId: 'dev_1', status: 'sent', providerId: '201', createdAt: now });
+  await deliveries.record({ id: `ntf_${Date.now()}`, attentionId: first.id, accountId: owner, surface: 'web_push', deviceId: 'dev_1', status: 'sent', providerId: '201', createdAt: now });
   await attention.update(first.id, { status: 'acted', resolvedAt: new Date(), metadata: { action: 'take_over' } });
   const stored = (await attention.get(first.id))!;
   assert.equal(stored.status, 'acted');
@@ -218,8 +215,8 @@ test('owner attention, deliveries, surface devices and push keys persist in Neon
   assert.equal((await deliveries.listForConversation(conversation.id))[0].surface, 'web_push');
 
   const token = JSON.stringify({ endpoint: `https://push.example/${owner}`, keys: { p256dh: 'k', auth: 'a' } });
-  const device = await devices.upsert({ id: `dev_${Date.now()}`, ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push'], status: 'active', createdAt: now, lastSeenAt: now });
-  const again = await devices.upsert({ id: 'dev_other', ownerId: owner, platform: 'web', deviceToken: token, capabilities: ['push', 'deep_link'], status: 'active', createdAt: now, lastSeenAt: new Date() });
+  const device = await devices.upsert({ id: `dev_${Date.now()}`, accountId: owner, platform: 'web', deviceToken: token, capabilities: ['push'], status: 'active', createdAt: now, lastSeenAt: now });
+  const again = await devices.upsert({ id: 'dev_other', accountId: owner, platform: 'web', deviceToken: token, capabilities: ['push', 'deep_link'], status: 'active', createdAt: now, lastSeenAt: new Date() });
   assert.equal(again.id, device.id, 'same subscription = same device');
   assert.deepEqual(again.capabilities, ['push', 'deep_link']);
 
@@ -232,22 +229,29 @@ test('production composition starts with no Mac at all, and a fresh instance rec
   skip: databaseUrl ? false : 'set TEST_DATABASE_URL to run against Postgres',
 }, async (t) => {
   const { buildServer } = await import('../src/bootstrap.js');
+  const { FakePhoneNumberClient } = await import('../src/telephony/phone-number.js');
+  const { FakeMessagingProvider } = await import('../src/messaging/fake-provider.js');
+  const { onboardTenant } = await import('./support/tenant.js');
   const request = (await import('supertest')).default;
-  // No Mac, no Photon, no Messages authorization, no AI Gateway key: just Neon + Twilio + owner token.
+  // No Mac, no Photon, no Messages authorization, no AI Gateway key, and no customer in the environment:
+  // just the database and the platform's Twilio credentials.
   const env = {
-    DATABASE_URL: databaseUrl, TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'twilio-test', TWILIO_PHONE_NUMBER: '+15550000000',
-    OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'owner-test', PUBLIC_BASE_URL: 'http://localhost', REALTIME_VOICE: 'off',
+    DATABASE_URL: databaseUrl, TWILIO_ACCOUNT_SID: 'ACtest', TWILIO_AUTH_TOKEN: 'twilio-test',
+    PUBLIC_BASE_URL: 'http://localhost', REALTIME_VOICE: 'off', TELEPHONY_NUMBER_PURCHASE: 'on',
   };
-  assert.ok(!Object.keys(env).some((key) => /MAC|PHOTON|PAIRING/i.test(key)));
-  const first = buildServer(getConfig(env));
-  const second = buildServer(getConfig(env));
+  assert.ok(!Object.keys(env).some((key) => /MAC|PHOTON|PAIRING|^OWNER_|^USER_|^ACCOUNT_|PHONE_NUMBER/i.test(key)));
+  // The provider stand-ins are platform integrations; everything else is the production composition.
+  const platform = { phoneNumberClient: new FakePhoneNumberClient(), messagingProvider: new FakeMessagingProvider() };
+  const first = buildServer(getConfig(env), {}, platform);
+  const second = buildServer(getConfig(env), {}, platform);
   t.after(() => { first.server.close(); second.server.close(); });
   await Promise.all([first.ready, second.ready]);
-  const auth = { Authorization: 'Bearer owner-test' };
+  const owner = await onboardTenant(first.app, platform.messagingProvider);
+  const auth = owner.headers;
 
   assert.equal((await request(first.server).get('/')).status, 200);
   assert.equal((await request(first.server).get('/conversations')).status, 401);
-  const conversation = await request(first.server).post('/webhooks/fake/voice').send({ callId: `nomac-${Date.now()}`, callerPhone: '+15553334444' });
+  const conversation = await request(first.server).post('/webhooks/fake/voice').send({ callId: `nomac-${Date.now()}`, callerPhone: '+15553334444', to: owner.line });
   assert.equal(conversation.status, 200);
   const listed = (await request(first.server).get('/conversations').set(auth)).body;
   const id = listed.find((item: { caller: string; status: string }) => item.caller === '+15553334444' && item.status === 'answered').id;
@@ -257,6 +261,7 @@ test('production composition starts with no Mac at all, and a fresh instance rec
   assert.equal(adjusted.status, 200);
 
   // A different instance (or the same app after a reload/restart) sees exactly the same state.
+  assert.equal((await request(second.server).get('/me').set(auth)).body.onboarding.state, 'ready');
   const recovered = (await request(second.server).get(`/conversations/${id}`).set(auth)).body;
   assert.equal(recovered.runtime.status, 'takeover');
   assert.equal(recovered.runtime.verbosity, 'detailed');

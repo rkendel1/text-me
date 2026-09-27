@@ -19,7 +19,7 @@ import { FakeSpeechProvider } from './speech/fake-provider.js';
 import type { SpeechProvider } from './speech/provider.js';
 import { FakeVoiceProvider } from './voice/fake-provider.js';
 import type { VoiceProvider } from './voice/provider.js';
-import type { MessagingProvider } from './messaging/provider.js';
+import { AccountMessenger, type MessagingProvider } from './messaging/provider.js';
 import { FakeMessagingProvider } from './messaging/fake-provider.js';
 import type { OwnerChannel } from './owner/channel.js';
 import { OwnerDeviceService, pairingQrPayload } from './owner/device.js';
@@ -41,7 +41,7 @@ import twilio from 'twilio';
 import type { RuntimeEventBus } from './runtime/event-bus.js';
 import { runtimeIdFor, type RuntimeCommand, type RuntimeCommandStore } from './runtime/commands.js';
 import { OwnerAttentionService } from './attention/service.js';
-import type { PhoneNumberService } from './telephony/phone-number.js';
+import { FakePhoneNumberClient, PhoneNumberService, type PhoneNumberClient } from './telephony/phone-number.js';
 import { attentionUrl, createSurfaceDeviceId, type OwnerDeviceCapability } from './attention/model.js';
 import { NotificationRouter } from './attention/router.js';
 import { MacMessagesSurface, OwnerSmsSurface, VapidPushSender, WebPushSurface, type PushSender } from './attention/surfaces.js';
@@ -59,7 +59,11 @@ import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime
 import { buildInstructions } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
 import type { ApnsSender } from './attention/apns.js';
-import { InMemoryOwnerAuthSessionStore, OwnerAuthService, type OwnerAuthSession, type OwnerAuthSessionStore } from './auth/sessions.js';
+import { AuthService, InMemoryAuthSessionStore, type AuthSession, type AuthSessionStore } from './auth/sessions.js';
+import { InMemoryTenancyStore, type TenancyStore } from './tenancy/store.js';
+import { TenancyService } from './tenancy/service.js';
+import { NotificationChannelResolver } from './tenancy/channels.js';
+import { assertJobOwnership, authorize, type TenantAction, type TenantContext } from './tenancy/authorization.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -68,11 +72,11 @@ export interface AppOptions {
   speechProvider?: SpeechProvider;
   conversationModel?: ConversationModel;
   voiceProvider?: VoiceProvider;
+  /** Platform SMS provider; every message is sent from the sending account's own assistant line. */
   messagingProvider?: MessagingProvider;
-  ownerPhone?: string;
   twilioAuthToken?: string;
-  ownerId?: string;
-  ownerAuthToken?: string;
+  /** Accounts, users, memberships, phone numbers, planes: the tenancy model. */
+  tenancyStore?: TenancyStore;
   ownerChannel?: OwnerChannel;
   ownerDeviceService?: OwnerDeviceService;
   ownerMessagesAdapter?: MacMessagesAdapter;
@@ -91,8 +95,12 @@ export interface AppOptions {
   surfaceDeviceStore?: OwnerSurfaceDeviceStore;
   appSecretStore?: AppSecretStore;
   pushSender?: PushSender;
-  /** Lets the owner connect their number from the app (no provider console). */
+  /** Account phone numbers (assistant lines and verified personal numbers). */
   phoneNumbers?: PhoneNumberService;
+  /** The platform's number provider, when `phoneNumbers` isn't given (tests and local development use a fake pool). */
+  phoneNumberClient?: PhoneNumberClient;
+  /** Let accounts buy a new assistant line when the platform pool is empty. */
+  allowNumberPurchase?: boolean;
   /** Public origin put in pairing QR codes so the Mac bridge needs no server address typed in. */
   publicBaseUrl?: string;
   /** Answers phone calls with a realtime voice agent through the AI Gateway. */
@@ -101,8 +109,8 @@ export interface AppOptions {
   beforeRequest?: Promise<void> | (() => Promise<void>);
   /** Let the assistant answer caller texts itself (production, with the AI SDK text agent). */
   autoReplyToCallerTexts?: boolean;
-  /** Owner sign-in sessions (web and iOS share them). */
-  authSessionStore?: OwnerAuthSessionStore;
+  /** User sign-in sessions (web and iOS share them). */
+  authSessionStore?: AuthSessionStore;
   /**
    * Production composition: every authoritative store and the AI model must be
    * supplied, and fake provider routes must be off. Missing pieces fail startup
@@ -133,11 +141,12 @@ const PRODUCTION_REQUIREMENTS: Array<[keyof AppOptions, string]> = [
   ['ownerConfigurationService', 'owner configuration service'],
   ['ownerDeliveryStore', 'owner delivery store'],
   ['authSessionStore', 'sign-in session store'],
+  ['tenancyStore', 'account store'],
+  ['phoneNumbers', 'phone number service'],
   ['messagingProvider', 'SMS provider'],
   ['conversationModel', 'AI text model'],
   ['realtimeVoice', 'realtime voice agent'],
   ['pushSender', 'push sender'],
-  ['ownerAuthToken', 'OWNER_AUTH_TOKEN'],
   ['twilioAuthToken', 'TWILIO_AUTH_TOKEN'],
 ];
 
@@ -162,24 +171,39 @@ function bearerToken(request: Request): string | undefined {
   return authorization.slice(7).trim() || undefined;
 }
 
+/** Callers who reach a number that isn't any account's active line hear this; no conversation is created. */
+function notInService(): string {
+  const twiml = new twilio.twiml.VoiceResponse();
+  twiml.say('The number you have called is not in service.');
+  twiml.hangup();
+  return twiml.toString();
+}
+
 function registerIncomingCallRoute(
   app: express.Express,
   path: string,
   provider: TelephonyProvider,
   service: ConversationService,
   configuration: OwnerConfigurationService,
-  defaultOwnerId: string,
+  phoneNumbers: PhoneNumberService,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
       const incomingCall = provider.parseIncomingCall(request.body);
-      const conversation = await service.incomingCall(incomingCall);
+      // The called number is the only thing that says whose call this is. Unknown line: fail closed.
+      const line = incomingCall.calledNumber ? await phoneNumbers.resolveLine(incomingCall.calledNumber) : null;
+      if (!line) {
+        console.warn('[webhook] call to a number no account owns', JSON.stringify({ provider: provider.name }));
+        response.status(200).type('text/xml; charset=utf-8').send(notInService());
+        return;
+      }
+      const conversation = await service.incomingCall(incomingCall, line.accountId);
       // Callers dialed the owner's real number; their carrier forwarded the call here.
       const forwardedFrom = typeof incomingCall.payload.ForwardedFrom === 'string' ? incomingCall.payload.ForwardedFrom : '';
       if (forwardedFrom && !conversation.events.some((event) => event.type === 'call.forwarded')) {
         await service.recordEvent(conversation.id, 'call.forwarded', { from: forwardedFrom });
       }
-      const settings = await configuration.get(conversation.ownerId ?? defaultOwnerId);
+      const settings = await configuration.get(conversation.accountId);
       if (!settings.calls.answerCalls) {
         // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
         const twiml = new twilio.twiml.VoiceResponse();
@@ -199,7 +223,7 @@ function registerIncomingCallRoute(
         response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
         return;
       }
-      const providerResponse = provider.answerCall(conversation);
+      const providerResponse = provider.answerCall(conversation, { greeting: settings.assistant.greeting });
       await service.answerCall(conversation.id, incomingCall.payload);
       // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
       await service.raiseAttention(conversation.id, {
@@ -313,9 +337,19 @@ export function createApp(options: AppOptions): express.Express {
     options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
   );
   const messaging = options.messagingProvider ?? new FakeMessagingProvider();
-  const ownerId = options.ownerId ?? process.env.OWNER_ID ?? 'owner';
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
   const ownerConfiguration = options.ownerConfigurationService ?? new OwnerConfigurationService();
+  // Tenancy: which account owns what. Nothing about any customer comes from the deployment.
+  const tenancyStore = options.tenancyStore ?? new InMemoryTenancyStore();
+  const phoneNumbers = options.phoneNumbers ?? new PhoneNumberService(
+    tenancyStore,
+    options.phoneNumberClient ?? new FakePhoneNumberClient(),
+    options.publicBaseUrl ?? 'http://localhost:3000',
+    messaging,
+    { allowPurchase: options.allowNumberPurchase ?? !options.production },
+  );
+  // Every text is sent as an account, from that account's own assistant line.
+  const accountMessaging = new AccountMessenger(messaging, phoneNumbers);
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
   const runtime = options.runtimeControlService ?? new RuntimeControlService(
     options.repository,
@@ -354,14 +388,16 @@ export function createApp(options: AppOptions): express.Express {
     new NotificationRouter({
       push: new WebPushSurface(surfaceDevices, pushSender, options.apnsSender),
       mac: options.ownerChannel ? new MacMessagesSurface(options.ownerChannel, options.repository) : undefined,
-      sms: new OwnerSmsSurface(messaging, options.ownerPhone),
+      sms: new OwnerSmsSurface(accountMessaging, (id) => phoneNumbers.personalNumber(id)),
     }),
-    async (owner) => {
-      const { messages } = await ownerConfiguration.get(owner);
+    // event → conversation's account → that account's preferences and channels → delivery.
+    async (id) => {
+      const { messages } = await ownerConfiguration.get(id);
       return {
         notifyOwner: messages.notifyOwner, interruptOnlyWhenNeeded: messages.interruptOnlyWhenNeeded,
         webEnabled: messages.webEnabled, macosMessagesEnabled: messages.macosMessagesEnabled,
         includeSummary: messages.includeSummary, includeSuggestedResponse: messages.includeSuggestedResponse,
+        smsEnabled: messages.smsEnabled,
       };
     },
     (raised) => runtime.publishAttention(raised.conversationId, {
@@ -369,21 +405,31 @@ export function createApp(options: AppOptions): express.Express {
     }),
   );
   const service = new ConversationService(
-    options.repository, messaging, options.ownerPhone, ownerId, attention,
+    options.repository, accountMessaging, attention,
+    async (id) => (await ownerConfiguration.get(id)).assistant.ownerName,
   );
+  const channels = new NotificationChannelResolver({
+    surfaceDevices,
+    macDevices: ownerDevices,
+    configuration: ownerConfiguration,
+    personalNumber: (id) => phoneNumbers.personalNumber(id),
+    nativePush: Boolean(options.apnsSender),
+    messaging: Boolean(options.messagingProvider) || !options.production,
+  });
+  const tenancy = new TenancyService(tenancyStore, { configuration: ownerConfiguration, phoneNumbers, channels });
   const engine = new ConversationEngine(
     options.repository,
     options.speechProvider ?? new FakeSpeechProvider(),
     options.conversationModel ?? new FakeConversationModel(),
     options.voiceProvider ?? new FakeVoiceProvider(),
-    messaging,
+    accountMessaging,
     runtime,
     {
       autoReplyToCallerTexts: options.autoReplyToCallerTexts ?? false,
       contextFor: async (conversationId) => {
         const conversation = await service.getConversation(conversationId);
         if (!conversation) return {};
-        const configuration = await ownerConfiguration.get(conversation.ownerId ?? ownerId);
+        const configuration = await ownerConfiguration.get(conversation.accountId);
         const snapshot = await runtime.getRuntimeForConversation(conversation);
         return {
           instructions: buildInstructions(snapshot, configuration, 'text'),
@@ -453,7 +499,8 @@ export function createApp(options: AppOptions): express.Express {
     } catch (error) {
       checks.database = { ok: false, detail: error instanceof Error ? error.message.slice(0, 120) : 'unavailable' };
     }
-    checks.authentication = { ok: Boolean(options.ownerAuthToken), ...(options.ownerAuthToken ? {} : { detail: 'OWNER_AUTH_TOKEN is not set' }) };
+    // Accounts sign up and sign in with their own credentials; there is no deployment-wide access key.
+    checks.authentication = { ok: Boolean(options.authSessionStore && options.tenancyStore), ...(options.authSessionStore && options.tenancyStore ? { detail: 'accounts' } : { detail: 'in-memory accounts (not production)' }) };
     checks.webhookSignatures = { ok: Boolean(options.twilioAuthToken) };
     checks.realtimeVoice = { ok: Boolean(options.realtimeVoice), ...(options.realtimeVoice ? { detail: options.realtimeVoice.modelId } : { detail: 'not configured' }) };
     checks.publicUrl = { ok: Boolean(options.publicBaseUrl && /^https:\/\//.test(options.publicBaseUrl)), detail: options.publicBaseUrl ?? 'unset' };
@@ -478,12 +525,14 @@ export function createApp(options: AppOptions): express.Express {
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  const auth = new OwnerAuthService(options.authSessionStore ?? new InMemoryOwnerAuthSessionStore(), options.ownerAuthToken, ownerId);
+  const auth = new AuthService(options.authSessionStore ?? new InMemoryAuthSessionStore());
   const authMessages = {
     missing: 'Authentication required', invalid: 'Authentication required',
     expired: 'Your session expired. Sign in again.', revoked: 'This device was signed out. Sign in again.',
   } as const;
-  const ownerAuth = (request: Request, _response: Response, next: NextFunction): void => {
+  type AuthedRequest = Request & { authSession?: AuthSession; tenant?: TenantContext };
+  /** The authenticated principal: a live, unexpired, unrevoked session. Nothing about an account yet. */
+  const principal = (request: Request, _response: Response, next: NextFunction): void => {
     // EventSource can't set headers, so live streams (and only they) accept ?token=.
     const streamToken = request.method === 'GET' && request.path.endsWith('/events') && typeof request.query?.token === 'string'
       ? request.query.token : undefined;
@@ -493,11 +542,37 @@ export function createApp(options: AppOptions): express.Express {
         next(new HttpError(401, authMessages[result.reason], result.reason === 'expired' || result.reason === 'revoked' ? `session_${result.reason}` : 'unauthenticated'));
         return;
       }
-      Object.assign(request, { ownerId: result.ownerId, authSession: result.session, credential: result.credential });
+      (request as AuthedRequest).authSession = result.session;
       next();
     }, next);
   };
-  const currentSession = (request: Request) => (request as Request & { authSession?: OwnerAuthSession }).authSession;
+  /**
+   * principal → membership → account → action. The account is the session's
+   * active account, re-checked against a live membership on every request, so a
+   * removed member loses access immediately on every instance. Fails closed.
+   */
+  const tenant = (action: TenantAction) => (request: Request, response: Response, next: NextFunction): void => {
+    principal(request, response, (error?: unknown) => {
+      if (error) return next(error);
+      const session = (request as AuthedRequest).authSession!;
+      tenancy.resolveContext(session.userId, session.accountId, session.id).then((context) => {
+        if (!context) {
+          next(new HttpError(403, 'You’re not a member of this account.', 'no_membership'));
+          return;
+        }
+        (request as AuthedRequest).tenant = authorize(context, action);
+        next();
+      }).catch(next);
+    });
+  };
+  const currentSession = (request: Request) => (request as AuthedRequest).authSession;
+  const tenantOf = (request: Request): TenantContext => {
+    const context = (request as AuthedRequest).tenant;
+    if (!context) throw new HttpError(401, 'Authentication required', 'unauthenticated');
+    return context;
+  };
+  /** The authorized account for this request. Never from the body, a phone number or the deployment. */
+  const accountOf = (request: Request): string => tenantOf(request).accountId;
 
   if (options.twilioAuthToken) {
     app.use((request, _response, next) => {
@@ -524,7 +599,7 @@ export function createApp(options: AppOptions): express.Express {
     throw new Error('Twilio provider is required');
   }
 
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, ownerId);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, phoneNumbers);
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
 
   // A caller left a voicemail (only offered when the owner turned off answering calls).
@@ -573,18 +648,22 @@ export function createApp(options: AppOptions): express.Express {
     try {
       if (!twilioProvider.parseIncomingSms) throw new HttpError(501, 'SMS is not supported');
       const message = twilioProvider.parseIncomingSms(request.body);
-      if (options.ownerPhone && message.from === options.ownerPhone) {
-        // The owner texted back: it answers whichever conversation is waiting on them.
-        const target = await service.findConversationForOwnerReply();
+      // Whose text is this? The line it was sent to. A number no account owns is refused.
+      const line = message.to ? await phoneNumbers.resolveLine(message.to) : null;
+      if (!line) throw new HttpError(404, 'Unknown line');
+      const accountId = line.accountId;
+      if (message.from === await phoneNumbers.personalNumber(accountId)) {
+        // The account's owner texted their own line back: it answers whichever of *their* conversations waits on them.
+        const target = await service.findConversationForOwnerReply(accountId);
         if (!target) throw new HttpError(404, 'No conversation is waiting for you');
         const conversation = await ownerReplies.reply({
-          conversationId: target.id, ownerId, body: message.body,
+          conversationId: target.id, accountId, body: message.body,
           idempotencyKey: `sms:${message.providerMessageId}`, source: 'sms',
         });
         response.json(presentConversation(conversation));
         return;
       }
-      const received = await service.receiveSms(message);
+      const received = await service.receiveSms(accountId, message);
       let conversation = received;
       try {
         conversation = await engine.respondToCallerText(received.id, message.providerMessageId);
@@ -607,16 +686,17 @@ export function createApp(options: AppOptions): express.Express {
   if (fakeRoutesEnabled) {
     const fake = providers.get('fake');
     if (fake) {
-      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, ownerId);
+      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, phoneNumbers);
       registerStatusRoute(app, '/webhooks/fake/status', fake, service);
     }
   }
 
-  app.post('/owner/devices/pair', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/pair', tenant('device.manage'), async (request, response, next) => {
     try {
       const result = await ownerDevices.pair(
-        (request as Request & { ownerId?: string }).ownerId!,
+        accountOf(request),
         typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
+        tenantOf(request).userId,
       );
       response.status(201).json({
         pairingUri: result.pairingUri,
@@ -633,11 +713,12 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/owner/devices/pair/qr', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/pair/qr', tenant('device.manage'), async (request, response, next) => {
     try {
       const result = await ownerDevices.pair(
-        (request as Request & { ownerId?: string }).ownerId!,
+        accountOf(request),
         typeof request.body?.name === 'string' ? request.body.name : 'Mac Messages',
+        tenantOf(request).userId,
       );
       // The QR holds only a single-use token and the server to redeem it at.
       const origin = options.publicBaseUrl ?? `${request.protocol}://${request.get('host')}`;
@@ -654,10 +735,10 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // The iPhone polls this while it shows the QR: "Waiting for Mac…" → "Mac connected".
-  app.get('/owner/devices/pair/:id', ownerAuth, async (request, response, next) => {
+  app.get('/owner/devices/pair/:id', tenant('device.manage'), async (request, response, next) => {
     try {
       const device = await ownerDevices.get(String(request.params.id));
-      if (!device || device.ownerId !== runtimeOwner(request)) throw new HttpError(404, 'Device not found');
+      if (!device || device.accountId !== accountOf(request)) throw new HttpError(404, 'Device not found');
       response.json({ deviceId: device.id, name: device.name, status: device.status });
     } catch (error) {
       next(error);
@@ -688,7 +769,7 @@ export function createApp(options: AppOptions): express.Express {
     try {
       const credential = typeof request.body?.pairingCredential === 'string' ? request.body.pairingCredential : '';
       const result = await ownerDevices.activatePairing(credential);
-      await ownerConfiguration.recordChange(result.device.ownerId, 'device.connected', 'macos_bridge').catch(() => undefined);
+      await ownerConfiguration.recordChange(result.device.accountId, 'device.connected', 'macos_bridge').catch(() => undefined);
       response.json({
         ...result,
         device: {
@@ -715,7 +796,7 @@ export function createApp(options: AppOptions): express.Express {
       const { device } = await deviceAuth(request);
       response.json({
         id: device.id,
-        ownerId: device.ownerId,
+        accountId: device.accountId,
         status: device.status,
         setupStatus: device.setupStatus,
         assistantChat: device.assistantChat,
@@ -787,9 +868,9 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // Test connection: the owner asks, the bridge checks and answers; nothing visible is sent.
-  app.post('/owner/devices/:id/test', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/:id/test', tenant('device.manage'), async (request, response, next) => {
     try {
-      const device = await ownerDevices.requestProbe(runtimeOwner(request), String(request.params.id));
+      const device = await ownerDevices.requestProbe(accountOf(request), String(request.params.id));
       response.status(202).json({ probe: device.probe });
     } catch (error) {
       next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
@@ -812,7 +893,7 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/owner/devices/:id/messages/chat', ownerDeviceRateLimit, ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/:id/messages/chat', ownerDeviceRateLimit, tenant('device.manage'), async (request, response, next) => {
     try {
       const service = request.body?.service;
       const chatId = request.body?.chatId;
@@ -820,9 +901,9 @@ export function createApp(options: AppOptions): express.Express {
         throw new HttpError(400, 'chatId and service are required');
       }
       const device = await ownerDevices.authorizeChat(
-        (request as Request & { ownerId?: string }).ownerId!, String(request.params.id), chatId, service,
+        accountOf(request), String(request.params.id), chatId, service,
       );
-      await ownerConfiguration.recordChange(device.ownerId, 'assistant.chat.changed');
+      await ownerConfiguration.recordChange(device.accountId, 'assistant.chat.changed');
       response.json(device);
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(409, error instanceof Error ? error.message : 'Chat authorization failed'));
@@ -858,6 +939,7 @@ export function createApp(options: AppOptions): express.Express {
       if (!externalId) throw new HttpError(400, 'externalId is required');
       const delivery = await ownerDeliveries.markObserved(device.id, String(request.params.deliveryId), externalId);
       if (!delivery) throw new HttpError(404, 'Delivery not found');
+      assertJobOwnership({ id: delivery.id, accountId: delivery.accountId, resourceId: device.id }, device);
       await options.repository.appendEvent(delivery.conversationId, 'owner.delivery.sent', {
         messageId: delivery.messageId,
         deliveryId: delivery.id,
@@ -879,6 +961,7 @@ export function createApp(options: AppOptions): express.Express {
         : 'Delivery failed';
       const delivery = await ownerDeliveries.markFailed(device.id, String(request.params.deliveryId), message);
       if (!delivery) throw new HttpError(404, 'Delivery not found');
+      assertJobOwnership({ id: delivery.id, accountId: delivery.accountId, resourceId: device.id }, device);
       await options.repository.appendEvent(delivery.conversationId, 'owner.delivery.failed', {
         messageId: delivery.messageId,
         deliveryId: delivery.id,
@@ -901,6 +984,10 @@ export function createApp(options: AppOptions): express.Express {
       const replyToExternalId = typeof request.body?.replyToExternalId === 'string' ? request.body.replyToExternalId : undefined;
       const delivery = await ownerDeliveries.claimReplyTarget(device.id, externalId, deliveryId, replyToExternalId);
       if (!delivery) throw new HttpError(409, 'No owner delivery is awaiting a reply');
+      // The queued delivery is a job: it, the Mac and the conversation must all belong to one account.
+      assertJobOwnership({ id: delivery.id, accountId: delivery.accountId, resourceId: device.id }, device);
+      assertJobOwnership({ id: delivery.id, accountId: delivery.accountId, resourceId: delivery.conversationId },
+        await service.getConversation(delivery.conversationId));
       await options.repository.appendEvent(delivery.conversationId, 'owner.message.received', {
         deliveryId: delivery.id,
         externalId,
@@ -909,7 +996,7 @@ export function createApp(options: AppOptions): express.Express {
       }, new Date());
       const conversation = await ownerReplies.reply({
         conversationId: delivery.conversationId,
-        ownerId: device.ownerId,
+        accountId: device.accountId,
         body,
         idempotencyKey: `macos:${device.id}:${externalId}`,
         source: 'macos_messages',
@@ -926,7 +1013,7 @@ export function createApp(options: AppOptions): express.Express {
     status: device.status, createdAt: device.createdAt.toISOString(), lastSeenAt: device.lastSeenAt.toISOString(),
   });
 
-  app.get('/owner/push/config', ownerAuth, async (_request, response, next) => {
+  app.get('/owner/push/config', tenant('device.register'), async (_request, response, next) => {
     try {
       response.json({ publicKey: await pushSender.publicKey(), nativePush: Boolean(options.apnsSender) });
     } catch (error) {
@@ -934,15 +1021,15 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/owner/push/devices', ownerAuth, async (request, response, next) => {
+  app.get('/owner/push/devices', tenant('account.read'), async (request, response, next) => {
     try {
-      response.json((await surfaceDevices.list(runtimeOwner(request))).map(presentSurfaceDevice));
+      response.json((await surfaceDevices.list(accountOf(request))).map(presentSurfaceDevice));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/owner/push/devices', ownerAuth, async (request, response, next) => {
+  app.post('/owner/push/devices', tenant('device.register'), async (request, response, next) => {
     try {
       // The native iOS app registers its APNs token here too: same devices, same attention, same deep links.
       if (request.body?.platform === 'ios') {
@@ -951,11 +1038,12 @@ export function createApp(options: AppOptions): express.Express {
         if (!options.apnsSender) throw new HttpError(409, 'Native notifications aren’t set up on this server (APNs)', 'apns_not_configured');
         const now = new Date();
         const device = await surfaceDevices.upsert({
-          id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'ios', deviceToken: apnsToken,
+          id: createSurfaceDeviceId(), accountId: accountOf(request), userId: tenantOf(request).userId, platform: 'ios', deviceToken: apnsToken,
           capabilities: ['push', 'deep_link', 'interactive_notification'],
           label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : 'iPhone app',
           sessionId: currentSession(request)?.id, status: 'active', createdAt: now, lastSeenAt: now,
         });
+        await tenancy.refreshOnboarding(accountOf(request));
         response.status(201).json(presentSurfaceDevice(device));
         return;
       }
@@ -970,32 +1058,37 @@ export function createApp(options: AppOptions): express.Express {
       if (request.body?.supportsActions === true) capabilities.push('interactive_notification');
       const now = new Date();
       const device = await surfaceDevices.upsert({
-        id: createSurfaceDeviceId(), ownerId: runtimeOwner(request), platform: 'web',
+        id: createSurfaceDeviceId(), accountId: accountOf(request), userId: tenantOf(request).userId, platform: 'web',
         deviceToken: JSON.stringify({ endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } }),
         capabilities, label: typeof request.body?.label === 'string' ? request.body.label.slice(0, 60) : undefined,
         sessionId: currentSession(request)?.id,
         status: 'active', createdAt: now, lastSeenAt: now,
       });
+      await tenancy.refreshOnboarding(accountOf(request));
       response.status(201).json(presentSurfaceDevice(device));
     } catch (error) {
       next(error);
     }
   });
 
-  app.delete('/owner/push/devices/:id', ownerAuth, async (request, response, next) => {
+  app.delete('/owner/push/devices/:id', tenant('device.register'), async (request, response, next) => {
     try {
-      const device = (await surfaceDevices.list(runtimeOwner(request))).find((candidate) => candidate.id === String(request.params.id));
+      const context = tenantOf(request);
+      const device = (await surfaceDevices.list(context.accountId)).find((candidate) => candidate.id === String(request.params.id));
       if (!device) throw new HttpError(404, 'Device not found');
-      await surfaceDevices.setStatus(device.id, 'revoked');
+      // Anyone may remove their own device; removing someone else's needs device management.
+      if (device.userId !== context.userId) authorize(context, 'device.manage');
+      await surfaceDevices.setStatus(context.accountId, device.id, 'revoked');
+      await tenancy.refreshOnboarding(context.accountId);
       response.status(204).send();
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/owner/push/test', ownerAuth, async (request, response, next) => {
+  app.post('/owner/push/test', tenant('device.register'), async (request, response, next) => {
     try {
-      const devices = (await surfaceDevices.list(runtimeOwner(request))).filter((device) => device.status === 'active' && device.platform === 'web');
+      const devices = (await surfaceDevices.list(accountOf(request))).filter((device) => device.status === 'active' && device.platform === 'web');
       if (!devices.length) throw new HttpError(409, 'Turn on notifications on this device first');
       const payload = JSON.stringify({ title: 'Notifications are on', body: 'You’ll hear from your assistant only when it needs you.', url: '/', tag: 'test' });
       const results = await Promise.all(devices.map((device) => pushSender.send(JSON.parse(device.deviceToken), payload, { ttlSeconds: 60, urgency: 'normal' })
@@ -1013,9 +1106,9 @@ export function createApp(options: AppOptions): express.Express {
     createdAt: item.createdAt.toISOString(), resolvedAt: item.resolvedAt?.toISOString() ?? null,
   });
 
-  app.get('/owner/attention', ownerAuth, async (request, response, next) => {
+  app.get('/owner/attention', tenant('conversation.read'), async (request, response, next) => {
     try {
-      response.json((await attention.list(runtimeOwner(request), {
+      response.json((await attention.list(accountOf(request), {
         open: request.query.open === 'true',
         conversationId: typeof request.query.conversationId === 'string' ? request.query.conversationId : undefined,
         limit: 50,
@@ -1026,12 +1119,12 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   const requireAttention = async (request: Request) => {
-    const item = await attention.get(String(request.params.id), runtimeOwner(request));
+    const item = await attention.get(String(request.params.id), accountOf(request));
     if (!item) throw new HttpError(404, 'Not found');
     return item;
   };
 
-  app.get('/owner/attention/:id', ownerAuth, async (request, response, next) => {
+  app.get('/owner/attention/:id', tenant('conversation.read'), async (request, response, next) => {
     try {
       response.json(presentAttention(await requireAttention(request)));
     } catch (error) {
@@ -1039,17 +1132,17 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/owner/attention/:id/opened', ownerAuth, async (request, response, next) => {
+  app.post('/owner/attention/:id/opened', tenant('conversation.read'), async (request, response, next) => {
     try {
       const item = await requireAttention(request);
       await attention.markOpened(item);
-      response.json(presentAttention((await attention.get(item.id, runtimeOwner(request)))!));
+      response.json(presentAttention((await attention.get(item.id, accountOf(request)))!));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/owner/attention/:id/dismiss', ownerAuth, async (request, response, next) => {
+  app.post('/owner/attention/:id/dismiss', tenant('conversation.control'), async (request, response, next) => {
     try {
       const item = await requireAttention(request);
       await attention.dismiss(item);
@@ -1063,7 +1156,7 @@ export function createApp(options: AppOptions): express.Express {
    * Act on a notification. The conversation comes from the stored attention,
    * never from the client, and the action runs as a durable runtime command.
    */
-  app.post('/owner/attention/:id/actions', ownerAuth, async (request, response, next) => {
+  app.post('/owner/attention/:id/actions', tenant('conversation.control'), async (request, response, next) => {
     try {
       const item = await requireAttention(request);
       const action = request.body?.action;
@@ -1075,7 +1168,7 @@ export function createApp(options: AppOptions): express.Express {
         throw new HttpError(409, item.status === 'acted' ? 'Already handled on another device.' : 'This no longer needs you.', 'attention_resolved');
       }
       if (action === 'take_over') {
-        const snapshot = await runtime.takeOver(item.conversationId, item.ownerId, { commandId });
+        const snapshot = await runtime.takeOver(item.conversationId, item.accountId, { commandId });
         await attention.markActed(item, 'take_over', commandId);
         response.json({ conversationId: item.conversationId, runtime: presentRuntime(snapshot) });
         return;
@@ -1084,7 +1177,7 @@ export function createApp(options: AppOptions): express.Express {
         const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
         if (!body || body.length > 2000) throw new HttpError(400, 'Reply must be between 1 and 2000 characters');
         const conversation = await ownerReplies.reply({
-          conversationId: item.conversationId, ownerId: item.ownerId, body, idempotencyKey: commandId, source: 'web',
+          conversationId: item.conversationId, accountId: item.accountId, body, idempotencyKey: commandId, source: 'web',
         });
         await attention.markActed(item, 'reply', commandId);
         response.json({ conversationId: item.conversationId, conversation: presentConversation(conversation) });
@@ -1097,14 +1190,14 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // Owner-wide live stream: every change in any of the owner's conversations, including new attention.
-  app.get('/owner/events', ownerAuth, (request, response) => {
+  app.get('/owner/events', tenant('conversation.read'), (request, response) => {
     response.status(200);
     response.setHeader('Content-Type', 'text/event-stream');
     response.setHeader('Cache-Control', 'no-cache');
     response.setHeader('Connection', 'keep-alive');
     response.flushHeaders?.();
     response.write(`event: ready\ndata: {}\n\n`);
-    const unsubscribe = runtime.subscribeOwner(runtimeOwner(request), (event) => {
+    const unsubscribe = runtime.subscribeOwner(accountOf(request), (event) => {
       response.write(`event: ${event.type}\n`);
       response.write(`data: ${JSON.stringify({ ...event, occurredAt: event.occurredAt.toISOString() })}\n\n`);
     });
@@ -1115,95 +1208,379 @@ export function createApp(options: AppOptions): express.Express {
     });
   });
 
-  // ---- The owner's phone number ----
   // ---- The control-plane contract: the browser and the iOS app use exactly these routes ----
   const signInLimit = rateLimit({ windowMs: 15 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
-  const presentSession = (session: OwnerAuthSession, current?: OwnerAuthSession) => ({
-    id: session.id, platform: session.platform, label: session.label,
+  const presentSession = (session: AuthSession, current?: AuthSession) => ({
+    id: session.id, platform: session.platform, label: session.label, accountId: session.accountId,
     createdAt: session.createdAt.toISOString(), lastUsedAt: session.lastUsedAt.toISOString(),
     expiresAt: session.expiresAt.toISOString(), current: session.id === current?.id,
   });
-  // Signing a device out also stops its notifications.
-  const revokeSession = async (ownerIdValue: string, sessionId: string) => {
-    if (!(await auth.revoke(ownerIdValue, sessionId))) return false;
-    for (const device of await surfaceDevices.list(ownerIdValue)) {
-      if (device.sessionId === sessionId && device.status === 'active') await surfaceDevices.setStatus(device.id, 'revoked');
+  const presentUser = (user: { id: string; name: string; email: string }) => ({ id: user.id, name: user.name, email: user.email });
+  const presentPhone = (number: import('./tenancy/model.js').PhoneNumber | null) => number ? {
+    id: number.id, kind: number.kind, number: number.number, status: number.status, provider: number.provider,
+    verificationStatus: number.verificationStatus, verifiedAt: number.verifiedAt?.toISOString() ?? null,
+    createdAt: number.createdAt.toISOString(), updatedAt: number.updatedAt.toISOString(),
+  } : null;
+  const sessionInput = (request: Request) => ({
+    platform: request.body?.platform === 'ios' ? 'ios' as const : 'web' as const,
+    label: typeof request.body?.label === 'string' ? request.body.label : undefined,
+  });
+  /** A device signed in to one account at a time: its registrations elsewhere stop when it leaves. */
+  const retireSessionDevices = async (userId: string, sessionId: string, exceptAccountId?: string) => {
+    for (const membership of await tenancy.memberships(userId)) {
+      if (membership.accountId === exceptAccountId) continue;
+      for (const device of await surfaceDevices.list(membership.accountId)) {
+        if (device.sessionId === sessionId && device.status === 'active') await surfaceDevices.setStatus(membership.accountId, device.id, 'revoked');
+      }
     }
+  };
+  // Signing a device out also stops its notifications, in every account it was registered in.
+  const revokeSession = async (userId: string, sessionId: string) => {
+    if (!(await auth.revoke(userId, sessionId))) return false;
+    await retireSessionDevices(userId, sessionId);
     return true;
   };
 
+  /** Bootstrap for any surface: who you are, which accounts you belong to, the active one and its setup state. */
+  const describeMe = async (session: AuthSession) => {
+    const [user, memberships] = await Promise.all([tenancy.getUser(session.userId), tenancy.memberships(session.userId)]);
+    if (!user) throw new HttpError(401, 'Authentication required', 'unauthenticated');
+    const active = memberships.find((membership) => membership.accountId === session.accountId);
+    const account = active ? await tenancy.getAccount(active.accountId) : null;
+    return {
+      user: presentUser(user),
+      memberships: memberships.map((membership) => ({ accountId: membership.accountId, accountName: membership.accountName, role: membership.role })),
+      activeAccountId: active ? session.accountId : null,
+      account: account ? { id: account.id, name: account.name, role: active!.role } : null,
+      onboarding: account ? await tenancy.refreshOnboarding(account.id) : null,
+      session: presentSession(session, session),
+    };
+  };
+
+  // Anyone can create an account: no deployment configuration names its customers.
+  app.post('/auth/signup', signInLimit, async (request, response, next) => {
+    try {
+      const { user, account } = await tenancy.signUp({
+        email: request.body?.email, password: request.body?.password, name: request.body?.name, accountName: request.body?.accountName,
+      });
+      const { token, session } = await auth.createSession(user.id, account.id, sessionInput(request));
+      response.status(201).json({ token, ...(await describeMe(session)) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.post('/auth/sessions', signInLimit, async (request, response, next) => {
     try {
-      const accessKey = typeof request.body?.accessKey === 'string' ? request.body.accessKey.trim() : '';
-      const platform = request.body?.platform === 'ios' ? 'ios' : 'web';
-      const label = typeof request.body?.label === 'string' ? request.body.label : undefined;
-      const result = await auth.signIn(accessKey, { platform, label });
-      if (!result) throw new HttpError(401, 'That access key isn’t right.', 'invalid_access_key');
-      response.status(201).json({ token: result.token, session: presentSession(result.session, result.session) });
+      const user = await tenancy.signIn(request.body?.email, request.body?.password);
+      if (!user) throw new HttpError(401, 'That email and password don’t match.', 'invalid_credentials');
+      const memberships = await tenancy.memberships(user.id);
+      // Resume in the account asked for (if the user belongs to it), else the first one they joined.
+      const requested = typeof request.body?.accountId === 'string' ? request.body.accountId : undefined;
+      const account = memberships.find((membership) => membership.accountId === requested) ?? memberships[0];
+      if (!account) throw new HttpError(403, 'You’re not a member of any account.', 'no_membership');
+      const { token, session } = await auth.createSession(user.id, account.accountId, sessionInput(request));
+      response.status(201).json({ token, ...(await describeMe(session)) });
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/auth/session', ownerAuth, (request, response) => {
-    const session = currentSession(request);
-    response.json({
-      ownerId: runtimeOwner(request),
-      credential: (request as Request & { credential?: string }).credential,
-      session: session ? presentSession(session, session) : null,
-    });
+  app.get('/auth/session', principal, async (request, response, next) => {
+    try {
+      const session = currentSession(request)!;
+      response.json({ userId: session.userId, accountId: session.accountId, credential: 'session', session: presentSession(session, session) });
+    } catch (error) {
+      next(error);
+    }
   });
 
-  app.delete('/auth/session', ownerAuth, async (request, response, next) => {
+  app.delete('/auth/session', principal, async (request, response, next) => {
     try {
-      const session = currentSession(request);
-      if (session) await revokeSession(runtimeOwner(request), session.id);
+      const session = currentSession(request)!;
+      await revokeSession(session.userId, session.id);
       response.status(204).send();
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/auth/sessions', ownerAuth, async (request, response, next) => {
+  app.get('/auth/sessions', principal, async (request, response, next) => {
     try {
-      const current = currentSession(request);
-      response.json((await auth.list(runtimeOwner(request))).map((session) => presentSession(session, current)));
+      const current = currentSession(request)!;
+      response.json((await auth.list(current.userId)).map((session) => presentSession(session, current)));
     } catch (error) {
       next(error);
     }
   });
 
-  app.delete('/auth/sessions/:id', ownerAuth, async (request, response, next) => {
+  app.delete('/auth/sessions/:id', principal, async (request, response, next) => {
     try {
-      if (!(await revokeSession(runtimeOwner(request), String(request.params.id)))) throw new HttpError(404, 'Session not found');
+      if (!(await revokeSession(currentSession(request)!.userId, String(request.params.id)))) throw new HttpError(404, 'Session not found');
       response.status(204).send();
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/owner/me', ownerAuth, async (request, response, next) => {
+  /** Switch this session to another account the user belongs to. The membership is checked here and on every later request. */
+  app.post('/auth/session/account', principal, async (request, response, next) => {
     try {
-      const owner = runtimeOwner(request);
-      const configuration = await ownerConfiguration.get(owner);
+      const session = currentSession(request)!;
+      const accountId = typeof request.body?.accountId === 'string' ? request.body.accountId : '';
+      const context = await tenancy.resolveContext(session.userId, accountId, session.id);
+      if (!context) throw new HttpError(404, 'Account not found');
+      const switched = await auth.switchAccount(session, accountId);
+      await retireSessionDevices(session.userId, session.id, accountId);
+      await tenancy.audit(accountId, 'session.account_switched', { sessionId: session.id }, session.userId);
+      response.json(await describeMe(switched));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/me', principal, async (request, response, next) => {
+    try {
+      response.json(await describeMe(currentSession(request)!));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch('/me', principal, async (request, response, next) => {
+    try {
+      const session = currentSession(request)!;
+      await tenancy.updateProfile(session.userId, { name: request.body?.name });
+      response.json(await describeMe(session));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /** Another account for the same user (its own line, devices and data). The session switches to it. */
+  app.post('/accounts', principal, async (request, response, next) => {
+    try {
+      const session = currentSession(request)!;
+      const name = typeof request.body?.name === 'string' ? request.body.name : '';
+      const { account } = await tenancy.createAccount(session.userId, name);
+      const switched = await auth.switchAccount(session, account.id);
+      await retireSessionDevices(session.userId, session.id, account.id);
+      response.status(201).json(await describeMe(switched));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/account', tenant('account.read'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      const [account, plane, subscription, onboarding] = await Promise.all([
+        tenancy.getAccount(context.accountId), tenancy.getPlane(context.accountId),
+        tenancy.getSubscription(context.accountId), tenancy.refreshOnboarding(context.accountId),
+      ]);
+      response.json({
+        id: account!.id, name: account!.name, role: context.role, onboarding,
+        plane: plane ? { id: plane.id, name: plane.name, status: plane.status } : null,
+        subscription: subscription ? { plan: subscription.plan, status: subscription.status, entitlements: subscription.entitlements } : null,
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/account/onboarding', tenant('account.read'), async (request, response, next) => {
+    try {
+      response.json(await tenancy.refreshOnboarding(accountOf(request)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/account/onboarding/identity', tenant('account.manage'), async (request, response, next) => {
+    try {
+      response.json(await tenancy.configureIdentity(tenantOf(request), { name: request.body?.name, accountName: request.body?.accountName }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/account/members', tenant('account.read'), async (request, response, next) => {
+    try {
+      response.json(await tenancy.members(accountOf(request)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/account/members', tenant('members.manage'), async (request, response, next) => {
+    try {
+      const membership = await tenancy.addMember(tenantOf(request), { email: request.body?.email, role: request.body?.role });
+      response.status(201).json({ userId: membership.userId, role: membership.role });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/account/members/:userId', tenant('members.manage'), async (request, response, next) => {
+    try {
+      await tenancy.removeMember(tenantOf(request), String(request.params.userId));
+      response.status(204).send();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/account/audit', tenant('account.manage'), async (request, response, next) => {
+    try {
+      response.json((await tenancy.listAudit(accountOf(request), 100)).map((event) => ({ ...event, occurredAt: event.occurredAt.toISOString() })));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /** The account's numbers: its assistant line and the owner's verified personal number. */
+  const describePhone = async (accountId: string) => {
+    const status = await phoneNumbers.status(accountId);
+    // Forwarding is proven by a real forwarded call to this account, not assumed from a setting.
+    const forwarded = (await service.listConversations(accountId))
+      .flatMap((conversation) => conversation.events.filter((event) => event.type === 'call.forwarded'))
+      .map((event) => event.occurredAt.getTime())
+      .sort((left, right) => right - left);
+    const verified = status.personal && (status.personal.status === 'verified' || status.personal.status === 'active');
+    return {
+      available: true,
+      assistantLine: status.assistantLine?.number ?? null,
+      phoneNumber: status.assistantLine?.number ?? null,
+      ownerNumber: verified ? status.personal!.number : null,
+      found: Boolean(status.assistantLine),
+      connected: status.connected,
+      forwarding: status.forwarding,
+      ...(status.error ? { error: status.error } : {}),
+      numbers: { assistantLine: presentPhone(status.assistantLine), personal: presentPhone(status.personal) },
+      forwardingSeen: forwarded.length > 0,
+      lastForwardedAt: forwarded.length ? new Date(forwarded[0]).toISOString() : null,
+    };
+  };
+
+  app.get(['/account/phone', '/owner/phone'], tenant('account.read'), async (request, response, next) => {
+    try {
+      response.json(await describePhone(accountOf(request)));
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(502, 'Couldn’t reach your phone provider. Try again in a moment.'));
+    }
+  });
+
+  /** Claim this account's assistant line from the platform's pool (idempotent). */
+  app.post('/account/phone/line', tenant('phone.manage'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      const subscription = await tenancy.getSubscription(context.accountId);
+      await phoneNumbers.claimAssistantLine(context.accountId, subscription?.entitlements.maxAssistantLines ?? 0, context.userId);
+      await tenancy.refreshOnboarding(context.accountId);
+      response.json(await describePhone(context.accountId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post(['/account/phone/connect', '/owner/phone/connect'], tenant('phone.manage'), async (request, response, next) => {
+    try {
+      const result = await phoneNumbers.connect(accountOf(request));
+      await tenancy.refreshOnboarding(accountOf(request));
+      response.json(result);
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t connect your number'));
+    }
+  });
+
+  const verificationLimit = rateLimit({ windowMs: 60 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false });
+  /** Start verifying the owner's personal number: a code is texted to it from the account's own line. */
+  app.post('/account/phone/personal', verificationLimit, tenant('phone.manage'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      const number = typeof request.body?.number === 'string' ? request.body.number : '';
+      const record = await phoneNumbers.startPersonalVerification(context.accountId, number, context.userId);
+      response.status(202).json({ personal: presentPhone(record) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/account/phone/personal/verify', tenant('phone.manage'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      await phoneNumbers.confirmPersonalVerification(context.accountId, String(request.body?.code ?? ''), context.userId);
+      await tenancy.refreshOnboarding(context.accountId);
+      response.json(await describePhone(context.accountId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /** Onboarding: create (or rename) the plane — the assistant that answers this account's line. */
+  app.post('/account/plane', tenant('account.manage'), async (request, response, next) => {
+    try {
+      const plane = await tenancy.configurePlane(tenantOf(request), { name: request.body?.name, behavior: request.body?.behavior });
+      response.json({ id: plane.id, name: plane.name, status: plane.status, onboarding: await tenancy.onboarding(plane.accountId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/account/notifications', tenant('account.read'), async (request, response, next) => {
+    try {
+      response.json(await channels.list(accountOf(request)));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  /** Opt in (or out) of texts to the account's verified personal number. */
+  app.post('/account/notifications/sms', tenant('settings.manage'), async (request, response, next) => {
+    try {
+      const accountId = accountOf(request);
+      const enabled = request.body?.enabled !== false;
+      if (enabled && !(await phoneNumbers.personalNumber(accountId))) {
+        throw new HttpError(409, 'Verify your number first.', 'no_verified_number');
+      }
+      await ownerConfiguration.update(accountId, { messages: { smsEnabled: enabled } }, 'web');
+      await tenancy.refreshOnboarding(accountId);
+      response.json(await channels.list(accountId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/owner/me', tenant('account.read'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      const [configuration, user] = await Promise.all([ownerConfiguration.get(context.accountId), tenancy.getUser(context.userId)]);
       const session = currentSession(request);
-      response.json({ ownerId: owner, name: configuration.assistant.ownerName, session: session ? presentSession(session, session) : null });
+      response.json({
+        accountId: context.accountId, userId: context.userId, role: context.role,
+        name: configuration.assistant.ownerName, user: user ? presentUser(user) : null,
+        session: session ? presentSession(session, session) : null,
+      });
     } catch (error) {
       next(error);
     }
   });
 
   /**
-   * One snapshot to bootstrap any surface: who you are, the plane (the assistant
-   * answering your line) and its status, what's live, and what needs you. Live
+   * One snapshot to bootstrap any surface, after authentication: who you are,
+   * the active account and its setup state, the plane (the assistant answering
+   * the account's line) and its status, what's live, and what needs you. Live
    * updates then arrive on /owner/events; after any event, re-read this.
    */
-  app.get('/owner/control-plane', ownerAuth, async (request, response, next) => {
+  app.get('/owner/control-plane', tenant('account.read'), async (request, response, next) => {
     try {
-      const owner = runtimeOwner(request);
-      const configuration = await ownerConfiguration.get(owner);
-      const conversations = (await service.listConversations())
-        .filter((conversation) => !conversation.ownerId || conversation.ownerId === owner);
+      const context = tenantOf(request);
+      const accountId = context.accountId;
+      const [configuration, account, planeRecord, user, onboarding, lines] = await Promise.all([
+        ownerConfiguration.get(accountId), tenancy.getAccount(accountId), tenancy.getPlane(accountId),
+        tenancy.getUser(context.userId), tenancy.refreshOnboarding(accountId), phoneNumbers.status(accountId),
+      ]);
+      const conversations = await service.listConversations(accountId);
       const summaries = await Promise.all(conversations.map(async (conversation) => ({
         ...presentConversationSummary(conversation),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
@@ -1211,19 +1588,25 @@ export function createApp(options: AppOptions): express.Express {
       })));
       const live = summaries.filter((item) => item.voice.live ||
         ['active', 'paused', 'owner_needed', 'takeover', 'text_active'].includes(item.runtime.status));
-      const open = (await attention.list(owner, { open: true, limit: 50 })).map(presentAttention);
+      const open = (await attention.list(accountId, { open: true, limit: 50 })).map(presentAttention);
       const needsOwner = open.some((item) => item.priority === 'interrupt') || live.some((item) => item.runtime.status === 'owner_needed');
-      const status = !configuration.calls.answerCalls ? 'offline'
-        : needsOwner ? 'awaiting_attention'
-          : live.length ? 'working' : 'online';
+      const status = !planeRecord ? 'setup'
+        : !configuration.calls.answerCalls ? 'offline'
+          : needsOwner ? 'awaiting_attention'
+            : live.length ? 'working' : 'online';
       const session = currentSession(request);
       response.json({
-        owner: { id: owner, name: configuration.assistant.ownerName },
+        owner: { id: accountId, name: configuration.assistant.ownerName },
+        user: user ? presentUser(user) : null,
+        account: { id: accountId, name: account?.name ?? '', role: context.role },
+        onboarding,
         session: session ? presentSession(session, session) : null,
         plane: {
-          id: `plane_${owner}`,
+          id: planeRecord?.id ?? null,
+          name: planeRecord?.name ?? null,
           status,
           answering: configuration.calls.answerCalls,
+          assistantLine: lines.assistantLine?.status === 'active' ? lines.assistantLine.number : null,
           voice: { realtime: Boolean(realtimeVoice), model: realtimeVoice?.modelId ?? null },
           liveConversations: live.length,
           openAttention: open.length,
@@ -1238,50 +1621,18 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/owner/phone', ownerAuth, async (_request, response, next) => {
-    try {
-      if (!options.phoneNumbers) {
-        response.json({ available: false, phoneNumber: null, connected: false });
-        return;
-      }
-      const status = await options.phoneNumbers.status();
-      // Forwarding is proven by a real forwarded call, not assumed from a setting.
-      const forwarded = (await service.listConversations())
-        .flatMap((conversation) => conversation.events.filter((event) => event.type === 'call.forwarded'))
-        .map((event) => event.occurredAt.getTime())
-        .sort((left, right) => right - left);
-      response.json({
-        available: true,
-        ...status,
-        forwardingSeen: forwarded.length > 0,
-        lastForwardedAt: forwarded.length ? new Date(forwarded[0]).toISOString() : null,
-      });
-    } catch (error) {
-      next(new HttpError(502, 'Couldn’t reach your phone provider. Try again in a moment.'));
-    }
+  app.get('/owner/configuration', tenant('account.read'), async (request, response) => {
+    response.json(await ownerConfiguration.get(accountOf(request)));
   });
 
-  app.post('/owner/phone/connect', ownerAuth, async (_request, response, next) => {
-    try {
-      if (!options.phoneNumbers) throw new HttpError(409, 'No phone number is set up for this account yet');
-      response.json(await options.phoneNumbers.connect());
-    } catch (error) {
-      next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t connect your number'));
-    }
-  });
-
-  app.get('/owner/configuration', ownerAuth, async (request, response) => {
-    response.json(await ownerConfiguration.get((request as Request & { ownerId?: string }).ownerId!));
-  });
-
-  app.patch('/owner/configuration', ownerAuth, async (request, response, next) => {
+  app.patch('/owner/configuration', tenant('settings.manage'), async (request, response, next) => {
     try {
       const { expectedRevision, ...patch } = (request.body ?? {}) as OwnerConfigurationPatch & { expectedRevision?: unknown };
       for (const key of Object.keys(patch)) {
         if (!['assistant', 'calls', 'messages', 'onboarding'].includes(key)) throw new HttpError(400, `Unknown settings section: ${key}`);
       }
       response.json(await ownerConfiguration.update(
-        (request as Request & { ownerId?: string }).ownerId!,
+        accountOf(request),
         patch as OwnerConfigurationPatch,
         'web',
         typeof expectedRevision === 'number' ? expectedRevision : undefined,
@@ -1293,9 +1644,9 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // Who changed what, when (no message contents).
-  app.get('/owner/configuration/events', ownerAuth, async (request, response, next) => {
+  app.get('/owner/configuration/events', tenant('account.read'), async (request, response, next) => {
     try {
-      response.json((await ownerConfiguration.events(runtimeOwner(request))).map((event) => ({
+      response.json((await ownerConfiguration.events(accountOf(request))).map((event) => ({
         ...event, occurredAt: event.occurredAt.toISOString(),
       })));
     } catch (error) {
@@ -1306,10 +1657,10 @@ export function createApp(options: AppOptions): express.Express {
   app.get('/owner/devices/:id/configuration', ownerDeviceRateLimit, async (request, response, next) => {
     try {
       const { device } = await deviceAuth(request);
-      const configuration = await ownerConfiguration.get(device.ownerId);
+      const configuration = await ownerConfiguration.get(device.accountId);
       response.json({
         deviceId: device.id,
-        ownerId: device.ownerId,
+        accountId: device.accountId,
         revision: configuration.revision,
         // What the Mac executes; it never edits any of this.
         bridge: {
@@ -1326,9 +1677,9 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/owner/devices', ownerAuth, async (request, response, next) => {
+  app.get('/owner/devices', tenant('account.read'), async (request, response, next) => {
     try {
-      const devices = await ownerDevices.list((request as Request & { ownerId?: string }).ownerId!);
+      const devices = await ownerDevices.list(accountOf(request));
       // Online = the bridge checked in recently; health itself is what the bridge measured on the Mac.
       response.json(devices.map((device) => ({
         ...device,
@@ -1340,23 +1691,23 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/owner/devices/:id/revoke', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/:id/revoke', tenant('device.manage'), async (request, response, next) => {
     try {
       await ownerDevices.revoke(
-        (request as Request & { ownerId?: string }).ownerId!,
+        accountOf(request),
         String(request.params.id),
       );
-      await ownerConfiguration.recordChange(runtimeOwner(request), 'device.revoked').catch(() => undefined);
+      await ownerConfiguration.recordChange(accountOf(request), 'device.revoked').catch(() => undefined);
       response.status(204).send();
     } catch (error) {
       next(new HttpError(404, error instanceof Error ? error.message : 'Device not found'));
     }
   });
 
-  app.post('/owner/devices/:id/primary', ownerAuth, async (request, response, next) => {
+  app.post('/owner/devices/:id/primary', tenant('device.manage'), async (request, response, next) => {
     try {
       const device = await ownerDevices.setPrimary(
-        (request as Request & { ownerId?: string }).ownerId!,
+        accountOf(request),
         String(request.params.id),
       );
       response.json(device);
@@ -1372,19 +1723,19 @@ export function createApp(options: AppOptions): express.Express {
       : undefined,
   });
 
-  const runtimeOwner = (request: Request) => (request as Request & { ownerId?: string }).ownerId!;
+  const runtimeOwner = (request: Request) => accountOf(request);
 
-  app.get('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
+  app.get('/conversations/:id/runtime', tenant('conversation.read'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.getRuntime(String(request.params.id), runtimeOwner(request))));
+      response.json(presentRuntime(await runtime.getRuntime(String(request.params.id), accountOf(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.get('/conversations/:id/runtime/events', ownerAuth, async (request, response, next) => {
+  app.get('/conversations/:id/runtime/events', tenant('conversation.read'), async (request, response, next) => {
     try {
-      const snapshot = await runtime.getRuntime(String(request.params.id), runtimeOwner(request));
+      const snapshot = await runtime.getRuntime(String(request.params.id), accountOf(request));
       response.status(200);
       response.setHeader('Content-Type', 'text/event-stream');
       response.setHeader('Cache-Control', 'no-cache');
@@ -1409,72 +1760,72 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/conversations/:id/runtime/start', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/start', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.start(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.start(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/stop', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/stop', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.stop(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.stop(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/pause', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/pause', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.pause(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.pause(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/resume', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/resume', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.resume(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.resume(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/takeover', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/takeover', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.takeOver(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.takeOver(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/return-to-assistant', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/return-to-assistant', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.returnToAssistant(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.returnToAssistant(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/interrupt', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/interrupt', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.interrupt(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.interrupt(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.post('/conversations/:id/runtime/transition-to-sms', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/runtime/transition-to-sms', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.transitionToSms(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.transitionToSms(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
   // adjust_interaction: one command, one revision, this conversation only.
-  app.patch('/conversations/:id/runtime', ownerAuth, async (request, response, next) => {
+  app.patch('/conversations/:id/runtime', tenant('conversation.control'), async (request, response, next) => {
     try {
       const patch = { ...(request.body ?? {}) } as Record<string, unknown>;
       const expiresAt = patch.expiresAt;
@@ -1484,7 +1835,7 @@ export function createApp(options: AppOptions): express.Express {
       for (const key of ['commandId', 'expectedRevision', 'expiresAt']) delete patch[key];
       const conversationId = String(request.params.id);
       const conversation = await service.getConversation(conversationId);
-      const snapshot = await runtime.adjust(conversationId, runtimeOwner(request), patch as Parameters<RuntimeControlService['adjust']>[2],
+      const snapshot = await runtime.adjust(conversationId, accountOf(request), patch as Parameters<RuntimeControlService['adjust']>[2],
         runtimeInput(request), typeof expiresAt === 'string' ? new Date(expiresAt) : undefined);
       response.json(presentRuntime(snapshot, conversation ?? undefined));
     } catch (error) {
@@ -1493,19 +1844,19 @@ export function createApp(options: AppOptions): express.Express {
   });
 
   // Reset this conversation to the owner's defaults.
-  app.delete('/conversations/:id/runtime/overrides', ownerAuth, async (request, response, next) => {
+  app.delete('/conversations/:id/runtime/overrides', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.resetOverrides(String(request.params.id), runtimeOwner(request), runtimeInput(request))));
+      response.json(presentRuntime(await runtime.resetOverrides(String(request.params.id), accountOf(request), runtimeInput(request))));
     } catch (error) {
       next(error);
     }
   });
 
-  app.delete('/conversations/:id/runtime/overrides/:field', ownerAuth, async (request, response, next) => {
+  app.delete('/conversations/:id/runtime/overrides/:field', tenant('conversation.control'), async (request, response, next) => {
     try {
       response.json(presentRuntime(await runtime.clearTemporaryOverride(
         String(request.params.id),
-        runtimeOwner(request),
+        accountOf(request),
         String(request.params.field) as Parameters<RuntimeControlService['clearTemporaryOverride']>[2],
         runtimeInput(request),
       )));
@@ -1521,9 +1872,9 @@ export function createApp(options: AppOptions): express.Express {
     appliedLiveAt: command.appliedLiveAt?.toISOString() ?? null,
   });
 
-  app.get('/conversations/:id/runtime/commands', ownerAuth, async (request, response, next) => {
+  app.get('/conversations/:id/runtime/commands', tenant('conversation.read'), async (request, response, next) => {
     try {
-      response.json((await runtime.listCommands(String(request.params.id), runtimeOwner(request))).map(presentCommand));
+      response.json((await runtime.listCommands(String(request.params.id), accountOf(request))).map(presentCommand));
     } catch (error) {
       next(error);
     }
@@ -1531,21 +1882,15 @@ export function createApp(options: AppOptions): express.Express {
 
   // One ordered timeline with every identifier, so a journey can be reconstructed
   // end to end: caller turn -> transcript -> AI response -> command -> owner reply -> SMS.
-  app.get('/conversations/:id/audit', ownerAuth, async (request, response, next) => {
+  app.get('/conversations/:id/audit', tenant('conversation.read'), async (request, response, next) => {
     try {
       const conversationId = String(request.params.id);
-      const conversation = await service.requireOwnedConversation(conversationId, runtimeOwner(request))
-        .catch(async (error) => {
-          if (options.ownerAuthToken) throw error;
-          const found = await service.getConversation(conversationId);
-          if (!found) throw error;
-          return found;
-        });
+      const conversation = await service.requireOwnedConversation(conversationId, accountOf(request));
       const [runtimeEvents, commands, snapshot, attentionItems, notifications] = await Promise.all([
-        runtime.listEvents(conversationId, runtimeOwner(request)),
-        runtime.listCommands(conversationId, runtimeOwner(request)),
+        runtime.listEvents(conversationId, accountOf(request)),
+        runtime.listCommands(conversationId, accountOf(request)),
         runtime.getRuntimeForConversation(conversation),
-        attention.list(conversation.ownerId ?? runtimeOwner(request), { conversationId }),
+        attention.list(conversation.accountId, { conversationId }),
         attention.deliveriesForConversation(conversationId),
       ]);
       const idKeys = ['callbackId', 'responseId', 'commandId', 'messageId', 'requestId', 'providerMessageId',
@@ -1590,11 +1935,10 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/conversations', ownerAuth, async (request, response, next) => {
+  app.get('/conversations', tenant('conversation.read'), async (request, response, next) => {
     try {
-      let conversations = await service.listConversations();
-      conversations = conversations.filter((conversation) =>
-        !conversation.ownerId || conversation.ownerId === (request as Request & { ownerId?: string }).ownerId);
+      // Scoped in the query itself: another account's conversations are never loaded, let alone filtered out.
+      let conversations = await service.listConversations(accountOf(request));
       if (typeof request.query.state === 'string') {
         conversations = conversations.filter((conversation) =>
           (conversation.state ?? 'voice_active') === request.query.state);
@@ -1613,14 +1957,11 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.get('/conversations/:id', ownerAuth, async (request, response, next) => {
+  app.get('/conversations/:id', tenant('conversation.read'), async (request, response, next) => {
     try {
-      const authenticatedOwner = (request as Request & { ownerId?: string }).ownerId!;
-      const conversation = options.ownerAuthToken
-        ? await service.requireOwnedConversation(String(request.params.id), authenticatedOwner)
-        : await service.getConversation(String(request.params.id));
-      if (!conversation) throw new HttpError(404, 'Conversation not found');
-      if (options.ownerAuthToken) await service.markOwnerRead(conversation.id, authenticatedOwner);
+      const accountId = accountOf(request);
+      const conversation = await service.requireOwnedConversation(String(request.params.id), accountId);
+      await service.markOwnerRead(conversation.id, accountId);
       const refreshed = await service.getConversation(conversation.id);
       response.json({
         ...presentConversation(refreshed!),
@@ -1632,24 +1973,17 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/conversations/:id/messages', ownerAuth, async (request, response, next) => {
+  app.post('/conversations/:id/messages', tenant('conversation.control'), async (request, response, next) => {
     try {
       const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
       if (!body || body.length > 2000) throw new HttpError(400, 'Message body must be between 1 and 2000 characters');
-      if (options.ownerAuthToken) {
-        await service.requireOwnedConversation(
-          String(request.params.id),
-          (request as Request & { ownerId?: string }).ownerId!,
-        );
-      } else if (!await service.getConversation(String(request.params.id))) {
-        throw new HttpError(404, 'Conversation not found');
-      }
+      await service.requireOwnedConversation(String(request.params.id), accountOf(request));
       const key = typeof request.body?.idempotencyKey === 'string' && request.body.idempotencyKey.trim()
         ? request.body.idempotencyKey.trim()
         : `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
       const conversation = await ownerReplies.reply({
         conversationId: String(request.params.id),
-        ownerId: (request as Request & { ownerId?: string }).ownerId!,
+        accountId: accountOf(request),
         body,
         idempotencyKey: key,
         source: 'web',
@@ -1689,8 +2023,10 @@ export function createApp(options: AppOptions): express.Express {
     response.sendFile('icon.svg', { root: publicDir }, next);
   });
 
-  app.post('/conversations/:id/turns', async (request, response, next) => {
+  // The scripted (non-realtime) call pipeline: owner-authenticated, and only on the owner's own conversations.
+  app.post('/conversations/:id/turns', tenant('conversation.control'), async (request, response, next) => {
     try {
+      await service.requireOwnedConversation(String(request.params.id), accountOf(request));
       const callbackId =
         typeof request.body?.callbackId === 'string'
           ? request.body.callbackId
@@ -1698,7 +2034,7 @@ export function createApp(options: AppOptions): express.Express {
       if (!callbackId) {
         throw new HttpError(400, 'Missing required field: callbackId');
       }
-      const conversation = await engine.respond(request.params.id, {
+      const conversation = await engine.respond(String(request.params.id), {
         callbackId,
         audio: request.body?.audio,
       });
@@ -1711,9 +2047,10 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/conversations/:id/convert-to-text', async (request, response, next) => {
+  app.post('/conversations/:id/convert-to-text', tenant('conversation.control'), async (request, response, next) => {
     try {
-      const conversation = await service.convertToTextConversation(request.params.id);
+      await service.requireOwnedConversation(String(request.params.id), accountOf(request));
+      const conversation = await service.convertToTextConversation(String(request.params.id));
       await runtime.finalizeSmsTransition(conversation.id);
       response.json({
         ...presentConversation(conversation),
@@ -1724,14 +2061,15 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.post('/conversations/:id/sms-consent', async (request, response, next) => {
+  app.post('/conversations/:id/sms-consent', tenant('conversation.control'), async (request, response, next) => {
     try {
+      await service.requireOwnedConversation(String(request.params.id), accountOf(request));
       const phone = request.body?.phoneNumber ?? request.body?.phone;
       if (typeof phone !== 'string' || !phone.trim()) {
         throw new HttpError(400, 'Missing required field: phoneNumber');
       }
       const conversation = await service.grantSmsConsent(
-        request.params.id,
+        String(request.params.id),
         phone,
         typeof request.body?.displayName === 'string' ? request.body.displayName : undefined,
       );

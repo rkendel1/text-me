@@ -13,14 +13,34 @@ headers, so the live streams (`…/events`) also accept `?token=<session>`.
 
 | | |
 |---|---|
-| `POST /auth/sessions {accessKey, platform: 'web'\|'ios', label}` | `201 {token, session}`. Keep the token (Keychain on iOS); never keep the access key |
+| `POST /auth/signup {email, password, name, platform, label}` | `201 {token, user, account, memberships, activeAccountId, onboarding, session}`: a new user, a new account, an owner membership |
+| `POST /auth/sessions {email, password, platform, label, accountId?}` | `201` with the same shape. Keep the token (Keychain on iOS); never keep the password |
+| `GET /me`, `PATCH /me {name}` | The bootstrap: user, memberships, the active account and its onboarding state |
+| `POST /auth/session/account {accountId}` | Switch this session to another account you belong to |
+| `POST /accounts {name}` | Create another account (the session switches to it) |
 | `GET /auth/session`, `DELETE /auth/session` | Who am I / sign out |
 | `GET /auth/sessions`, `DELETE /auth/sessions/:id` | Signed-in devices; signing one out also stops its notifications |
 | any route → `401 {code: session_expired \| session_revoked}` | Sign in again, showing why |
 
 Sessions last 30 days and slide while used. Everything below is scoped to the
-session's owner server-side, and the ids a client sends are always re-checked
-against it. `GET /owner/control-plane` is the one snapshot every surface
+session's **active account**, re-authorized against the user's membership on
+every request (principal → membership → account → action); ids a client sends
+are always re-checked against that account, and another account's ids answer
+404. A removed member gets `403 {code: no_membership}` on their next request.
+
+### Account setup
+
+| Route | |
+|---|---|
+| `GET /account`, `GET /account/onboarding` | `{state, ready, steps: [{id, label, done}], next}` — `account_created → identity_configured → phone_configured → application_configured → notifications_configured → ready` |
+| `POST /account/onboarding/identity {name, accountName?}` | Your name (how the assistant introduces you) |
+| `POST /account/phone/line` | Claim this account's assistant line from the platform pool |
+| `POST /account/phone/personal {number}` → `POST /account/phone/personal/verify {code}` | Verify the owner's mobile by a code texted from the account's own line |
+| `GET /account/phone` (alias `/owner/phone`) | The account's numbers, their lifecycle status, forwarding codes |
+| `POST /account/plane {name, behavior}` | Create the plane (the assistant answering the line) |
+| `GET /account/notifications`, `POST /account/notifications/sms {enabled}` | The account's channels: push devices, Mac, texts to the verified number |
+| `GET /account/members`, `POST /account/members {email, role}`, `DELETE /account/members/:userId` | Memberships (owner, admin, member) |
+| `GET /account/audit` | Account audit events | `GET /owner/control-plane` is the one snapshot every surface
 bootstraps from; see `docs/release-audit.md` §2.
 
 ## 2. Conversation state

@@ -18,9 +18,11 @@ import { PhotonKitClient, type PhotonSdk } from '../src/owner/photon-kit-client.
 import { FakeTelephonyProvider } from '../src/telephony/fake-provider.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
+import { onboardTenant, type Tenant } from './support/tenant.js';
 
-const OWNER_TOKEN = 'owner-token';
-const auth = { Authorization: `Bearer ${OWNER_TOKEN}` };
+// Tests in a file run one at a time; each backend signs its own customer in.
+let auth = { Authorization: '' };
+let owner: Tenant;
 const PUBLIC_URL = 'https://text-me.vercel.app';
 
 /** A Mac's Messages, as the bridge sees it through the adapter. */
@@ -61,10 +63,10 @@ async function backend() {
   const configuration = new OwnerConfigurationService();
   const devices = new OwnerDeviceService();
   const macDeliveries = new InMemoryOwnerMessageDeliveryStore();
+  const messaging = new FakeMessagingProvider();
   const app = createApp({
     repository,
-    ownerAuthToken: OWNER_TOKEN,
-    messagingProvider: new FakeMessagingProvider(),
+    messagingProvider: messaging,
     ownerConfigurationService: configuration,
     ownerDeviceService: devices,
     ownerDeliveryStore: macDeliveries,
@@ -72,6 +74,8 @@ async function backend() {
     publicBaseUrl: PUBLIC_URL,
     providers: [new TwilioProvider({ mediaStreamUrl: 'wss://example.test/media-stream' }), new FakeTelephonyProvider()],
   });
+  owner = await onboardTenant(app, messaging);
+  auth = owner.headers;
   const server: Server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const local = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -158,7 +162,7 @@ test('the Mac follows the owner’s settings by revision: chat choice, channel t
   const [stopped] = (await request(plane.app).get('/owner/devices').set(auth)).body;
   assert.equal(stopped.health.watcher, false);
   // Deliveries wait while the channel is off.
-  const queued = await plane.macDeliveries.create({ ownerId: 'owner', deviceId, conversationId: 'conv-1', messageId: 'msg-1', body: 'Jordan is waiting' });
+  const queued = await plane.macDeliveries.create({ accountId: owner.accountId, deviceId, conversationId: 'conv-1', messageId: 'msg-1', body: 'Jordan is waiting' });
   await agent.tick();
   assert.equal(messages.sent.length, 0);
 

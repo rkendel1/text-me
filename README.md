@@ -1,8 +1,10 @@
 # text-me
 
-A conversational inbox for your phone. Your assistant answers calls, handles
-what it can, asks you when it must, and moves conversations to text when that
-fits. You watch it live and step in from your phone in one tap.
+A conversational inbox for your phone, as a multi-tenant service. Anyone can
+sign up: each account gets its own assistant line, its own devices and its own
+control plane. The assistant answers calls, handles what it can, asks the
+owner when it must, and moves conversations to text when that fits. Owners
+watch it live and step in from their phone in one tap.
 
 - **Callers** just call. They hear a short greeting, explain what they need,
   and get help, with no menus, disclaimers or AI talk.
@@ -43,6 +45,13 @@ fits. You watch it live and step in from your phone in one tap.
 - **Owner controls reach the live call from any instance.** Every command is
   recorded in `runtime_commands`, published over Postgres `LISTEN/NOTIFY`, and
   marked `applied_live` by the instance holding the call.
+- **The account is the unit of ownership.** Accounts, users, memberships,
+  phone numbers, planes, devices, conversations, attention and commands are
+  account-scoped records; every request is authorized as
+  principal → membership → account → resource. Environment variables hold
+  platform configuration and secrets only. See
+  [`docs/saas-readiness.md`](docs/saas-readiness.md) and
+  [`docs/saas-audit.md`](docs/saas-audit.md).
 - **Conversation is the product; devices are surfaces.** The assistant raises
   durable **owner attention**; one router delivers it to the owner's surfaces:
   iPhone push (default), Mac Messages (optional integration), or SMS to the
@@ -66,24 +75,27 @@ and the audit checklist.
 4. **Set environment variables** (Project → Settings → Environment Variables).
    Every variable, and exactly where to get it, is in
    [`docs/release-audit.md` §6](docs/release-audit.md#6-environment-variables-where-to-get-each-one).
-   The required ones: `OWNER_AUTH_TOKEN` (your access key), `OWNER_PHONE_NUMBER`
-   (your real mobile number), `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`.
+   The required ones are platform credentials only: `TWILIO_ACCOUNT_SID` and
+   `TWILIO_AUTH_TOKEN` (the platform's Twilio account; its numbers are the
+   pool of assistant lines accounts claim). No variable names a customer.
 5. **Check it:** `https://<project>.vercel.app/health/ready` must return 200.
    Production refuses to start with fakes or in-memory state and says what's
    missing.
-6. **On your iPhone, open `https://<project>.vercel.app`**, sign in with the
-   access key, and follow first run. **Keep your number** connects the
-   assistant line and shows the forwarding code for your carrier: callers keep
-   dialing your real number, and calls you don't take go to your assistant.
+6. **Open `https://<project>.vercel.app` and create an account** (any number
+   of people can, on the same deployment). Setup walks through your name,
+   **your number** (claim an assistant line, verify your mobile, turn on
+   carrier forwarding so callers keep dialing your real number), your
+   assistant, and notifications. Upgrading a single-owner deployment? Run
+   `npm run migrate:legacy` once first ([`docs/saas-migration.md`](docs/saas-migration.md)).
 7. **Run the acceptance journey** against the deployment:
-   `npm run acceptance -- --url https://<project>.vercel.app --key <access key>`.
+   `ACCEPTANCE_PASSWORD=… npm run acceptance -- --url https://<project>.vercel.app --email <account email>`.
 8. *Optional:* the native iOS app is in [`ios/`](ios/README.md).
 
 ## Run locally
 
 ```bash
 npm install
-cp .env.example .env   # set DATABASE_URL and the Twilio/owner values
+cp .env.example .env   # set DATABASE_URL and the platform's Twilio values
 npm run dev
 ```
 
@@ -95,7 +107,8 @@ calls outside production.
 
 ```bash
 npm test                                       # all tests; the Postgres ones skip without TEST_DATABASE_URL
-TEST_DATABASE_URL=postgres://… npm test        # + Postgres LISTEN/NOTIFY and command store
+TEST_DATABASE_URL=postgres://… npm test        # + Postgres: multi-instance scaling, legacy migration, LISTEN/NOTIFY
+npm run journey:saas                           # two customers, two browsers, one deployment (Chromium)
 ```
 
 The realtime tests run a real HTTP/WebSocket server with a Twilio-side client
@@ -119,8 +132,11 @@ connector against a local stand-in for the Gateway wire protocol.
 | `GET /owner/events` | Owner-wide live stream |
 | `/conversations/:id/live` | Deep link straight into one live conversation |
 
-The full client contract, which a future native iOS app would also use, is in
-[`docs/owner-api.md`](docs/owner-api.md).
+Accounts: `POST /auth/signup`, `POST /auth/sessions`, `GET /me`,
+`POST /auth/session/account`, `POST /accounts`, and the setup routes under
+`/account/*` (onboarding, phone line and number verification, plane,
+notification channels, members). The full client contract, which the iOS app
+also uses, is in [`docs/owner-api.md`](docs/owner-api.md).
 
 Twilio webhooks: `POST /webhooks/twilio/voice`, `/webhooks/twilio/status`,
 `/webhooks/twilio/sms`, `/webhooks/twilio/voice/continue`, and the media

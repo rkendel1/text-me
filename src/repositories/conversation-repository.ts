@@ -6,7 +6,7 @@ export interface CreateConversationInput {
   callerPhone: string;
   status: ConversationStatus;
   startedAt: Date;
-  ownerId?: string;
+  accountId: string;
 }
 
 export interface ConversationRepository {
@@ -19,7 +19,8 @@ export interface ConversationRepository {
     provider: string,
     providerCallId: string,
   ): Promise<Conversation | null>;
-  list(): Promise<Conversation[]>;
+  /** Only this account's conversations, newest activity first. */
+  list(accountId: string): Promise<Conversation[]>;
   appendEvent(
     conversationId: string,
     type: Conversation['events'][number]['type'],
@@ -35,5 +36,5 @@ export interface ConversationRepository {
       state?: ConversationState;
     },
   ): Promise<void>;
-  markOwnerRead?(conversationId: string, ownerId: string, readAt: Date): Promise<void>;
+  markOwnerRead?(conversationId: string, accountId: string, readAt: Date): Promise<void>;
 }

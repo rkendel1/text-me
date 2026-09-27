@@ -1,7 +1,7 @@
 {
   "name": "text-me",
   "version": "0.1.0",
-  "description": "Inbound call conversation lifecycle service",
+  "description": "Multi-tenant conversational inbox: every account gets its own assistant line, devices and control plane",
   "main": "src/server.ts",
   "scripts": {
     "test": "tsx --test test/**/*.test.ts",
@@ -9,7 +9,9 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "bridge:macos": "node dist/owner/macos-bridge-runtime.js",
-    "acceptance": "node scripts/acceptance.mjs"
+    "acceptance": "node scripts/acceptance.mjs",
+    "migrate:legacy": "tsx src/tenancy/migrate-legacy-cli.ts",
+    "journey:saas": "tsx scripts/saas-browser-journey.ts"
   },
   "repository": {
     "type": "git",

@@ -35,13 +35,11 @@ export interface AppConfig {
   enableFakeProviderRoutes: boolean;
   port: number;
   publicBaseUrl: string;
+  /** Platform telephony credentials. The numbers they hold are assigned to accounts in the database. */
   twilioAccountSid: string;
   twilioAuthToken: string;
-  /** The assistant line (optional: auto-detected from the Twilio account). */
-  twilioPhoneNumber?: string;
-  ownerPhone: string;
-  ownerId: string;
-  ownerAuthToken: string;
+  /** Let accounts buy a new assistant line when the platform's pool of numbers is empty. */
+  allowNumberPurchase: boolean;
   /** Present when calls should be answered by the AI Gateway realtime voice agent. */
   realtimeVoice?: RealtimeVoiceConfig;
 }
@@ -100,9 +98,24 @@ export class ConfigurationError extends Error {
 const REQUIRED: Array<[string, string]> = [
   ['TWILIO_ACCOUNT_SID', 'TWILIO_ACCOUNT_SID is missing (Twilio Console → Account Info)'],
   ['TWILIO_AUTH_TOKEN', 'TWILIO_AUTH_TOKEN is missing (Twilio Console → Account Info → Auth Token)'],
-  ['OWNER_PHONE_NUMBER', 'OWNER_PHONE_NUMBER is missing (your real mobile number, e.g. +15551112222)'],
-  ['OWNER_AUTH_TOKEN', 'OWNER_AUTH_TOKEN is missing (your access key; make one with: openssl rand -base64 32)'],
 ];
+
+/**
+ * Environment variables are platform configuration and secrets only. These
+ * named a customer (the single owner) and are no longer read by anything; if
+ * one is still set, the deployment refuses to start rather than let anyone
+ * believe it still decides who the customer is.
+ */
+export const CUSTOMER_IDENTITY_VARIABLES = [
+  'OWNER_PHONE_NUMBER', 'OWNER_ID', 'OWNER_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER',
+  'USER_NAME', 'USER_PHONE', 'USER_EMAIL', 'ACCOUNT_ID', 'DEVICE_ID', 'OWNER_NAME', 'OWNER_EMAIL',
+] as const;
+
+export function customerIdentityProblems(env: NodeJS.ProcessEnv): string[] {
+  return CUSTOMER_IDENTITY_VARIABLES.filter((key) => env[key]?.trim()).map((key) =>
+    `${key} is set, but customer identity no longer comes from the environment: accounts, users and numbers live in the database. ` +
+    'If this deployment predates accounts, run `npm run migrate:legacy` once (docs/saas-migration.md), then delete this variable.');
+}
 
 export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const problems: string[] = [];
@@ -110,16 +123,10 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // the legacy POSTGRES_* names are accepted too.
   const databaseUrl = env.DATABASE_URL ?? env.POSTGRES_URL;
   if (!databaseUrl) problems.push('DATABASE_URL is missing (Vercel → Storage → add Neon and connect it to this project)');
-  // TWILIO_PHONE_NUMBER is optional: the account's only number is used as the assistant line.
   for (const [key, message] of REQUIRED) {
     if (!env[key]?.trim()) problems.push(message);
   }
-  if (env.OWNER_PHONE_NUMBER?.trim() && !/^\+[1-9]\d{6,14}$/.test(env.OWNER_PHONE_NUMBER.trim())) {
-    problems.push('OWNER_PHONE_NUMBER must be in international format with no spaces, e.g. +15551112222');
-  }
-  if (env.TWILIO_PHONE_NUMBER?.trim() && !/^\+[1-9]\d{6,14}$/.test(env.TWILIO_PHONE_NUMBER.trim())) {
-    problems.push('TWILIO_PHONE_NUMBER must be in international format, e.g. +15550000000 (or leave it unset)');
-  }
+  problems.push(...customerIdentityProblems(env));
   const apnsKeys = ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_BUNDLE_ID'];
   const apnsSet = apnsKeys.filter((key) => env[key]);
   if (apnsSet.length && apnsSet.length < apnsKeys.length) {
@@ -152,10 +159,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: resolvePublicBaseUrl(env),
     twilioAccountSid: env.TWILIO_ACCOUNT_SID!.trim(),
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
-    twilioPhoneNumber: env.TWILIO_PHONE_NUMBER?.trim() || undefined,
-    ownerPhone: env.OWNER_PHONE_NUMBER!.trim(),
-    ownerId: env.OWNER_ID ?? 'owner',
-    ownerAuthToken: env.OWNER_AUTH_TOKEN?.trim() ?? '',
+    allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     realtimeVoice: resolveRealtimeVoice(env),
   };
 }

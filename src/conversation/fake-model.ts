@@ -6,7 +6,7 @@ export class FakeConversationModel implements ConversationModel {
   constructor(
     private readonly responses: string[] = [
       'Sure. What would you like to change about the meeting?',
-      "I'll make sure Randy gets that message. Is there anything else you'd like him to know?",
+      "I'll make sure they get that message. Is there anything else you'd like them to know?",
       "Got it. I'll pass that along. Thanks.",
     ],
   ) {}

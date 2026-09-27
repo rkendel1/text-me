@@ -16,7 +16,8 @@ import {
   InMemoryOwnerSurfaceDeviceStore,
 } from '../src/attention/stores.js';
 import type { PushSender } from '../src/attention/surfaces.js';
-import { InMemoryOwnerAuthSessionStore, OwnerAuthService, SESSION_TTL_MS } from '../src/auth/sessions.js';
+import { AuthService, InMemoryAuthSessionStore, SESSION_TTL_MS } from '../src/auth/sessions.js';
+import { InMemoryTenancyStore } from '../src/tenancy/store.js';
 import { getConfig } from '../src/config.js';
 import { assertProductionComposition, createApp } from '../src/http-app.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
@@ -32,8 +33,7 @@ import type {
 } from '../src/voice/realtime/connector.js';
 import { MEDIA_STREAM_PATH, RealtimeVoiceService } from '../src/voice/realtime/realtime-voice.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
-
-const ACCESS_KEY = 'owner-access-key';
+import { onboardTenant, PASSWORD, signIn, signUp } from './support/tenant.js';
 
 class Connector implements RealtimeConnector {
   readonly modelId = 'openai/gpt-realtime-2';
@@ -91,11 +91,11 @@ async function plane(options: { apns?: HttpApnsSender; twilioAuthToken?: string;
   const surfaceDevices = new InMemoryOwnerSurfaceDeviceStore();
   const commands = new InMemoryRuntimeCommandStore();
   const configuration = new OwnerConfigurationService();
+  const messaging = new FakeMessagingProvider();
   const app = createApp({
     repository,
-    ownerAuthToken: ACCESS_KEY,
-    ownerPhone: '+15550009999',
-    messagingProvider: new FakeMessagingProvider(),
+    tenancyStore: new InMemoryTenancyStore(),
+    messagingProvider: messaging,
     ownerConfigurationService: configuration,
     realtimeVoice: voice,
     pushSender: new NoWebPush(),
@@ -105,27 +105,28 @@ async function plane(options: { apns?: HttpApnsSender; twilioAuthToken?: string;
     notificationDeliveryStore: new InMemoryNotificationDeliveryStore(attentionStore),
     surfaceDeviceStore: surfaceDevices,
     runtimeCommandStore: commands,
-    authSessionStore: new InMemoryOwnerAuthSessionStore(),
+    authSessionStore: new InMemoryAuthSessionStore(),
     twilioAuthToken: options.twilioAuthToken,
     publicBaseUrl: options.publicBaseUrl,
     providers: [new TwilioProvider({ mediaStreamUrl: `wss://example.test${MEDIA_STREAM_PATH}` }), new FakeTelephonyProvider()],
   });
+  const owner = await onboardTenant(app, messaging, { personal: '+15550009999' });
   const server: Server = createServer(app);
   voice.attach(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   const sockets: WebSocket[] = [];
   return {
-    app, repository, connector, attentionStore, surfaceDevices, commands, configuration, port,
-    close: () => { sockets.forEach((socket) => socket.close()); server.close(); },
+    app, repository, connector, attentionStore, surfaceDevices, commands, configuration, port, owner, messaging,
+    close: () => { sockets.forEach((socket) => socket.close()); server.closeAllConnections(); server.close(); },
     async signIn(platform: 'web' | 'ios' = 'web') {
-      const response = await request(app).post('/auth/sessions').send({ accessKey: ACCESS_KEY, platform });
+      const response = await request(app).post('/auth/sessions').send({ email: owner.email, password: PASSWORD, platform });
       assert.equal(response.status, 201, JSON.stringify(response.body));
       return { token: response.body.token as string, headers: { Authorization: `Bearer ${response.body.token}` }, session: response.body.session };
     },
     async call(callId = 'call-1') {
-      await request(app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444' });
-      const conversation = (await repository.list()).find((candidate) => candidate.providerCallId === callId)!;
+      await request(app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444', to: owner.line });
+      const conversation = (await repository.list(owner.accountId)).find((candidate) => candidate.providerCallId === callId)!;
       const socket = new WebSocket(`ws://127.0.0.1:${port}${MEDIA_STREAM_PATH}`);
       sockets.push(socket);
       await new Promise((resolve) => socket.once('open', resolve));
@@ -150,29 +151,34 @@ async function eventually(check: () => boolean | Promise<boolean>, what: string)
   assert.fail(`Timed out waiting for ${what}`);
 }
 
-test('one sign-in model for every surface: the access key becomes a session, never stored by the device', async (t) => {
+test('one sign-in model for every surface: a user signs in to their account and gets a session; there is no shared access key', async (t) => {
   const p = await plane();
   t.after(p.close);
-  const wrong = await request(p.app).post('/auth/sessions').send({ accessKey: 'nope', platform: 'web' });
+  const wrong = await request(p.app).post('/auth/sessions').send({ email: p.owner.email, password: 'not the password', platform: 'web' });
   assert.equal(wrong.status, 401);
-  assert.equal(wrong.body.code, 'invalid_access_key');
+  assert.equal(wrong.body.code, 'invalid_credentials');
+  const nobody = await request(p.app).post('/auth/sessions').send({ email: 'nobody@example.test', password: PASSWORD, platform: 'web' });
+  assert.equal(nobody.status, 401, 'an unknown email looks exactly like a wrong password');
+  assert.equal(nobody.body.code, 'invalid_credentials');
+  assert.equal((await request(p.app).post('/auth/sessions').send({ accessKey: 'owner-access-key' })).status, 401, 'access keys are gone');
   assert.equal((await request(p.app).get('/owner/control-plane')).status, 401, 'no anonymous access');
+  assert.equal((await request(p.app).get('/owner/control-plane').set({ Authorization: 'Bearer owner-access-key' })).status, 401);
 
   const web = await p.signIn('web');
   const ios = await p.signIn('ios');
   assert.match(web.token, /^ses_[A-Za-z0-9_-]{40,}$/);
-  assert.notEqual(web.token, ACCESS_KEY);
   assert.equal(web.session.platform, 'web');
   assert.equal(ios.session.platform, 'ios');
+  assert.equal(web.session.accountId, p.owner.accountId, 'the session names the account it operates on');
   assert.equal((await request(p.app).get('/conversations').set({ authorization: `bearer ${web.token}` })).status, 200);
   const me = await request(p.app).get('/owner/me').set(ios.headers);
-  assert.deepEqual({ ownerId: me.body.ownerId, name: me.body.name, platform: me.body.session.platform }, { ownerId: 'owner', name: 'Randy', platform: 'ios' });
+  assert.deepEqual({ accountId: me.body.accountId, userId: me.body.userId, name: me.body.name, platform: me.body.session.platform },
+    { accountId: p.owner.accountId, userId: p.owner.userId, name: 'Randy', platform: 'ios' });
   const current = await request(p.app).get('/auth/session').set(web.headers);
   assert.equal(current.body.credential, 'session');
-  // The access key still works for scripts and the smoke test; devices use sessions.
-  assert.equal((await request(p.app).get('/auth/session').set({ Authorization: `Bearer ${ACCESS_KEY}` })).body.credential, 'access_key');
   const listed = (await request(p.app).get('/auth/sessions').set(web.headers)).body as Array<{ platform: string; current: boolean }>;
-  assert.deepEqual(listed.map((session) => [session.platform, session.current]).sort(), [['ios', false], ['web', true]]);
+  assert.deepEqual(listed.map((session) => [session.platform, session.current]).sort(), [['ios', false], ['web', false], ['web', true]],
+    'the sign-up session, this browser and the iPhone');
 
   // Tokens in URLs are accepted only by the live streams (EventSource can't set headers).
   assert.equal((await request(p.app).get(`/owner/control-plane?token=${web.token}`)).status, 401);
@@ -184,8 +190,8 @@ test('one sign-in model for every surface: the access key becomes a session, nev
 
 test('sessions expire, slide while used, and a revoked device is out immediately and stops getting notifications', async (t) => {
   let clock = Date.parse('2026-09-26T12:00:00Z');
-  const auth = new OwnerAuthService(new InMemoryOwnerAuthSessionStore(), ACCESS_KEY, 'owner', () => clock);
-  const { token } = (await auth.signIn(ACCESS_KEY, { platform: 'ios' }))!;
+  const auth = new AuthService(new InMemoryAuthSessionStore(), () => clock);
+  const { token } = await auth.createSession('usr_1', 'acct_1', { platform: 'ios' });
   clock += SESSION_TTL_MS - 60_000;
   assert.equal((await auth.authenticate(token)).ok, true, 'used just before expiry: extended');
   clock += SESSION_TTL_MS - 60_000;
@@ -193,6 +199,7 @@ test('sessions expire, slide while used, and a revoked device is out immediately
   clock += SESSION_TTL_MS + 1;
   assert.deepEqual(await auth.authenticate(token), { ok: false, reason: 'expired' });
   assert.deepEqual(await auth.authenticate('ses_forged'), { ok: false, reason: 'invalid' });
+  assert.deepEqual(await auth.authenticate(undefined), { ok: false, reason: 'missing' });
 
   const p = await plane();
   t.after(p.close);
@@ -204,7 +211,7 @@ test('sessions expire, slide while used, and a revoked device is out immediately
   const revoked = await request(p.app).get('/owner/control-plane').set(laptop.headers);
   assert.equal(revoked.status, 401);
   assert.equal(revoked.body.code, 'session_revoked');
-  assert.deepEqual((await p.surfaceDevices.list('owner')).map((device) => device.status), ['revoked'],
+  assert.deepEqual((await p.surfaceDevices.list(p.owner.accountId)).map((device) => device.status), ['revoked'],
     'signing a device out stops its notifications');
   // Signing yourself out.
   assert.equal((await request(p.app).delete('/auth/session').set(phone.headers)).status, 204);
@@ -218,7 +225,12 @@ test('the control-plane snapshot: identity, plane status through its lifecycle, 
   const snapshot = async () => (await request(p.app).get('/owner/control-plane').set(headers)).body;
 
   const idle = await snapshot();
-  assert.equal(idle.owner.id, 'owner');
+  assert.equal(idle.owner.id, p.owner.accountId);
+  assert.deepEqual(idle.account, { id: p.owner.accountId, name: 'Randy', role: 'owner' });
+  assert.equal(idle.user.email, p.owner.email);
+  assert.equal(idle.onboarding.state, 'ready');
+  assert.match(idle.plane.id, /^plane_/);
+  assert.equal(idle.plane.assistantLine, p.owner.line);
   assert.equal(idle.plane.status, 'online');
   assert.deepEqual(idle.plane.voice, { realtime: true, model: 'openai/gpt-realtime-2' });
   assert.deepEqual([idle.live.length, idle.attention.length], [0, 0]);
@@ -245,7 +257,7 @@ test('the control-plane snapshot: identity, plane status through its lifecycle, 
   assert.ok(commands.some((command: { id: string; status: string }) => command.id === 'cmd-1' &&
     ['applied', 'applied_live'].includes(command.status)));
 
-  await p.configuration.update('owner', { calls: { answerCalls: false } });
+  await p.configuration.update(p.owner.accountId, { calls: { answerCalls: false } });
   assert.equal((await snapshot()).plane.status, 'offline');
 });
 
@@ -256,8 +268,8 @@ test('stale notifications never act: already handled elsewhere, dismissed, or re
   const ios = await p.signIn('ios');
   const conversationId = await p.call();
   p.askOwner();
-  await eventually(async () => (await p.attentionStore.list('owner')).some((item) => item.type === 'assistant_needs_owner'), 'attention');
-  const item = (await p.attentionStore.list('owner')).find((entry) => entry.type === 'assistant_needs_owner')!;
+  await eventually(async () => (await p.attentionStore.list(p.owner.accountId)).some((item) => item.type === 'assistant_needs_owner'), 'attention');
+  const item = (await p.attentionStore.list(p.owner.accountId)).find((entry) => entry.type === 'assistant_needs_owner')!;
 
   // Answered from the iPhone's lock screen...
   const answered = await request(p.app).post(`/owner/attention/${item.id}/actions`).set(ios.headers)
@@ -305,7 +317,7 @@ test('native iOS notifications go to APNs with the same attention and deep link;
   p.askOwner();
   await eventually(() => apns.received.length === 1, 'APNs delivery');
   const [sent] = apns.received;
-  const item = (await p.attentionStore.list('owner')).find((entry) => entry.type === 'assistant_needs_owner')!;
+  const item = (await p.attentionStore.list(p.owner.accountId)).find((entry) => entry.type === 'assistant_needs_owner')!;
   assert.equal(sent.headers[':path'], `/3/device/${token}`);
   assert.equal(sent.headers['apns-topic'], 'app.textme.owner');
   assert.equal(sent.headers['apns-push-type'], 'alert');
@@ -323,7 +335,7 @@ test('native iOS notifications go to APNs with the same attention and deep link;
   // The app was deleted: Apple says 410, and the device stops being a target.
   apns.respondWith({ status: 410, reason: 'Unregistered' });
   p.askOwner('ask-2');
-  await eventually(async () => (await p.surfaceDevices.list('owner'))[0].status === 'expired', 'token retired');
+  await eventually(async () => (await p.surfaceDevices.list(p.owner.accountId))[0].status === 'expired', 'token retired');
 
   // Universal links for the app's domain.
   const association = await request(p.app).get('/.well-known/apple-app-site-association');
@@ -344,12 +356,9 @@ test('without APNs configured, iOS registration is refused clearly instead of si
 
 test('production never falls back to in-memory state, fake providers or a fake model', () => {
   assert.throws(() => assertProductionComposition({ repository: new InMemoryConversationRepository(), includeFakeProviderRoutes: false }),
-    /Refusing to start in production without: runtime state store, .*AI text model/);
+    /Refusing to start in production without: runtime state store, .*account store, phone number service, .*AI text model/);
   assert.throws(() => createApp({ repository: new InMemoryConversationRepository(), production: true }), /Refusing to start in production/);
-  const env = {
-    DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', TWILIO_PHONE_NUMBER: '+15550000000',
-    OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'k',
-  };
+  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't' };
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', PUBLIC_BASE_URL: 'https://x.test' }), /AI Gateway credential is required in production/);
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'http://x.test' }), /must be an https URL/);
   assert.throws(() => getConfig({ ...env, NODE_ENV: 'production', AI_GATEWAY_API_KEY: 'k', PUBLIC_BASE_URL: 'https://x.test', REALTIME_VOICE: 'off' }),
@@ -360,6 +369,17 @@ test('production never falls back to in-memory state, fake providers or a fake m
   assert.deepEqual(vercel.release, { environment: 'production', commit: 'abc123' });
   assert.equal(getConfig({ ...env, REALTIME_VOICE: 'off', AI_GATEWAY_API_KEY: 'k' }).aiGateway?.textModelId, 'anthropic/claude-haiku-4.5',
     'turning realtime voice off keeps the real text model');
+});
+
+test('environment variables are platform configuration only: customer identity there refuses to start', () => {
+  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't' };
+  const config = getConfig(env);
+  for (const key of ['ownerPhone', 'ownerId', 'accountId', 'ownerAuthToken', 'twilioPhoneNumber']) {
+    assert.ok(!(key in config), `no ${key} in the configuration`);
+  }
+  for (const key of ['OWNER_PHONE_NUMBER', 'OWNER_ID', 'OWNER_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'USER_NAME', 'USER_PHONE', 'USER_EMAIL', 'ACCOUNT_ID', 'DEVICE_ID']) {
+    assert.throws(() => getConfig({ ...env, [key]: 'x' }), new RegExp(`${key} is set, but customer identity no longer comes from the environment`));
+  }
 });
 
 test('Twilio webhooks verify behind Vercel’s proxy (signed for the public https URL)', async (t) => {
@@ -384,7 +404,8 @@ test('health: liveness always answers; readiness says exactly what a deployment 
   assert.equal(ready.body.checks.authentication.ok, true);
   assert.equal(ready.body.checks.productionComposition.ok, false);
   assert.equal(ready.body.checks.webhookSignatures.ok, false);
-  assert.ok(!JSON.stringify(ready.body).includes(ACCESS_KEY), 'no secrets');
+  assert.ok(!JSON.stringify(ready.body).includes(p.owner.token), 'no secrets');
+  assert.ok(!JSON.stringify(ready.body).includes(p.owner.email), 'no customer data');
 });
 
 test('the deployed app shell and static assets return through Express', async (t) => {
@@ -396,49 +417,32 @@ test('the deployed app shell and static assets return through Express', async (t
   assert.equal((await request(p.app).get('/manifest.webmanifest')).status, 200);
 });
 
-test('keep your real number: the assistant line is optional config, and forwarding is proven by a forwarded call', async (t) => {
-  const { PhoneNumberService, forwardingCodes } = await import('../src/telephony/phone-number.js');
-  type PhoneRecord = { sid: string; phoneNumber: string; voiceUrl: string | null; smsUrl: string | null; statusCallback: string | null };
-  const account = (numbers: PhoneRecord[]) => ({
-    numbers,
-    find: async (phoneNumber: string) => numbers.find((number) => number.phoneNumber === phoneNumber) ?? null,
-    list: async () => numbers,
-    update: async (sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }) =>
-      Object.assign(numbers.find((number) => number.sid === sid)!, urls),
-  });
-  const line = (): PhoneRecord => ({ sid: 'PN1', phoneNumber: '+15550000000', voiceUrl: null, smsUrl: null, statusCallback: null });
-
-  // No TWILIO_PHONE_NUMBER: the account's only number becomes the hidden assistant line.
-  const single = new PhoneNumberService(account([line()]), undefined, 'https://text-me.vercel.app', '+15551112222');
-  assert.equal(await single.assistantLine(), '+15550000000');
-  await single.connect();
-  const status = await single.status();
-  assert.deepEqual([status.ownerNumber, status.assistantLine, status.connected], ['+15551112222', '+15550000000', true]);
-  assert.deepEqual(status.forwarding.map((code) => [code.enable, code.disable]), [['**004*+15550000000#', '##004#'], ['*715550000000', '*73']]);
+test('keep your real number: the account’s line comes from the platform pool, and forwarding is proven by a forwarded call', async () => {
+  const { FakePhoneNumberClient, forwardingCodes } = await import('../src/telephony/phone-number.js');
+  assert.deepEqual(forwardingCodes('+15550000000').map((code) => [code.enable, code.disable]), [['**004*+15550000000#', '##004#'], ['*715550000000', '*73']]);
   assert.deepEqual(forwardingCodes('+447700900123').map((code) => code.carrier), ['AT&T, T-Mobile and most carriers'], 'no Verizon code outside the US');
-  // Ambiguous or missing: a clear message instead of guessing.
-  assert.match((await new PhoneNumberService(account([]), undefined, 'https://x.test').status()).error!, /no phone number yet/);
-  assert.match((await new PhoneNumberService(account([line(), { ...line(), sid: 'PN2', phoneNumber: '+15550000001' }]), undefined, 'https://x.test').status()).error!,
-    /Set TWILIO_PHONE_NUMBER/);
-  const env = { DATABASE_URL: 'postgres://x', TWILIO_ACCOUNT_SID: 'AC', TWILIO_AUTH_TOKEN: 't', OWNER_PHONE_NUMBER: '+15551112222', OWNER_AUTH_TOKEN: 'k' };
-  assert.equal(getConfig(env).twilioPhoneNumber, undefined, 'TWILIO_PHONE_NUMBER is optional');
 
-  // A call someone placed to the owner's real number, forwarded by the carrier.
   const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
   const app = createApp({
-    repository, ownerAuthToken: ACCESS_KEY, messagingProvider: new FakeMessagingProvider(),
-    phoneNumbers: new PhoneNumberService(account([line()]), undefined, 'https://text-me.vercel.app', '+15551112222'),
+    repository, messagingProvider: messaging, publicBaseUrl: 'https://text-me.vercel.app',
+    phoneNumberClient: new FakePhoneNumberClient(['+15550000000'], false),
     providers: [new TwilioProvider(), new FakeTelephonyProvider()],
   });
-  const headers = { Authorization: `Bearer ${ACCESS_KEY}` };
-  assert.equal((await request(app).get('/owner/phone').set(headers)).body.forwardingSeen, false);
+  const owner = await onboardTenant(app, messaging, { personal: '+15551112222' });
+  assert.equal(owner.line, '+15550000000');
+  const before = (await request(app).get('/owner/phone').set(owner.headers)).body;
+  assert.deepEqual([before.ownerNumber, before.assistantLine, before.connected, before.forwardingSeen], ['+15551112222', '+15550000000', true, false]);
+  assert.deepEqual(before.forwarding.map((code: { enable: string }) => code.enable), ['**004*+15550000000#', '*715550000000']);
+
+  // A call someone placed to the owner's real number, forwarded by the carrier to the account's line.
   const forwarded = await request(app).post('/webhooks/twilio/voice').type('form')
     .send({ CallSid: 'CA9', From: '+15553334444', To: '+15550000000', ForwardedFrom: '+15551112222' });
   assert.equal(forwarded.status, 200);
-  const phone = (await request(app).get('/owner/phone').set(headers)).body;
+  const phone = (await request(app).get('/owner/phone').set(owner.headers)).body;
   assert.equal(phone.forwardingSeen, true);
   assert.ok(phone.lastForwardedAt);
-  const [conversation] = await repository.list();
+  const [conversation] = await repository.list(owner.accountId);
   assert.ok(conversation.events.some((event) => event.type === 'call.forwarded' && event.payload.from === '+15551112222'));
 });
 
@@ -452,11 +456,11 @@ test('a misconfigured deployment explains itself instead of crashing', async () 
   assert.ok(caught instanceof ConfigurationError);
   const problems = (caught as InstanceType<typeof ConfigurationError>).problems.join('\n');
   // Every problem at once, each with what to do.
-  for (const expected of [/DATABASE_URL is missing/, /TWILIO_ACCOUNT_SID is missing/, /OWNER_AUTH_TOKEN is missing/,
-    /OWNER_PHONE_NUMBER must be in international format/, /iOS push is partly configured: also set APNS_TEAM_ID, APNS_PRIVATE_KEY, APNS_BUNDLE_ID/]) {
+  for (const expected of [/DATABASE_URL is missing/, /TWILIO_ACCOUNT_SID is missing/,
+    /OWNER_PHONE_NUMBER is set, but customer identity no longer comes from the environment/, /iOS push is partly configured: also set APNS_TEAM_ID, APNS_PRIVATE_KEY, APNS_BUNDLE_ID/]) {
     assert.match(problems, expected);
   }
-  assert.ok(!problems.includes('secret-value'), 'values are never echoed');
+  assert.ok(!problems.includes('secret-value') && !problems.includes('555 111 2222'), 'values are never echoed');
 
   const server = startupFailureServer(caught);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -466,7 +470,7 @@ test('a misconfigured deployment explains itself instead of crashing', async () 
     assert.equal(page.status, 503);
     const html = await page.text();
     assert.match(html, /Almost there/);
-    assert.match(html, /OWNER_AUTH_TOKEN is missing/);
+    assert.match(html, /TWILIO_ACCOUNT_SID is missing/);
     assert.equal((await fetch(`${base}/health`)).status, 200);
     const ready = await fetch(`${base}/health/ready`);
     assert.equal(ready.status, 503);
@@ -488,18 +492,18 @@ test('database setup is retried after a failure, and the app shell loads meanwhi
   let attempts = 0;
   const app = createApp({
     repository: new InMemoryConversationRepository(),
-    ownerAuthToken: ACCESS_KEY,
     beforeRequest: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error('connection refused');
     },
   });
-  const headers = { Authorization: `Bearer ${ACCESS_KEY}` };
   assert.equal((await request(app).get('/')).status, 200, 'the app itself still loads');
-  const down = await request(app).get('/owner/control-plane').set(headers);
+  const down = await request(app).post('/auth/signup').send({ email: 'retry@example.test', password: PASSWORD });
   assert.equal(down.status, 503);
   assert.equal(down.body.code, 'database_unavailable');
+  const { headers } = await signUp(app, { email: 'retry@example.test' });
   assert.equal((await request(app).get('/owner/control-plane').set(headers)).status, 200, 'the next request retries and succeeds');
+  assert.equal((await signIn(app, 'retry@example.test')).body.account.id, (await request(app).get('/me').set(headers)).body.account.id);
 });
 
 test('a failed live-updates connection never crashes the process', async () => {

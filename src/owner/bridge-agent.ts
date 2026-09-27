@@ -70,7 +70,7 @@ export class DeviceDisconnectedError extends Error {}
 
 interface DeviceConfiguration {
   deviceId: string;
-  ownerId: string;
+  accountId: string;
   revision: number;
   bridge: {
     messagesChannelEnabled: boolean;
@@ -343,7 +343,7 @@ export class MacBridgeAgent {
       submitOwnerMessage: (input) => client.submitReply(input).then(() => undefined),
       confirmOwnerDelivery: (input) => client.markObserved(input.deliveryId, input.externalId).then(() => undefined),
     }, {
-      ownerId: config.ownerId,
+      accountId: config.accountId,
       deviceId: config.deviceId,
       assistantChatId: chat!.chatId,
       ownerSender: ownerSender!,

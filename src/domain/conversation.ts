@@ -83,6 +83,7 @@ export interface Conversation {
   channels?: ConversationChannel[];
   primaryChannel?: ConversationChannel;
   participants?: ConversationParticipant[];
-  ownerId?: string;
+  /** The owning account. Every conversation belongs to exactly one. */
+  accountId: string;
   lastOwnerReadAt?: Date | null;
 }

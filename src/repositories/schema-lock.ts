@@ -22,3 +22,20 @@ export async function migrate(pool: Pool, run: (db: Pick<PoolClient, 'query'>) =
     client.release();
   }
 }
+
+/**
+ * The single-owner schema called the tenant column `owner_id`; the SaaS schema
+ * calls it `account_id`. Renaming is structural only: legacy rows keep their
+ * old value (e.g. 'owner'), which matches no account, so they stay invisible
+ * until the legacy migration assigns them to a real account.
+ */
+export async function renameOwnerColumn(db: Pick<PoolClient, 'query'>, table: string): Promise<void> {
+  await db.query(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '${table}' AND column_name = 'owner_id')
+         AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '${table}' AND column_name = 'account_id') THEN
+        ALTER TABLE ${table} RENAME COLUMN owner_id TO account_id;
+      END IF;
+    END $$;
+  `);
+}

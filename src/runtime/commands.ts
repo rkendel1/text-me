@@ -23,7 +23,7 @@ export interface RuntimeCommand {
   conversationId: string;
   /** The conversation's runtime; one runtime per conversation, versioned by revision. */
   runtimeId: string;
-  ownerId: string;
+  accountId: string;
   type: RuntimeCommandType;
   payload: Record<string, unknown>;
   status: RuntimeCommandStatus;
@@ -34,7 +34,8 @@ export interface RuntimeCommand {
 }
 
 export interface RuntimeCommandStore {
-  record(command: RuntimeCommand): Promise<void>;
+  /** Inserts the command unless its id exists. Returns whether this call inserted it: the one that did executes it. */
+  record(command: RuntimeCommand): Promise<boolean>;
   update(id: string, patch: Pick<RuntimeCommand, 'status'> & Partial<Pick<RuntimeCommand, 'error' | 'processedAt' | 'appliedLiveAt'>>): Promise<void>;
   list(conversationId: string): Promise<RuntimeCommand[]>;
   get(id: string): Promise<RuntimeCommand | null>;
@@ -45,8 +46,10 @@ export const runtimeIdFor = (conversationId: string) => `rt_${conversationId.rep
 export class InMemoryRuntimeCommandStore implements RuntimeCommandStore {
   private readonly commands = new Map<string, RuntimeCommand>();
 
-  async record(command: RuntimeCommand): Promise<void> {
-    if (!this.commands.has(command.id)) this.commands.set(command.id, structuredClone(command));
+  async record(command: RuntimeCommand): Promise<boolean> {
+    if (this.commands.has(command.id)) return false;
+    this.commands.set(command.id, structuredClone(command));
+    return true;
   }
 
   async update(id: string, patch: Parameters<RuntimeCommandStore['update']>[1]): Promise<void> {

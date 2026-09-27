@@ -44,6 +44,7 @@ export class RealtimeCallBridge {
   private streamSid?: string;
   private runtimeSnapshot?: ConversationRuntime;
   private configuration?: OwnerConfiguration;
+  private accountId?: string;
   private paused = false;
   private closing = false;
   private hangupWhenIdle = false;
@@ -75,8 +76,11 @@ export class RealtimeCallBridge {
     this.streamSid = streamSid;
     const conversation = await this.services.repository.getById(this.conversationId);
     if (!conversation) throw new Error(`Conversation not found: ${this.conversationId}`);
+    if (!conversation.accountId) throw new Error(`Conversation ${this.conversationId} has no account`);
+    // The call runs as its conversation's account: its settings, its owner's name, its commands only.
+    this.accountId = conversation.accountId;
     const runtime = await this.services.runtime.getRuntimeForConversation(conversation);
-    const configuration = await this.services.configuration.get(conversation.ownerId ?? 'owner');
+    const configuration = await this.services.configuration.get(conversation.accountId);
     this.runtimeSnapshot = runtime;
     this.configuration = configuration;
     this.paused = runtime.state === 'paused' || runtime.state === 'stopped' || !runtime.assistantEnabled;
@@ -120,6 +124,12 @@ export class RealtimeCallBridge {
   // ----- Owner controls (runtime events, from any instance) -----
 
   handleRuntimeEvent(event: ConversationRuntimeEvent): void {
+    if (event.conversationId !== this.conversationId) return;
+    // A command is a job carrying its account; one for any other account is never applied to this call.
+    if (typeof event.payload.accountId === 'string' && event.payload.accountId !== this.accountId) {
+      console.error(`[call ${this.conversationId}] ignored a command for another account`);
+      return;
+    }
     const commandId = typeof event.payload.commandId === 'string' ? event.payload.commandId : undefined;
     const applied = () => {
       if (commandId) this.enqueue(async () => this.options.onCommandApplied?.(commandId));
@@ -193,8 +203,8 @@ export class RealtimeCallBridge {
     this.paused = runtime.state === 'paused' || runtime.state === 'stopped' || !runtime.assistantEnabled;
     if (runtime.aiMode !== 'automatic' && previous?.aiMode === 'automatic') this.silence();
     if (!this.connection) return;
-    const conversation = await this.services.repository.getById(this.conversationId);
-    const configuration = await this.services.configuration.get(conversation?.ownerId ?? 'owner');
+    if (!this.accountId) return;
+    const configuration = await this.services.configuration.get(this.accountId);
     this.configuration = configuration;
     await this.connection.send({
       type: 'session-update',

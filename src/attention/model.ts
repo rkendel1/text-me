@@ -23,7 +23,7 @@ export type OwnerAttentionActionKind = 'open' | 'reply' | 'take_over';
 
 export interface OwnerAttention {
   id: string;
-  ownerId: string;
+  accountId: string;
   conversationId: string;
   type: OwnerAttentionType;
   priority: OwnerAttentionPriority;
@@ -45,7 +45,7 @@ export type OwnerSurfaceKind = 'web_push' | 'apns' | 'mac_messages' | 'owner_sms
 export interface NotificationDelivery {
   id: string;
   attentionId: string;
-  ownerId: string;
+  accountId: string;
   surface: OwnerSurfaceKind;
   deviceId?: string;
   status: 'sent' | 'failed';
@@ -60,7 +60,10 @@ export type OwnerDeviceCapability = 'push' | 'live_activity' | 'interactive_noti
 /** A device the owner uses as a notification/control surface (not the Mac bridge). */
 export interface OwnerSurfaceDevice {
   id: string;
-  ownerId: string;
+  /** The owning account; a device is only ever listed, notified or revoked within it. */
+  accountId: string;
+  /** The user who registered it (signed in on it). */
+  userId?: string;
   platform: OwnerDevicePlatform;
   /** For web: the PushSubscription JSON. For ios later: the APNs token. */
   deviceToken: string;
