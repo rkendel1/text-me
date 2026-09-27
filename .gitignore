@@ -3,3 +3,5 @@ dist/
 .env
 .env.local
 npm-debug.log*
+journey-output/
+acceptance-output/

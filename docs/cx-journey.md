@@ -221,7 +221,7 @@ a real Mac and iPhone against the Vercel deployment:
   buttons, so the tap opens the live conversation, where Reply and Take Over
   are one tap away. Chrome and Android show the buttons.
 - There are no self-serve accounts yet: one deployment serves one owner,
-  signed in with `OWNER_AUTH_TOKEN`.
+  signed in to their account (email and password).
 
 - **Vercel WebSockets are in public beta.** Calls rely on the Function holding
   the Twilio media stream; `vercel.json` sets `maxDuration: 800` (raise it if

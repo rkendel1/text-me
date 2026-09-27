@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Conversation } from '../domain/conversation.js';
-import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
 import type { RuntimeControlService } from '../runtime/service.js';
 import { realtimeVoiceStatus } from '../voice/realtime/realtime-voice.js';

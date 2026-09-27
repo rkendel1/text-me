@@ -54,7 +54,7 @@ feature is never marked PASS just because the code exists.
 | 12 | No native iOS app | GAP | **NOT TESTED**: `ios/` written, not compiled (§3) |
 | 13 | A real phone number couldn't be used; `TWILIO_PHONE_NUMBER` was required and was the number callers dial | GAP | **PASS**: keep your real number with carrier forwarding (§7) |
 | 14 | Rate limits key on the client IP, which is Vercel's proxy address because `trust proxy` is off, so all clients share one bucket | GAP (minor) | Open. Harmless for a single owner, but sign-in attempts are limited globally (20 per 15 minutes) |
-| 15 | One owner per deployment; no self-serve accounts | GAP (known) | Open, out of scope. Identity is `OWNER_ID`, and every route is scoped to it |
+| 15 | One owner per deployment; no self-serve accounts | GAP (known) | **PASS**: multi-tenant accounts, self-serve sign-up and onboarding; see `docs/saas-readiness.md` |
 | 16 | A missing or invalid environment variable crashed the function at load (`INTERNAL_FUNCTION_INVOCATION_FAILED`, seen on the first production deploy) with no explanation | GAP | **PASS**: every problem is reported at once on a setup page and at `/health/ready` (values never shown) |
 | 17 | A failed first database setup (e.g. a Neon cold start) made every later request on that instance fail | GAP | **PASS**: setup is retried on the next request; the app page still loads, and API calls get `503 database_unavailable` |
 
@@ -85,7 +85,7 @@ routes the web uses.
 
 | Need | Route |
 |---|---|
-| Sign in / out | `POST /auth/sessions {accessKey, platform}` → `{token, session}`; `DELETE /auth/session`; `GET /auth/session` |
+| Sign up / in / out | `POST /auth/signup {email, password, name, platform}` or `POST /auth/sessions {email, password, platform}` → `{token, user, account, memberships, onboarding}`; `DELETE /auth/session`; `GET /me` |
 | Signed-in devices | `GET /auth/sessions`; `DELETE /auth/sessions/:id` (also stops that device's notifications) |
 | Current user | `GET /owner/me` |
 | The plane and its state | `GET /owner/control-plane` → `plane.status` (`online` / `working` / `awaiting_attention` / `offline`), `live`, `attention`, `configuration.revision` |
@@ -101,8 +101,8 @@ routes the web uses.
 
 **Sessions:**
 - 30-day expiry that slides while the session is used; revocable one device at a time.
-- Tokens are stored hashed; the access key is never stored on a device.
-- The access key still works as an API credential for scripts and the acceptance run.
+- Tokens are stored hashed; passwords are stored as scrypt hashes and never on a device.
+- There is no shared access key: scripts and the acceptance run sign in to an account like any surface.
 
 ---
 
@@ -197,29 +197,35 @@ Set these in **Vercel → your project → Settings → Environment Variables**
 
 | Variable | What | How to get it |
 |---|---|---|
-| `OWNER_AUTH_TOKEN` | Your access key: you type it once on each device, which then keeps a session | Make one: `openssl rand -base64 32`, or a password manager. Keep it secret |
-| `OWNER_PHONE_NUMBER` | **Your real mobile number**, in E.164 (`+15551112222`). It's the number callers dial (forwarding) and where fallback texts reach you | Your phone: Settings → Phone → My Number |
-| `TWILIO_ACCOUNT_SID` | Twilio account id (`AC…`) | [console.twilio.com](https://console.twilio.com) → Account Info on the dashboard. Upgrade from trial: trial accounts play a trial message and can only call verified numbers |
+| `TWILIO_ACCOUNT_SID` | The platform's Twilio account id (`AC…`). Its phone numbers are the pool of assistant lines accounts claim during setup | [console.twilio.com](https://console.twilio.com) → Account Info on the dashboard. Upgrade from trial: trial accounts play a trial message and can only call verified numbers. Buy numbers (voice + SMS) into it for the pool, or turn on `TELEPHONY_NUMBER_PURCHASE` |
 | `TWILIO_AUTH_TOKEN` | Twilio auth token; also used to verify webhook signatures | Same Account Info panel → Auth Token (click to reveal) |
 
 ### Optional
 
 | Variable | What | How to get it |
 |---|---|---|
-| `TWILIO_PHONE_NUMBER` | The **assistant line**: the hidden number your calls forward to. Leave it unset if the Twilio account has exactly one number | Twilio Console → **Phone Numbers → Buy a number** (voice + SMS). To text US callers from it, complete **Messaging → Regulatory Compliance → A2P 10DLC** registration |
+| `TELEPHONY_NUMBER_PURCHASE` | `on` lets an account buy a new assistant line when the pool is empty (the platform pays for it) | Leave unset to hand out only numbers already in the Twilio account. To text US callers from any line, complete **Messaging → Regulatory Compliance → A2P 10DLC** registration |
 | `PUBLIC_BASE_URL` | A custom domain, e.g. `https://assistant.example.com` | Vercel → Settings → Domains; then set it here (https only) |
 | `AI_GATEWAY_API_KEY` | Only when **not** on Vercel | Vercel dashboard → **AI Gateway → API Keys → Create** |
 | `AI_GATEWAY_TEAM` | Team slug, only if the key belongs to a different team | Vercel team settings |
 | `REALTIME_MODEL` | Voice model (default `openai/gpt-realtime-2`) | Vercel AI Gateway → Models |
 | `REALTIME_VOICE_NAME` | Voice, e.g. `marin` | The model provider's voice list |
 | `TEXT_MODEL` | Text model (default `anthropic/claude-haiku-4.5`) | Vercel AI Gateway → Models |
-| `OWNER_ID` | Owner id in the database (default `owner`) | Leave it as is |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Web Push keys. They're generated once and stored in Neon automatically; set these only to pin them | `npx web-push generate-vapid-keys`; subject `mailto:you@example.com` |
 | `APNS_KEY_ID` | Native iOS push: the key's id | [developer.apple.com](https://developer.apple.com/account) → **Certificates, IDs & Profiles → Keys → +** → enable **Apple Push Notifications service** → Continue → Register. The Key ID is shown |
 | `APNS_PRIVATE_KEY` | Contents of that key's `.p8` file (writing newlines as `\n` is fine) | Downloaded once on that page; Apple won't show it again |
 | `APNS_TEAM_ID` | Your Apple Team ID (also used for universal links) | developer.apple.com → **Membership details** |
 | `APNS_BUNDLE_ID` | The iOS app's bundle id, e.g. `app.textme.owner` | **Identifiers → +** (App IDs), with Push Notifications, Associated Domains and Time Sensitive Notifications enabled. Same value as `ATTN_BUNDLE_ID` in `ios/Config/Release.xcconfig` |
 | `APNS_ENVIRONMENT` | `production` (TestFlight / App Store) or `development` (run from Xcode) | Match how you install the app |
+
+### Never set (customer identity)
+
+`OWNER_PHONE_NUMBER`, `OWNER_ID`, `OWNER_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`,
+`USER_NAME`, `USER_PHONE`, `USER_EMAIL`, `ACCOUNT_ID`, `DEVICE_ID`: the
+deployment refuses to start while any of these is set, because customers,
+their numbers and their devices live in the database. A deployment that
+predates accounts migrates once with `npm run migrate:legacy`
+(`docs/saas-migration.md`).
 
 ### Local development only
 
@@ -240,9 +246,10 @@ caller dials YOUR number ──(you don't answer / decline / busy / no signal)�
                                                                     ──▶ assistant line (Twilio) ──▶ your assistant
 ```
 
-- **Setup:** Settings → Account → **Set Up**, or first-run step **Keep your
-  number**. This connects the assistant line to the deployment and shows the
-  forwarding code for your carrier: `**004*<line>#` for AT&T, T-Mobile and most
+- **Setup:** the setup step **Your number**. The account claims its own
+  assistant line from the platform's pool (pointed at this deployment), then
+  verifies the owner's mobile number with a code texted from that line, and
+  shows the forwarding code for the carrier: `**004*<line>#` for AT&T, T-Mobile and most
   carriers, or `*71<line>` for Verizon. Paste it into the Phone keypad and call.
 - **Proof, not assumption:** the app shows **Forwarding works** only after a
   real forwarded call arrives. Twilio's `ForwardedFrom` is recorded as
@@ -277,8 +284,8 @@ caller dials YOUR number ──(you don't answer / decline / busy / no signal)�
 
 1. **Deploy to Vercel.** Merge, and let Vercel build `main`. Set the variables
    in §6. Then check that `/health/ready` returns 200 and run:
-   `npm run acceptance -- --url https://<project>.vercel.app --key <OWNER_AUTH_TOKEN>`.
-   Call your number when it asks.
+   `ACCEPTANCE_PASSWORD=… npm run acceptance -- --url https://<project>.vercel.app --email <account email> [--other-email <second account>]`.
+   Call the account's number when it asks.
 2. **Real telephony and AI.** A Twilio number, Twilio's signature on real
    webhooks, and the AI Gateway realtime model are all exercised by the step
    above.
@@ -287,8 +294,10 @@ caller dials YOUR number ──(you don't answer / decline / busy / no signal)�
 
 ## 9. iOS acceptance (physical iPhone, still to run)
 
-1. Install and open the app, then sign in with the access key. **Settings →
-   Signed-in devices** lists "iPhone app".
+1. Install and open the app, then sign in with an account's email and
+   password (or create one and finish setup). **Settings → Signed-in devices**
+   lists "iPhone app". Sign out and in as a second account: the control plane
+   and notifications switch with it.
 2. The Now screen shows the plane status. Turn on notifications; the device
    appears in `GET /owner/push/devices` as `platform: ios`.
 3. Call your number and don't answer, so the forwarded call reaches the

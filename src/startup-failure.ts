@@ -21,7 +21,7 @@ main{max-width:560px;margin:auto}h1{font-size:28px;margin:0 0 8px}p{color:#6e6e7
 ul{background:#fff;border-radius:12px;padding:6px 0;margin:0;list-style:none}li{padding:12px 16px}li+li{border-top:.5px solid #d1d1d6}
 @media (prefers-color-scheme:dark){body{background:#000;color:#f5f5f7}ul{background:#1c1c1e}li+li{border-color:#38383a}p{color:#98989d}}
 </style></head><body><main><h1>Almost there</h1>
-<p>This deployment needs a few settings before it can answer calls. Add them in Vercel → Project → Settings → Environment Variables, then redeploy.</p>
+<p>This deployment’s settings need a change before it can answer calls. Fix these in Vercel → Project → Settings → Environment Variables, then redeploy.</p>
 <ul>${problems.map((problem) => `<li>${escape(problem)}</li>`).join('')}</ul>
 <p style="margin-top:20px">Where to get each value: docs/release-audit.md, section 6.</p></main></body></html>`;
 

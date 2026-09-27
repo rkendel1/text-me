@@ -17,6 +17,28 @@ native code adds only what a web page can't do on iOS:
 It does **not** need the browser (or anything else) to be open: attention is
 created on the server and delivered by APNs.
 
+## One binary, every customer
+
+Nothing about a customer is compiled in. `Config/*.xcconfig` holds only the
+platform's domain, bundle id and team. On first launch:
+
+```
+authenticate (sign in or create an account on the page)
+    ↓
+resolve the user, their memberships and the active account   (GET /me)
+    ↓
+load the account's setup state → finish onboarding if needed
+    ↓
+load that account's control plane                             (GET /owner/control-plane)
+```
+
+User A → Account A → Phone A and User B → Account B → Phone B run the same
+build. Signing out, signing in as someone else, or switching accounts reloads
+the page for the new account, and the app re-registers the phone's APNs token
+for it (`accountReady`); the server retires that token's registration in any
+other account, so a phone never gets notifications for an account it's no
+longer signed in to.
+
 ## Build
 
 Requirements: Xcode 15+, iOS 17 device, an Apple Developer account.
@@ -50,13 +72,15 @@ APNs auth key (.p8).
 
 | Direction | Message |
 |---|---|
-| page → app | `{type: 'session', token}` after sign-in; `{type: 'signedOut'}`; `{type: 'enablePush'}` |
+| page → app | `{type: 'session', token}` after sign-in; `{type: 'accountReady', accountId}` once the account is resolved; `{type: 'signedOut'}`; `{type: 'enablePush'}` |
 | app → page | `attnNativeEvent({type: 'pushState', state})`; `attnNativeEvent({type: 'open', url})` |
 | app → page, before load | `window.__ATTN_SESSION__` (the Keychain session) |
 
 ## Status
 
 This code was written without a Mac: it has **not been compiled or run**. The
-server side it depends on (sessions, APNs delivery, iOS device registration,
-universal links, stale-notification handling) is covered by automated tests. See
+server side it depends on (account sign-in, sessions, APNs delivery, iOS device
+registration and its hand-over between accounts, universal links,
+stale-notification handling) is covered by automated tests
+(`test/multi-tenant-isolation.test.ts` has the "same phone, different account" case). See
 `docs/release-audit.md` for the device acceptance steps that remain.

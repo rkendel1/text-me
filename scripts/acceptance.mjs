@@ -2,13 +2,16 @@
 /**
  * Browser acceptance journey for a deployed control plane (docs/release-audit.md §6).
  *
- *   npm run acceptance -- --url https://<project>.vercel.app --key <OWNER_AUTH_TOKEN>
+ *   ACCEPTANCE_PASSWORD=… npm run acceptance -- --url https://<project>.vercel.app --email you@example.com
  *
- * It signs in through the real UI, watches a live call, issues a command,
- * receives and resolves an attention item, refreshes, and proves the state is
- * server-side with a second browser session and the API. It needs a real call:
- * pass --place-call "<command>" to run one (local harness), or call the number
- * yourself when the script asks.
+ * It signs in to an account through the real UI (email + password), watches a
+ * live call, issues a command, receives and resolves an attention item,
+ * refreshes, and proves the state is server-side with a second browser session
+ * and the API. It needs a real call: pass --place-call "<command>" to run one
+ * (local harness), or call the account's number yourself when the script asks.
+ *
+ * With --other-email (and ACCEPTANCE_OTHER_PASSWORD) it also signs in to a
+ * second account on the same deployment and proves it sees none of the first.
  *
  * Options: --out <dir> for screenshots, --browser <chromium path>, --timeout <seconds>.
  */
@@ -23,13 +26,25 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, value, inde
   return pairs;
 }, []));
 const BASE = (args.url ?? process.env.ACCEPTANCE_URL ?? '').replace(/\/+$/, '');
-const KEY = args.key ?? process.env.ACCEPTANCE_KEY;
+const EMAIL = args.email ?? process.env.ACCEPTANCE_EMAIL;
+const PASSWORD = args.password ?? process.env.ACCEPTANCE_PASSWORD;
+const OTHER_EMAIL = args['other-email'] ?? process.env.ACCEPTANCE_OTHER_EMAIL;
+const OTHER_PASSWORD = process.env.ACCEPTANCE_OTHER_PASSWORD;
 const OUT = args.out ?? 'acceptance-output';
 const TIMEOUT = Number(args.timeout ?? 180) * 1000;
-if (!BASE || !KEY) {
-  console.error('Usage: npm run acceptance -- --url <deployment URL> --key <owner access key> [--place-call "<command>"]');
+if (!BASE || !EMAIL || !PASSWORD) {
+  console.error('Usage: ACCEPTANCE_PASSWORD=… npm run acceptance -- --url <deployment URL> --email <account email> [--other-email <second account>] [--place-call "<command>"]');
   process.exit(2);
 }
+/** The script's own API session for the account (the same sign-in any surface uses). */
+const signInApi = async (email, password) => {
+  const response = await fetch(`${BASE}/auth/sessions`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password, platform: 'web', label: 'Acceptance script' }) });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(`sign-in for ${email} → ${response.status} ${body?.error ?? ''}`);
+  return body.token;
+};
+const KEY = await signInApi(EMAIL, PASSWORD);
 mkdirSync(OUT, { recursive: true });
 
 const results = [];
@@ -70,12 +85,12 @@ const signIn = async (context, name) => {
   const page = await context.newPage();
   page.on('pageerror', (error) => pageErrors.push(`${name}: ${error.message}`));
   await page.goto(BASE);
-  await page.waitForSelector('#signin:not([hidden]) #tokenInput');
-  await page.fill('#tokenInput', KEY);
+  await page.waitForSelector('#signin:not([hidden]) #emailInput');
+  await page.fill('#emailInput', EMAIL);
+  await page.fill('#passwordInput', PASSWORD);
   await page.click('#signinButton');
+  // The account must be through setup: a ready account goes straight to its control plane.
   await page.waitForSelector('#app:not([hidden]) #planeStatus:not([hidden])');
-  const onboarding = page.locator('#onboard:not([hidden])');
-  if (await onboarding.count()) await page.evaluate(() => document.querySelector('#onboard').hidden = true);
   return page;
 };
 
@@ -92,11 +107,13 @@ try {
 
   const desk = await browser.newContext({ viewport: { width: 1280, height: 820 } });
   let page;
-  await step('Authenticate (access key → session; the key is not stored)', async () => {
+  await step('Authenticate (email + password → session for the account; the password is not stored)', async () => {
     page = await signIn(desk, 'browser A');
-    const stored = await page.evaluate(() => ({ session: localStorage.getItem('ownerSession'), key: localStorage.getItem('ownerToken') }));
-    if (!stored.session?.startsWith('ses_') || stored.key) throw new Error('expected only a session in browser storage');
-    return 'session stored, access key not stored';
+    const stored = await page.evaluate(() => JSON.stringify(localStorage));
+    if (!/"ownerSession":"ses_/.test(stored) || stored.includes(PASSWORD)) throw new Error('expected only a session in browser storage');
+    const me = await api('/me');
+    if (me.onboarding?.state !== 'ready') throw new Error(`account setup is at ${me.onboarding?.state}`);
+    return `account ${me.account.id} (${me.account.role}), session stored, password not stored`;
   });
 
   let plane;
@@ -212,6 +229,20 @@ try {
     await shot(phone, '09-signed-out');
     return reason;
   });
+
+  if (OTHER_EMAIL && OTHER_PASSWORD) {
+    await step('Another account on the same deployment sees none of this', async () => {
+      const other = await signInApi(OTHER_EMAIL, OTHER_PASSWORD);
+      const get = (path) => fetch(`${BASE}${path}`, { headers: { Authorization: `Bearer ${other}` } });
+      const conversations = await (await get('/conversations')).json();
+      if (conversations.some((item) => item.id === conversationId)) throw new Error('the other account lists this conversation');
+      const direct = await get(`/conversations/${conversationId}`);
+      if (direct.status !== 404) throw new Error(`the other account got ${direct.status} for this conversation`);
+      const snapshot = await (await get('/owner/control-plane')).json();
+      if (JSON.stringify(snapshot).includes(conversationId)) throw new Error('the other account’s control plane mentions this conversation');
+      return `account ${snapshot.account.id}: 404, not listed, not in its control plane`;
+    });
+  }
 } catch {
   exitCode = 1;
 } finally {

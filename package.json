@@ -10,7 +10,8 @@
     "dev": "tsx watch src/server.ts",
     "bridge:macos": "node dist/owner/macos-bridge-runtime.js",
     "acceptance": "node scripts/acceptance.mjs",
-    "migrate:legacy": "tsx src/tenancy/migrate-legacy-cli.ts"
+    "migrate:legacy": "tsx src/tenancy/migrate-legacy-cli.ts",
+    "journey:saas": "tsx scripts/saas-browser-journey.ts"
   },
   "repository": {
     "type": "git",

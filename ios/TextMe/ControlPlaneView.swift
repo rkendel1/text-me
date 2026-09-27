@@ -90,6 +90,11 @@ struct ControlPlaneView: UIViewRepresentable {
             case "session":
                 SessionStore.shared.token = body["token"] as? String
                 NotificationCoordinator.shared.refreshRegistrationIfEnabled()
+            case "accountReady":
+                // The page resolved the signed-in account (after sign-in or an account switch):
+                // register this phone's APNs token for that account. The server retires the
+                // token's registration in any other account, so notifications follow the account.
+                NotificationCoordinator.shared.refreshRegistrationIfEnabled()
             case "signedOut":
                 SessionStore.shared.token = nil
             case "enablePush":

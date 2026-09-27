@@ -442,6 +442,13 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .signin form { width: 100%; max-width: 360px; }
 .signin .group { margin: 0; }
 .signin .row input { text-align: left; color: var(--label); }
+.signin .row input[type=email] { flex: 1; border: 0; outline: 0; background: transparent; min-width: 0; padding: 11px 0; font-size: 17px; }
+.checklist { margin: 0 0 8px; }
+.checklist .row { gap: 12px; }
+.checklist .mark-done { color: var(--green); font-weight: 700; width: 22px; text-align: center; }
+.checklist .mark-open { color: var(--label-3); width: 22px; text-align: center; }
+.onboard .field { width: 100%; font-size: 17px; padding: 12px 14px; border-radius: 12px; border: 0; background: var(--bg-elevated); color: var(--label); margin: 0 0 12px; outline: 0; }
+.onboard .err { color: var(--red); font-size: 15px; min-height: 20px; margin: 4px 0 8px; }
 .btn-primary { display: block; width: 100%; height: 50px; border-radius: 12px; background: var(--blue); color: #fff; font-size: 17px; font-weight: 600; margin-top: 16px; transition: opacity .15s; }
 .btn-primary:active { opacity: .7; }
 .btn-primary:disabled { opacity: .4; }
@@ -561,16 +568,23 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 
 <div class="signin" id="signin" hidden>
   <img class="app-icon" src="/icon.svg" alt="">
-  <h1>Text Me</h1>
-  <p>Enter your access key to see and control live calls. This device stays signed in; the key isn’t stored.</p>
+  <h1 id="signinTitle">Text Me</h1>
+  <p id="signinLede">Sign in to see and control your assistant’s calls. This device stays signed in.</p>
   <form id="signinForm" autocomplete="on">
     <div class="group">
-      <label class="row"><span class="sr">Access key</span>
-        <input id="tokenInput" type="password" name="password" autocomplete="current-password" placeholder="Access Key" required>
+      <label class="row" id="nameRow" hidden><span class="sr">Your name</span>
+        <input id="nameInput" type="text" name="name" autocomplete="name" placeholder="Your Name">
+      </label>
+      <label class="row"><span class="sr">Email</span>
+        <input id="emailInput" type="email" name="email" autocomplete="username" placeholder="Email" required>
+      </label>
+      <label class="row"><span class="sr">Password</span>
+        <input id="passwordInput" type="password" name="password" autocomplete="current-password" placeholder="Password" required minlength="10">
       </label>
     </div>
-    <button class="btn-primary" type="submit" id="signinButton">Continue</button>
+    <button class="btn-primary" type="submit" id="signinButton">Sign In</button>
     <div class="err" id="signinError" role="alert"></div>
+    <button class="btn" type="button" id="signinSwitch" style="color:var(--blue);margin-top:4px">New here? Create an account</button>
   </form>
 </div>
 
@@ -777,6 +791,7 @@ const postNative = (message) => { try { NATIVE && NATIVE.postMessage(message); }
 const PLATFORM = NATIVE ? 'ios' : 'web';
 const state = {
   token: store.get('ownerSession') || '',
+  me: null,
   conversations: [], selectedId: null, detail: null,
   filter: 'all', search: '', tab: 'live', config: null, devices: [], plane: null,
   stream: null, streamId: null, sending: false, outbox: [],
@@ -784,35 +799,41 @@ const state = {
 
 class ApiError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
 
-/** Every surface signs in the same way: the access key is exchanged for a session, and only the session is kept. */
-async function createSession(accessKey) {
-  const response = await fetch('/auth/sessions', {
+/**
+ * Every surface signs in the same way: a user signs in (or signs up) with their
+ * email and password and gets a session for their account; only the session is kept.
+ * Who the customer is comes from that session, never from this page or the deployment.
+ */
+async function authenticate(mode, fields) {
+  const response = await fetch(mode === 'signup' ? '/auth/signup' : '/auth/sessions', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ accessKey, platform: PLATFORM, label: NATIVE ? 'iPhone app' : isIOS() ? 'iPhone (Safari)' : 'Browser' }),
+    body: JSON.stringify({ ...fields, platform: PLATFORM, label: NATIVE ? 'iPhone app' : isIOS() ? 'iPhone (Safari)' : 'Browser' }),
   });
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401 || response.status === 400) throw new Error("That access key didn't work. Check it and try again.");
   if (response.status === 429) throw new Error('Too many attempts. Try again in a few minutes.');
-  if (!response.ok) throw new Error("Couldn't reach the server. Try again.");
+  if (!response.ok) throw new Error(data.error || "Couldn't reach the server. Try again.");
   setSession(data.token);
   return data;
 }
 function setSession(token) {
   state.token = token || '';
   store.set('ownerSession', token || null);
-  store.set('ownerToken', null);
   postNative({ type: 'session', token: token || null });
 }
+/** Leave nothing of the previous account behind: drop the session and reload a clean page. */
+function resetToSignedOut() {
+  setSession(null);
+  postNative({ type: 'signedOut' });
+  location.replace('/');
+}
 const sessionReady = (async () => {
+  // Retired: access keys in the URL or storage from the single-owner version are ignored and removed.
   const url = new URL(location.href);
-  const fromUrl = url.searchParams.get('token');
-  if (fromUrl) { url.searchParams.delete('token'); history.replaceState(null, '', url.pathname + url.search + url.hash); }
-  // The iOS app hands over its Keychain session; older installs kept the raw access key, which is exchanged once.
+  if (url.searchParams.has('token')) { url.searchParams.delete('token'); history.replaceState(null, '', url.pathname + url.search + url.hash); }
+  store.set('ownerToken', null);
+  // The iOS app hands over its Keychain session.
   const handedOver = window.__ATTN_SESSION__;
-  const legacy = fromUrl || store.get('ownerToken');
   if (handedOver) { state.token = handedOver; store.set('ownerSession', handedOver); }
-  else if (legacy && !legacy.startsWith('ses_')) { try { await createSession(legacy); } catch { store.set('ownerToken', null); } }
-  else if (legacy) setSession(legacy);
 })();
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -836,6 +857,11 @@ async function api(path, { method = 'GET', body } = {}) {
     if (state.token) setSession(null);
     showSignIn(message);
     throw new ApiError(message || 'Please sign in again.', 401, data.code);
+  }
+  if (response.status === 403 && data.code === 'no_membership') {
+    // Removed from this account (on any device, any instance): choose another, never keep showing this one.
+    state.me = null;
+    showAccountPicker();
   }
   if (!response.ok) throw new ApiError(data.error || 'Something went wrong.', response.status, data.code);
   return data;
@@ -990,24 +1016,40 @@ $('#backBtn').onclick = popDetail;
   });
 })();
 
-/* ---------------- Sign in ---------------- */
+/* ---------------- Sign in / sign up ---------------- */
+let signinMode = 'signin';
+function setSigninMode(mode) {
+  signinMode = mode;
+  const signup = mode === 'signup';
+  $('#nameRow').hidden = !signup;
+  $('#nameInput').required = signup;
+  $('#signinTitle').textContent = signup ? 'Create your account' : 'Text Me';
+  $('#signinLede').textContent = signup ? 'Your own assistant line, your own control plane. Nothing to install.' : 'Sign in to see and control your assistant’s calls. This device stays signed in.';
+  $('#signinButton').textContent = signup ? 'Create Account' : 'Sign In';
+  $('#signinSwitch').textContent = signup ? 'Already have an account? Sign in' : 'New here? Create an account';
+  $('#passwordInput').autocomplete = signup ? 'new-password' : 'current-password';
+  $('#signinError').textContent = '';
+}
+$('#signinSwitch').onclick = () => setSigninMode(signinMode === 'signin' ? 'signup' : 'signin');
 function showSignIn(message) {
   // Keep the first reason shown (expired / signed out); later unauthenticated requests don't erase it.
   if (message || $('#signin').hidden) $('#signinError').textContent = message || '';
-  $('#signin').hidden = false; $('#app').hidden = true;
+  $('#signin').hidden = false; $('#app').hidden = true; $('#onboard').hidden = true;
   closeStream(); if (ownerStream) { ownerStream.close(); ownerStream = null; }
   postNative({ type: 'signedOut' });
-  setTimeout(() => $('#tokenInput').focus(), 50);
+  setTimeout(() => $(signinMode === 'signup' ? '#nameInput' : '#emailInput').focus(), 50);
 }
 $('#signinForm').onsubmit = async (event) => {
   event.preventDefault();
-  const accessKey = $('#tokenInput').value.trim();
   const button = $('#signinButton'); button.disabled = true; $('#signinError').textContent = '';
   try {
-    await createSession(accessKey);
-    $('#tokenInput').value = '';
-    $('#signin').hidden = true; $('#app').hidden = false;
-    boot();
+    await authenticate(signinMode, {
+      email: $('#emailInput').value.trim(), password: $('#passwordInput').value,
+      ...(signinMode === 'signup' ? { name: $('#nameInput').value.trim() } : {}),
+    });
+    $('#passwordInput').value = '';
+    // A fresh page for the account that just signed in: no state from anyone before.
+    location.replace(location.pathname === '/' ? '/' : location.href);
   } catch (error) {
     $('#signinError').textContent = error.message;
     const form = $('#signinForm'); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
@@ -1047,6 +1089,7 @@ async function loadPlane() {
       working: `Working · ${snapshot.plane.liveConversations} live ${snapshot.plane.liveConversations === 1 ? 'conversation' : 'conversations'}`,
       awaiting_attention: 'Needs you',
       offline: 'Off · not answering calls',
+      setup: 'Finish setup to start answering',
     }[snapshot.plane.status] || snapshot.plane.status;
     const node = $('#planeStatus'); node.hidden = false; node.dataset.status = snapshot.plane.status;
     $('#planeText').textContent = text;
@@ -1823,9 +1866,17 @@ function renderSettings() {
     </div>
     <div class="group-footer">Optional. Everything works from your iPhone without a Mac.</div>
 
+    <div class="group-header">Texts to your number</div>
+    <div class="group">
+      ${tileRow('message', 'var(--green)', 'Text me when nothing else reaches me', sw('messages.smsEnabled', messages.smsEnabled), 'Sent from your assistant line to your verified number')}
+    </div>
+
     <div class="group-header">Account</div>
     <div class="group">
+      <div class="row" style="--inset:57px"><span class="tile" style="background:var(--indigo, #5856d6)">${I.person}</span><span class="row-body"><span class="row-title">${esc((state.me && state.me.account && state.me.account.name) || 'Your account')}</span><div class="row-sub">${esc(state.me ? `${state.me.user.email} · ${state.me.account ? state.me.account.role : ''}` : '')}</div></span></div>
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--blue)">${I.phone}</span><span class="row-body"><span class="row-title" id="phoneNumber">Your number</span><div class="row-sub" id="phoneStatus">Checking…</div></span><button class="btn tinted" id="phoneConnect" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Connect</button></div>
+      ${(state.me && state.me.memberships.length > 1) ? '<button class="row action" id="switchAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">' + I.person + '</span><span class="row-body">Switch Account…</span></button>' : ''}
+      <button class="row action" id="newAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">${I.person}</span><span class="row-body">Create Another Account…<div class="row-sub" style="font-size:13px">Its own line, devices and conversations</div></span></button>
     </div>
     <div class="group-header">Signed-in devices</div>
     <div class="group"><div id="sessionRows"></div>
@@ -1850,10 +1901,16 @@ function renderSettings() {
   refreshPushRow();
   refreshPhoneRow();
   const signOut = $('#signOut'); if (signOut) signOut.onclick = async () => {
-    const confirmed = await actionSheet({ message: 'You’ll need your access key to sign back in. This device stops getting notifications.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
+    const confirmed = await actionSheet({ message: 'This device stops getting notifications. You can sign back in with your email and password.', actions: [{ label: 'Sign Out', value: true, destructive: true }] });
     if (!confirmed) return;
     await api('/auth/session', { method: 'DELETE' }).catch(() => {});
-    setSession(null); showSignIn();
+    resetToSignedOut();
+  };
+  const switcher = $('#switchAccount'); if (switcher) switcher.onclick = () => showAccountPicker();
+  $('#newAccount').onclick = async () => {
+    const name = prompt('Name for the new account');
+    if (!name || !name.trim()) return;
+    try { await api('/accounts', { method: 'POST', body: { name: name.trim() } }); location.replace('/'); } catch (error) { errorToast(error); }
   };
   refreshSessions();
 }
@@ -1957,79 +2014,150 @@ function bindForwardingCopy(root, phone) {
   });
 }
 
-/* ---------------- First run (no Mac, no provider setup) ---------------- */
-async function finishOnboarding() {
-  try {
-    state.config = await api('/owner/configuration', { method: 'PATCH', body: { onboarding: { completed: true } } });
-  } catch (error) { errorToast(error); return; }
-  $('#onboard').hidden = true;
-  toast('You’re all set', 'check');
+/* ---------------- Account setup: the server's onboarding state machine, step by step ---------------- */
+function setupError(error) {
+  const node = $('#obError'); if (node) node.textContent = error.message || String(error);
 }
-async function showOnboarding(step = 'welcome') {
+async function refreshMe() {
+  state.me = await api('/me');
+  return state.me;
+}
+/** Welcome: what's done and what's left. Nobody sees an empty control plane before it's ready. */
+async function showSetup() {
+  const node = $('#onboard'); node.hidden = false; $('#app').hidden = true;
+  const me = state.me || await refreshMe();
+  const onboarding = me.onboarding;
+  if (onboarding && onboarding.ready) { node.hidden = true; $('#app').hidden = false; return true; }
+  const firstName = (me.user.name || '').split(' ')[0];
+  node.innerHTML = `<div class="inner">
+    <img class="app-icon" src="/icon.svg" alt="">
+    <h1>Welcome${firstName ? `, ${esc(firstName)}` : ''}</h1>
+    <p class="lede">Let’s get your control plane ready.</p>
+    <div class="group checklist">${onboarding.steps.map((step) => `<div class="row"><span class="${step.done ? 'mark-done' : 'mark-open'}">${step.done ? '✓' : '○'}</span>
+      <span class="row-body"><span class="row-title">${esc(step.label)}</span></span></div>`).join('')}</div>
+    <div class="grow"></div>
+    <button class="btn filled" id="obNext">Continue Setup</button>
+    ${me.memberships.length > 1 ? '<button class="btn" style="color:var(--blue);margin-top:6px" id="obSwitch">Switch Account</button>' : ''}
+    <button class="btn" style="color:var(--label-2);margin-top:6px" id="obSignOut">Sign Out</button></div>`;
+  $('#obNext').onclick = () => setupStep(onboarding.next);
+  if ($('#obSwitch')) $('#obSwitch').onclick = () => showAccountPicker();
+  $('#obSignOut').onclick = async () => { await api('/auth/session', { method: 'DELETE' }).catch(() => {}); resetToSignedOut(); };
+  return false;
+}
+async function nextSetup() {
+  await refreshMe();
+  if (state.me.onboarding.ready) { $('#onboard').hidden = true; toast('You’re all set', 'check'); bootControlPlane(); return; }
+  setupStep(state.me.onboarding.next);
+}
+async function setupStep(step) {
   const node = $('#onboard'); node.hidden = false;
-  const next = (to) => () => showOnboarding(to);
-  if (step === 'welcome') {
-    node.innerHTML = `<div class="inner">
-      <img class="app-icon" src="/icon.svg" alt="">
-      <h1>Welcome</h1>
-      <p class="lede">Your phone number becomes a conversational inbox. Your assistant answers every call.</p>
-      <div class="feature"><span class="tile" style="background:var(--green)">${I.wave}</span><div><b>See what’s happening</b><span>Every call, live, on your iPhone.</span></div></div>
-      <div class="feature"><span class="tile" style="background:var(--red)">${I.bell}</span><div><b>Only when it matters</b><span>You’re notified when your assistant needs you.</span></div></div>
-      <div class="feature"><span class="tile" style="background:var(--blue)">${I.person}</span><div><b>Step in with one tap</b><span>Answer, take over, or move the conversation to text.</span></div></div>
-      <div class="grow"></div>
-      <button class="btn filled" id="obNext">Get Started</button></div>`;
-    $('#obNext').onclick = next('number');
-  } else if (step === 'number') {
-    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Keep your number</h1>
-      <div id="obForwarding"><p class="lede" style="text-align:left">Getting your assistant line ready…</p></div>
-      <div class="grow"></div>
-      <button class="btn filled" id="obNext">I’ve Turned On Forwarding</button>
-      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">Do This Later</button></div>`;
-    $('#obNext').onclick = next('behavior');
-    $('#obSkip').onclick = next('behavior');
-    try {
-      let phone = await api('/owner/phone');
-      if (phone.available && phone.assistantLine && !phone.connected) {
-        await api('/owner/phone/connect', { method: 'POST' });
-        phone = await api('/owner/phone');
-      }
-      $('#obForwarding').innerHTML = forwardingHTML(phone);
-      bindForwardingCopy($('#obForwarding'), phone);
-    } catch (error) { $('#obForwarding').innerHTML = `<p class="lede" style="text-align:left">${esc(error.message)}</p>`; }
-  } else if (step === 'behavior') {
-    node.innerHTML = `<div class="inner">
-      <h1 style="text-align:left;font-size:28px">How should your assistant handle calls?</h1>
-      <p class="lede" style="text-align:left">You can change this anytime — even during a call.</p>
+  const heading = (title, lede) => `<h1 style="text-align:left;font-size:28px">${title}</h1>${lede ? `<p class="lede" style="text-align:left">${lede}</p>` : ''}`;
+  if (step === 'identity') {
+    node.innerHTML = `<div class="inner">${heading('Your name', 'Your assistant introduces you by name to the people who call.')}
+      <input class="field" id="obName" autocomplete="name" placeholder="Your name" value="${esc(state.me.user.name || '')}">
+      <input class="field" id="obAccountName" placeholder="Account name (optional)" value="${esc(state.me.account ? state.me.account.name : '')}">
+      <div class="err" id="obError"></div><div class="grow"></div>
+      <button class="btn filled" id="obSave">Continue</button></div>`;
+    $('#obSave').onclick = async () => {
+      try { await api('/account/onboarding/identity', { method: 'POST', body: { name: $('#obName').value, accountName: $('#obAccountName').value } }); nextSetup(); }
+      catch (error) { setupError(error); }
+    };
+  } else if (step === 'phone') {
+    let phone = await api('/account/phone').catch(() => ({}));
+    const hasLine = Boolean(phone.assistantLine);
+    const pending = phone.numbers && phone.numbers.personal && phone.numbers.personal.status === 'pending_verification' ? phone.numbers.personal : null;
+    node.innerHTML = `<div class="inner">${heading('Your number', 'Keep your number. Calls you don’t take forward to your own assistant line.')}
+      <div class="group-header" style="padding-left:4px">1 · Your assistant line</div>
+      <div id="obLine">${hasLine ? `<p class="lede" style="text-align:left;margin:0 0 14px"><b style="color:var(--label)">${esc(formatPhone(phone.assistantLine))}</b> is yours.</p>`
+        : '<button class="btn tinted" id="obClaim">Get My Assistant Line</button>'}</div>
+      <div class="group-header" style="padding-left:4px;margin-top:18px">2 · Your mobile number</div>
+      <input class="field" id="obNumber" type="tel" autocomplete="tel" placeholder="+1 555 123 4567" value="${esc(pending ? pending.number : '')}" ${hasLine ? '' : 'disabled'}>
+      <button class="btn tinted" id="obSend" ${hasLine ? '' : 'disabled'}>${pending ? 'Send a New Code' : 'Text Me a Code'}</button>
+      <input class="field" id="obCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="margin-top:12px" ${pending ? '' : 'hidden'}>
+      <div class="err" id="obError"></div><div class="grow"></div>
+      <button class="btn filled" id="obVerify" ${pending ? '' : 'hidden'}>Verify</button></div>`;
+    if ($('#obClaim')) $('#obClaim').onclick = async () => {
+      try { await api('/account/phone/line', { method: 'POST' }); setupStep('phone'); } catch (error) { setupError(error); }
+    };
+    $('#obSend').onclick = async () => {
+      try {
+        await api('/account/phone/personal', { method: 'POST', body: { number: $('#obNumber').value } });
+        $('#obCode').hidden = false; $('#obVerify').hidden = false; $('#obCode').focus(); toast('Code sent', 'message', 'var(--green)');
+      } catch (error) { setupError(error); }
+    };
+    $('#obVerify').onclick = async () => {
+      try {
+        phone = await api('/account/phone/personal/verify', { method: 'POST', body: { code: $('#obCode').value.trim() } });
+        node.innerHTML = `<div class="inner">${heading('Keep your number')}<div id="obForwarding">${forwardingHTML(phone)}</div>
+          <div class="grow"></div><button class="btn filled" id="obNext">I’ve Turned On Forwarding</button>
+          <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">Do This Later</button></div>`;
+        bindForwardingCopy($('#obForwarding'), phone);
+        $('#obNext').onclick = nextSetup; $('#obSkip').onclick = nextSetup;
+      } catch (error) { setupError(error); }
+    };
+  } else if (step === 'application') {
+    node.innerHTML = `<div class="inner">${heading('Your assistant', 'It answers your line. You can change this anytime — even during a call.')}
+      <input class="field" id="obAssistant" placeholder="Assistant’s name" value="Assistant">
       <button class="big-choice" data-behavior="automatic"><b>Handle everything</b><span>It takes care of callers and only asks you when it must.</span></button>
-      <button class="big-choice" data-behavior="ask_when_unsure"><b>Ask me when needed</b><span>It keeps talking, and checks with you before deciding.</span></button></div>`;
+      <button class="big-choice" data-behavior="ask_when_unsure"><b>Ask me when needed</b><span>It keeps talking, and checks with you before deciding.</span></button>
+      <div class="err" id="obError"></div></div>`;
     node.querySelectorAll('[data-behavior]').forEach((button) => button.onclick = async () => {
       haptic();
-      try { state.config = await api('/owner/configuration', { method: 'PATCH', body: { assistant: { behavior: button.dataset.behavior } } }); }
-      catch (error) { errorToast(error); return; }
-      showOnboarding(isIOS() && !isStandalone() && !NATIVE ? 'install' : 'notifications');
+      try { await api('/account/plane', { method: 'POST', body: { name: $('#obAssistant').value, behavior: button.dataset.behavior } }); nextSetup(); }
+      catch (error) { setupError(error); }
     });
-  } else if (step === 'install') {
-    node.innerHTML = `<div class="inner"><h1 style="text-align:left;font-size:28px">Add to your Home Screen</h1>
-      <p class="lede" style="text-align:left">So your assistant can reach you with notifications, add Text Me to your Home Screen:</p>
-      <ol class="steps" style="margin:0 0 0 -4px"><li>Tap the <b>Share</b> button in Safari.</li><li>Choose <b>Add to Home Screen</b>.</li><li>Open <b>Text Me</b> from your Home Screen to finish.</li></ol>
-      <div class="grow"></div>
-      <button class="btn" style="color:var(--blue)" id="obSkip">Not Now</button></div>`;
-    $('#obSkip').onclick = next('notifications');
   } else if (step === 'notifications') {
+    if (isIOS() && !isStandalone() && !NATIVE && pushSupport() === 'install' && !state.installShown) {
+      state.installShown = true;
+      node.innerHTML = `<div class="inner">${heading('Add to your Home Screen', 'So your assistant can reach you with notifications, add Text Me to your Home Screen:')}
+        <ol class="steps" style="margin:0 0 0 -4px"><li>Tap the <b>Share</b> button in Safari.</li><li>Choose <b>Add to Home Screen</b>.</li><li>Open <b>Text Me</b> from your Home Screen to finish.</li></ol>
+        <div class="grow"></div><button class="btn" style="color:var(--blue)" id="obSkip">Not Now</button></div>`;
+      $('#obSkip').onclick = () => setupStep('notifications');
+      return;
+    }
     const support = pushSupport();
+    const phone = await api('/account/phone').catch(() => ({}));
     node.innerHTML = `<div class="inner"><div class="hero" style="padding-top:12px"><div class="shield" style="background:color-mix(in srgb,var(--red) 14%,transparent);color:var(--red)">${I.bell}</div></div>
       <h1 style="font-size:28px">Turn on notifications</h1>
       <p class="lede">You’ll only hear from your assistant when it needs you — like “Jordan needs you: Can you do Friday at 2?”</p>
-      <div class="grow"></div>
+      <div class="err" id="obError"></div><div class="grow"></div>
       <button class="btn filled" id="obEnable" ${support === 'supported' ? '' : 'hidden'}>Turn On Notifications</button>
-      ${support === 'supported' ? '' : `<p class="lede" style="margin:0 0 12px">${support === 'install' ? 'Open Text Me from your Home Screen to turn these on.' : 'This browser can’t show notifications; you can still use Text Me here.'}</p>`}
-      <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">${support === 'supported' ? 'Not Now' : 'Continue'}</button></div>`;
-    $('#obSkip').onclick = finishOnboarding;
+      ${phone.ownerNumber ? `<button class="btn tinted" id="obSms" style="margin-top:8px">Text Me at ${esc(formatPhone(phone.ownerNumber))}</button>` : ''}
+      ${support === 'supported' ? '' : `<p class="lede" style="margin:12px 0 0">${support === 'install' ? 'Open Text Me from your Home Screen to turn on notifications here.' : 'This browser can’t show notifications.'}</p>`}</div>`;
     const enable = $('#obEnable');
     if (enable) enable.onclick = async () => {
-      try { await enablePush(); toast('Notifications on', 'bell', 'var(--red)'); finishOnboarding(); } catch (error) { errorToast(error); }
+      try { await enablePush(); toast('Notifications on', 'bell', 'var(--red)'); nextSetup(); } catch (error) { setupError(error); }
     };
+    const sms = $('#obSms');
+    if (sms) sms.onclick = async () => {
+      try { await api('/account/notifications/sms', { method: 'POST', body: { enabled: true } }); nextSetup(); } catch (error) { setupError(error); }
+    };
+  } else {
+    showSetup();
   }
+}
+/** Users can belong to several accounts; the session operates on one at a time. */
+async function showAccountPicker() {
+  const me = state.me || await refreshMe();
+  const node = $('#onboard'); node.hidden = false;
+  node.innerHTML = `<div class="inner">
+    <h1 style="text-align:left;font-size:28px">Choose an account</h1>
+    <p class="lede" style="text-align:left">Each account has its own line, devices and conversations.</p>
+    <div class="group checklist">${me.memberships.map((membership) => `<button class="row" data-account="${esc(membership.accountId)}">
+      <span class="${membership.accountId === me.activeAccountId ? 'mark-done' : 'mark-open'}">${membership.accountId === me.activeAccountId ? '✓' : '○'}</span>
+      <span class="row-body"><span class="row-title">${esc(membership.accountName || 'Untitled account')}</span><div class="row-sub">${esc(membership.role)}</div></span></button>`).join('')}</div>
+    <div class="err" id="obError"></div><div class="grow"></div>
+    ${me.activeAccountId ? '<button class="btn" style="color:var(--blue)" id="obBack">Cancel</button>' : ''}
+    <button class="btn" style="color:var(--label-2);margin-top:6px" id="obSignOut">Sign Out</button></div>`;
+  node.querySelectorAll('[data-account]').forEach((row) => row.onclick = async () => {
+    try {
+      await api('/auth/session/account', { method: 'POST', body: { accountId: row.dataset.account } });
+      // A clean page for the account: nothing of the previous one stays on screen.
+      location.replace('/');
+    } catch (error) { setupError(error); }
+  });
+  if ($('#obBack')) $('#obBack').onclick = () => { node.hidden = true; };
+  $('#obSignOut').onclick = async () => { await api('/auth/session', { method: 'DELETE' }).catch(() => {}); resetToSignedOut(); };
 }
 
 /* ---------------- Deep links, notification intents, owner live stream ---------------- */
@@ -2119,7 +2247,7 @@ function pushSupport() {
 /*
  * The iOS app bridge. The page is the same control plane; the app adds native
  * push (APNs) and opens notification taps and universal links here.
- *   page → app: {type: 'session'|'signedOut'|'enablePush'}
+ *   page → app: {type: 'session'|'signedOut'|'enablePush'|'accountReady'}
  *   app → page: window.attnNativeEvent({type: 'pushState', state} | {type: 'open', url})
  */
 const nativeWaiters = [];
@@ -2182,17 +2310,27 @@ if ('serviceWorker' in navigator && !NATIVE) {
   });
 }
 
-/* ---------------- Boot ---------------- */
+/* ---------------- Boot: authenticate → user → memberships → active account → setup state → control plane ---------------- */
 let booted = false;
 async function boot() {
+  await sessionReady;
+  if (!state.token) { showSignIn(); return; }
+  let me;
+  try { me = await refreshMe(); } catch { return; /* api() already showed sign-in or offline */ }
+  if (!me.activeAccountId) { showAccountPicker(); return; }
+  if (!(await showSetup())) return;
+  bootControlPlane();
+}
+async function bootControlPlane() {
   $('#signin').hidden = true; $('#app').hidden = false;
   go(state.tab);
   await loadList();
-  api('/owner/configuration').then((config) => {
-    state.config = config;
-    if (!config.onboarding || !config.onboarding.completed) showOnboarding();
-  }).catch(() => {});
+  api('/owner/configuration').then((config) => { state.config = config; if (state.tab === 'settings') renderSettings(); }).catch(() => {});
+  loadPlane();
   openOwnerStream();
+  // This device follows the account it's signed in to: refresh its push registration for this account.
+  if (NATIVE) postNative({ type: 'accountReady', accountId: state.me && state.me.activeAccountId });
+  else if (await pushState() === 'on') enablePush().catch(() => {});
   if (!booted) {
     booted = true;
     // The owner stream carries changes as they happen; this is only a safety net.
