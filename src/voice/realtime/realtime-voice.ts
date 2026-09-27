@@ -96,7 +96,7 @@ export class RealtimeVoiceService {
         let unsubscribe = () => {};
         const starting = new RealtimeCallBridge(conversationId, this.connector, services, socket, {
           voice: this.options.voice,
-          onCommandApplied: (commandId) => services.runtime.markCommandAppliedLive(commandId),
+          onCommandApplied: (commandId) => services.runtime.markCommandAppliedLive(commandId, conversationId),
           onClosed: (closed) => {
             unsubscribe();
             if (this.bridges.get(closed.conversationId) === closed) this.bridges.delete(closed.conversationId);

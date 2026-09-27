@@ -20,6 +20,7 @@ import type {
 } from '../src/voice/realtime/connector.js';
 import { MEDIA_STREAM_PATH, RealtimeVoiceService } from '../src/voice/realtime/realtime-voice.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
+import { onboardTenant } from './support/tenant.js';
 
 /** A scripted stand-in for the AI Gateway realtime session. */
 class ScriptedRealtimeConnector implements RealtimeConnector {
@@ -105,7 +106,6 @@ async function startCallService() {
   const app = createApp({
     repository,
     messagingProvider: messaging,
-    ownerPhone: '+15550009999',
     realtimeVoice: voice,
     providers: [
       new TwilioProvider({
@@ -115,32 +115,37 @@ async function startCallService() {
       new FakeTelephonyProvider(),
     ],
   });
+  const tenant = await onboardTenant(app, messaging, { personal: '+15550009999' });
+  messaging.sentMessages.length = 0;
   const server: Server = createServer(app);
   voice.attach(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
-  const call = await request(app).post('/webhooks/fake/voice').send({ callId: 'call-1', callerPhone: '+15553334444' });
+  const call = await request(app).post('/webhooks/fake/voice').send({ callId: 'call-1', callerPhone: '+15553334444', to: tenant.line });
   assert.equal(call.status, 200);
-  const [conversation] = await repository.list();
-  return { app, server, port, repository, connector, messaging, voice, conversationId: conversation.id };
+  const [conversation] = await repository.list(tenant.accountId);
+  return { app, server, port, repository, connector, messaging, voice, conversationId: conversation.id, headers: tenant.headers };
 }
 
 test('Twilio answers realtime calls with a bidirectional media stream', async () => {
   const repository = new InMemoryConversationRepository();
+  const messaging = new FakeMessagingProvider();
   const app = createApp({
     repository,
+    messagingProvider: messaging,
     realtimeVoice: new RealtimeVoiceService(new ScriptedRealtimeConnector()),
     providers: [new TwilioProvider({
       mediaStreamUrl: 'wss://text-me.vercel.app/media-stream',
       continueUrl: 'https://text-me.vercel.app/webhooks/twilio/voice/continue',
     }), new FakeTelephonyProvider()],
   });
+  const tenant = await onboardTenant(app, messaging);
   const response = await request(app)
     .post('/webhooks/twilio/voice')
     .type('form')
-    .send({ CallSid: 'CA1', From: '+15553334444' });
+    .send({ CallSid: 'CA1', From: '+15553334444', To: tenant.line });
   assert.equal(response.status, 200);
-  const [conversation] = await repository.list();
+  const [conversation] = await repository.list(tenant.accountId);
   assert.match(response.text, /<Connect><Stream url="wss:\/\/text-me\.vercel\.app\/media-stream">/);
   assert.match(response.text, new RegExp(`<Parameter name="conversationId" value="${conversation.id}"/>`));
   assert.match(response.text, /<Redirect method="POST">https:\/\/text-me\.vercel\.app\/webhooks\/twilio\/voice\/continue\?conversationId=/);
@@ -149,7 +154,7 @@ test('Twilio answers realtime calls with a bidirectional media stream', async ()
 test('a live call streams audio both ways, records the transcript, and obeys owner controls', async (t) => {
   const service = await startCallService();
   t.after(() => service.server.close());
-  const { connector, conversationId, port, app } = service;
+  const { connector, conversationId, port, app, headers } = service;
   const twilio = await TwilioStream.open(port, conversationId);
   t.after(() => twilio.socket.close());
 
@@ -179,7 +184,7 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   connector.emit({ type: 'speech-started', itemId: 'caller-1' });
   connector.emit({ type: 'input-transcription-completed', itemId: 'caller-1', transcript: 'I need to move my Thursday appointment.' });
   await service.voice.bridge(conversationId)!.settled();
-  let detail = await request(app).get(`/conversations/${conversationId}`);
+  let detail = await request(app).get(`/conversations/${conversationId}`).set(headers);
   assert.equal(detail.body.voice.live, true);
   assert.equal(detail.body.voice.model, 'openai/gpt-realtime-2');
   assert.deepEqual(detail.body.messages.map((message: { role: string; channel: string }) => [message.role, message.channel]), [
@@ -197,8 +202,8 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   assert.ok(connector.sentOfType('response-cancel').length > cancelsBefore);
 
   // Pause: caller audio stops flowing and automatic replies are cancelled unheard.
-  const revision = (await request(app).get(`/conversations/${conversationId}/runtime`)).body.revision;
-  const paused = await request(app).post(`/conversations/${conversationId}/runtime/pause`).send({ expectedRevision: revision });
+  const revision = (await request(app).get(`/conversations/${conversationId}/runtime`).set(headers)).body.revision;
+  const paused = await request(app).post(`/conversations/${conversationId}/runtime/pause`).set(headers).send({ expectedRevision: revision });
   assert.equal(paused.body.state, 'paused');
   await eventually(async () => {
     twilio.send({ event: 'media', streamSid: 'MZ123', media: { track: 'inbound', payload: 'PAUSED' } });
@@ -210,11 +215,11 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   assert.ok(!twilio.ofType('media').some((message) => (message.media as { payload: string }).payload === 'LEAK'));
 
   // Resume, then take over: the owner's typed words are spoken into the call.
-  await request(app).post(`/conversations/${conversationId}/runtime/resume`).send({});
-  const takeover = await request(app).post(`/conversations/${conversationId}/runtime/takeover`).send({});
+  await request(app).post(`/conversations/${conversationId}/runtime/resume`).set(headers).send({});
+  const takeover = await request(app).post(`/conversations/${conversationId}/runtime/takeover`).set(headers).send({});
   assert.equal(takeover.body.aiMode, 'owner_only');
   await eventually(() => connector.sentOfType('session-update').length > 0, 'settings pushed to live session');
-  const reply = await request(app).post(`/conversations/${conversationId}/messages`).send({ body: 'Thursday at 3 works for Randy.' });
+  const reply = await request(app).post(`/conversations/${conversationId}/messages`).set(headers).send({ body: 'Thursday at 3 works for Randy.' });
   assert.equal(reply.status, 200);
   assert.ok(reply.body.messages.some((message: { role: string; body: string }) =>
     message.role === 'owner' && message.body === 'Thursday at 3 works for Randy.'));
@@ -256,12 +261,12 @@ test('a live call streams audio both ways, records the transcript, and obeys own
   assert.equal(connector.closed, true);
 
   await eventually(async () => {
-    const after = await request(app).get(`/conversations/${conversationId}`);
+    const after = await request(app).get(`/conversations/${conversationId}`).set(headers);
     return after.body.voice.live === false && after.body.voice.outcome === 'ended';
   }, 'call marked ended');
   // ...and the caller hangs up; the conversation stays in text.
   await request(app).post('/webhooks/fake/status').send({ callId: 'call-1', status: 'completed', durationSeconds: 41 });
-  detail = await request(app).get(`/conversations/${conversationId}`);
+  detail = await request(app).get(`/conversations/${conversationId}`).set(headers);
   assert.equal(detail.body.state, 'text_active');
   assert.equal(detail.body.runtime.state, 'text_active');
   const next = await request(app).post(`/webhooks/twilio/voice/continue?conversationId=${conversationId}`);
@@ -274,7 +279,7 @@ test('owner stop says goodbye and hangs up the live call', async (t) => {
   t.after(() => service.server.close());
   const twilio = await TwilioStream.open(service.port, service.conversationId);
   await eventually(() => service.connector.config !== undefined, 'realtime session');
-  const stop = await request(service.app).post(`/conversations/${service.conversationId}/runtime/stop`).send({});
+  const stop = await request(service.app).post(`/conversations/${service.conversationId}/runtime/stop`).set(service.headers).send({});
   assert.equal(stop.body.state, 'stopped');
   await eventually(() => service.connector.sentOfType('response-create').some((event) =>
     event.options?.instructions?.includes('owner has ended this call') ?? false), 'farewell request');
@@ -309,7 +314,7 @@ test('ask_owner keeps the conversation flagged until the owner replies', async (
     name: 'note_caller', arguments: JSON.stringify({ name: 'Jordan', reason: 'Reschedule Thursday appointment' }),
   });
   await eventually(() => service.connector.sentOfType('conversation-item-create').length === 1, 'note output');
-  const [listed] = (await request(service.app).get('/conversations')).body;
+  const [listed] = (await request(service.app).get('/conversations').set(service.headers)).body;
   assert.deepEqual(listed.participant, { name: 'Jordan', phoneNumber: '+15553334444', reason: 'Reschedule Thursday appointment' });
   service.connector.emit({
     type: 'function-call-arguments-done', responseId: 'r', itemId: 'i', callId: 'ask-1',
@@ -320,9 +325,9 @@ test('ask_owner keeps the conversation flagged until the owner replies', async (
   service.connector.emit({ type: 'response-created', responseId: 'after' });
   service.connector.emit({ type: 'response-done', responseId: 'after', status: 'completed' });
   await service.voice.bridge(service.conversationId)!.settled();
-  const flagged = await request(service.app).get('/conversations?needsOwner=true');
+  const flagged = await request(service.app).get('/conversations?needsOwner=true').set(service.headers);
   assert.deepEqual(flagged.body.map((conversation: { id: string }) => conversation.id), [service.conversationId]);
-  await request(service.app).post(`/conversations/${service.conversationId}/messages`).send({ body: 'Friday at 10 is fine.' });
-  const after = await request(service.app).get('/conversations?needsOwner=true');
+  await request(service.app).post(`/conversations/${service.conversationId}/messages`).set(service.headers).send({ body: 'Friday at 10 is fine.' });
+  const after = await request(service.app).get('/conversations?needsOwner=true').set(service.headers);
   assert.equal(after.body.length, 0);
 });

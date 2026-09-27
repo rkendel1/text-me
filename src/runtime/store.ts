@@ -12,7 +12,13 @@ import type { OwnerConfiguration } from '../owner/configuration.js';
 
 export interface ConversationRuntimeStore {
   get(conversationId: string): Promise<ConversationRuntime | null>;
-  save(runtime: ConversationRuntime): Promise<void>;
+  /**
+   * Writes the runtime. With `expectedRevision`, only if the stored revision is
+   * still that one (null: only if none is stored yet): a compare-and-set, so two
+   * instances changing one conversation at once can't silently overwrite each
+   * other. Returns whether it was written.
+   */
+  save(runtime: ConversationRuntime, expectedRevision?: number | null): Promise<boolean>;
   list(conversationIds?: string[]): Promise<ConversationRuntime[]>;
 }
 
@@ -36,8 +42,12 @@ export class InMemoryConversationRuntimeStore implements ConversationRuntimeStor
     return structuredClone(this.runtimes.get(conversationId) ?? null);
   }
 
-  async save(runtime: ConversationRuntime): Promise<void> {
+  async save(runtime: ConversationRuntime, expectedRevision?: number | null): Promise<boolean> {
+    const current = this.runtimes.get(runtime.conversationId);
+    if (expectedRevision === null && current) return false;
+    if (typeof expectedRevision === 'number' && current?.configurationRevision !== expectedRevision) return false;
     this.runtimes.set(runtime.conversationId, structuredClone(runtime));
+    return true;
   }
 
   async list(conversationIds?: string[]): Promise<ConversationRuntime[]> {

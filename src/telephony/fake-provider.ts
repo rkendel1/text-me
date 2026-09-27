@@ -31,10 +31,12 @@ export class FakeTelephonyProvider implements TelephonyProvider {
   parseIncomingCall(payload: unknown): IncomingCall {
     const record = asRecord(payload);
 
+    const called = typeof record.to === 'string' && record.to.trim() ? normalizePhoneNumber(record.to) : undefined;
     return {
       provider: this.name,
       providerCallId: requiredString(record, 'callId'),
       callerPhone: normalizePhoneNumber(requiredString(record, 'callerPhone')),
+      ...(called ? { calledNumber: called } : {}),
       payload: record,
     };
   }
@@ -57,9 +59,11 @@ export class FakeTelephonyProvider implements TelephonyProvider {
     };
   }
 
-  answerCall(): ProviderResponse {
+  answerCall(_conversation?: unknown, options: { greeting?: string } = {}): ProviderResponse {
+    const greeting = (options.greeting || 'Hi. What can I help you with?').replace(/[&<>"']/g, (char) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[char]!));
     return {
-      body: '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Hi. This is Randy&apos;s assistant. He isn&apos;t taking calls right now. What can I help you with?</Say><Record maxLength="120" playBeep="true" trim="trim-silence" /><Hangup /></Response>',
+      body: `<?xml version="1.0" encoding="UTF-8"?><Response><Say>${greeting}</Say><Record maxLength="120" playBeep="true" trim="trim-silence" /><Hangup /></Response>`,
       contentType: 'text/xml; charset=utf-8',
     };
   }

@@ -6,7 +6,7 @@ export type OwnerMessageDeliveryStatus = 'pending' | 'sent' | 'observed' | 'repl
 
 export interface OwnerMessageDeliveryRecord {
   id: string;
-  ownerId: string;
+  accountId: string;
   deviceId: string;
   conversationId: string;
   messageId: string;
@@ -44,7 +44,7 @@ export class InMemoryOwnerMessageDeliveryStore implements OwnerMessageDeliverySt
     const now = new Date();
     const record: OwnerMessageDeliveryRecord = {
       id: randomUUID(),
-      ownerId: input.ownerId,
+      accountId: input.accountId,
       deviceId: input.deviceId,
       conversationId: input.conversationId,
       messageId: input.messageId,
@@ -124,27 +124,27 @@ export class QueuedMacMessagesOwnerChannel implements OwnerChannel {
 
   constructor(
     private readonly deliveries: OwnerMessageDeliveryStore,
-    private readonly devices: { primary(ownerId: string): Promise<{ id: string } | null> },
-    private readonly settings?: { isChannelEnabled(ownerId: string, channel: OwnerChannel['type']): boolean | Promise<boolean> },
+    private readonly devices: { primary(accountId: string): Promise<{ id: string } | null> },
+    private readonly settings?: { isChannelEnabled(accountId: string, channel: OwnerChannel['type']): boolean | Promise<boolean> },
   ) {}
 
   /** An optional surface: only usable once the owner has paired a ready Mac and left the channel on. */
-  async isAvailable(ownerId: string): Promise<boolean> {
-    if (this.settings && !(await this.settings.isChannelEnabled(ownerId, this.type))) return false;
-    return Boolean(await this.devices.primary(ownerId));
+  async isAvailable(accountId: string): Promise<boolean> {
+    if (this.settings && !(await this.settings.isChannelEnabled(accountId, this.type))) return false;
+    return Boolean(await this.devices.primary(accountId));
   }
 
   async sendMessage(input: Parameters<OwnerChannel['sendMessage']>[0]): Promise<{ deliveryId: string }> {
-    if (!input.ownerId || !input.conversationId || !input.messageId || !input.body.trim()) {
+    if (!input.accountId || !input.conversationId || !input.messageId || !input.body.trim()) {
       throw new Error('Owner message delivery is incomplete');
     }
-    if (this.settings && !(await this.settings.isChannelEnabled(input.ownerId, this.type))) {
+    if (this.settings && !(await this.settings.isChannelEnabled(input.accountId, this.type))) {
       throw new Error('Apple Messages owner channel is disabled');
     }
-    const device = await this.devices.primary(input.ownerId);
+    const device = await this.devices.primary(input.accountId);
     if (!device) throw new Error('A ready primary Mac Messages device is required');
     const delivery = await this.deliveries.create({
-      ownerId: input.ownerId,
+      accountId: input.accountId,
       deviceId: device.id,
       conversationId: input.conversationId,
       messageId: input.messageId,

@@ -4,7 +4,7 @@ export type AssistantResponseStyle = 'concise' | 'normal' | 'detailed';
 export type AssistantBehavior = 'automatic' | 'ask_when_unsure' | 'ask_before_commitments';
 
 export interface OwnerAssistantSettings {
-  /** Who the assistant works for, as callers should hear it ("Randy"). */
+  /** Who the assistant works for, as callers should hear it. Set by the account during onboarding. */
   ownerName: string;
   assistantName: string;
   behavior: AssistantBehavior;
@@ -34,10 +34,12 @@ export interface OwnerMessageSettings {
   interruptOnlyWhenNeeded: boolean;
   includeSummary: boolean;
   includeSuggestedResponse: boolean;
+  /** Text the account's verified personal number when no other surface reaches the owner. */
+  smsEnabled: boolean;
 }
 
 export interface OwnerConfiguration {
-  ownerId: string;
+  accountId: string;
   revision: number;
   assistant: OwnerAssistantSettings;
   calls: OwnerCallSettings;
@@ -47,7 +49,7 @@ export interface OwnerConfiguration {
 
 export interface OwnerConfigurationAuditEvent {
   type: string;
-  ownerId: string;
+  accountId: string;
   revision: number;
   source: string;
   occurredAt: Date;
@@ -61,56 +63,61 @@ export type OwnerConfigurationPatch = {
 };
 
 export interface OwnerConfigurationStore {
-  get(ownerId: string): Promise<OwnerConfiguration | null>;
+  get(accountId: string): Promise<OwnerConfiguration | null>;
   create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void>;
   update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void>;
-  events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]>;
+  events(accountId: string): Promise<OwnerConfigurationAuditEvent[]>;
 }
 
 export class InMemoryOwnerConfigurationStore implements OwnerConfigurationStore {
   private readonly configurations = new Map<string, OwnerConfiguration>();
   private readonly audit = new Map<string, OwnerConfigurationAuditEvent[]>();
 
-  async get(ownerId: string): Promise<OwnerConfiguration | null> {
-    return structuredClone(this.configurations.get(ownerId) ?? null);
+  async get(accountId: string): Promise<OwnerConfiguration | null> {
+    return structuredClone(this.configurations.get(accountId) ?? null);
   }
 
   async create(configuration: OwnerConfiguration, event: OwnerConfigurationAuditEvent): Promise<void> {
-    if (!this.configurations.has(configuration.ownerId)) {
-      this.configurations.set(configuration.ownerId, structuredClone(configuration));
+    if (!this.configurations.has(configuration.accountId)) {
+      this.configurations.set(configuration.accountId, structuredClone(configuration));
       this.record(event);
     }
   }
 
   async update(configuration: OwnerConfiguration, previousRevision: number, event: OwnerConfigurationAuditEvent): Promise<void> {
-    if (this.configurations.get(configuration.ownerId)?.revision !== previousRevision) {
+    if (this.configurations.get(configuration.accountId)?.revision !== previousRevision) {
       throw new ConfigurationConflictError();
     }
-    this.configurations.set(configuration.ownerId, structuredClone(configuration));
+    this.configurations.set(configuration.accountId, structuredClone(configuration));
     this.record(event);
   }
 
-  async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
-    return structuredClone(this.audit.get(ownerId) ?? []);
+  async events(accountId: string): Promise<OwnerConfigurationAuditEvent[]> {
+    return structuredClone(this.audit.get(accountId) ?? []);
   }
 
   private record(event: OwnerConfigurationAuditEvent): void {
-    const events = this.audit.get(event.ownerId) ?? [];
+    const events = this.audit.get(event.accountId) ?? [];
     events.push(structuredClone(event));
-    this.audit.set(event.ownerId, events);
+    this.audit.set(event.accountId, events);
   }
 }
 
-function defaultConfiguration(ownerId: string): OwnerConfiguration {
+/**
+ * No customer identity is baked in: a new account starts with no name, and the
+ * greeting and introduction follow whatever name the account gives until the
+ * owner writes their own (an empty stored value means "use the default").
+ */
+function defaultConfiguration(accountId: string): OwnerConfiguration {
   return {
-    ownerId,
+    accountId,
     revision: 1,
     assistant: {
-      ownerName: 'Randy',
+      ownerName: '',
       assistantName: 'Assistant',
       behavior: 'automatic',
-      greeting: "Hi, this is Randy's assistant. How can I help?",
-      ownerIntroduction: "Randy prefers text. I'll make sure he gets your message.",
+      greeting: '',
+      ownerIntroduction: '',
       tone: 'friendly',
       responseStyle: 'concise',
     },
@@ -131,14 +138,38 @@ function defaultConfiguration(ownerId: string): OwnerConfiguration {
       interruptOnlyWhenNeeded: true,
       includeSummary: true,
       includeSuggestedResponse: true,
+      smsEnabled: false,
     },
     onboarding: { completed: false },
   };
 }
 
+export function defaultGreeting(ownerName: string): string {
+  const name = ownerName.trim();
+  return name ? `Hi, this is ${name}'s assistant. How can I help?` : 'Hi, this is an assistant. How can I help?';
+}
+
+export function defaultIntroduction(ownerName: string): string {
+  const name = ownerName.trim() || 'They';
+  return `${name} prefers text. I'll make sure they get your message.`;
+}
+
+/** What the assistant actually uses: stored values, with empty greeting/introduction following the owner's name. */
+function effective(configuration: OwnerConfiguration): OwnerConfiguration {
+  const assistant = configuration.assistant;
+  return {
+    ...configuration,
+    assistant: {
+      ...assistant,
+      greeting: assistant.greeting.trim() || defaultGreeting(assistant.ownerName),
+      ownerIntroduction: assistant.ownerIntroduction.trim() || defaultIntroduction(assistant.ownerName),
+    },
+  };
+}
+
 /** Fill in fields added after a configuration was first stored. */
 function withDefaults(stored: OwnerConfiguration): OwnerConfiguration {
-  const defaults = defaultConfiguration(stored.ownerId);
+  const defaults = defaultConfiguration(stored.accountId);
   return {
     ...defaults,
     ...stored,
@@ -183,13 +214,19 @@ function channelEventType(patch: OwnerConfigurationPatch): string | undefined {
 export class OwnerConfigurationService {
   constructor(private readonly store: OwnerConfigurationStore = new InMemoryOwnerConfigurationStore()) {}
 
-  async get(ownerId: string): Promise<OwnerConfiguration> {
-    const existing = await this.store.get(ownerId);
+  async get(accountId: string): Promise<OwnerConfiguration> {
+    return effective(await this.stored(accountId));
+  }
+
+  /** As stored (empty greeting = follow the name); updates merge into this, not into the effective view. */
+  private async stored(accountId: string): Promise<OwnerConfiguration> {
+    if (!accountId) throw new Error('An account is required');
+    const existing = await this.store.get(accountId);
     if (existing) return withDefaults(structuredClone(existing));
-    const configuration = defaultConfiguration(ownerId);
+    const configuration = defaultConfiguration(accountId);
     await this.store.create(configuration, {
       type: 'configuration.created',
-      ownerId,
+      accountId,
       revision: configuration.revision,
       source: 'system',
       occurredAt: new Date(),
@@ -197,9 +234,9 @@ export class OwnerConfigurationService {
     return structuredClone(configuration);
   }
 
-  async update(ownerId: string, patch: OwnerConfigurationPatch, source = 'web', expectedRevision?: number): Promise<OwnerConfiguration> {
+  async update(accountId: string, patch: OwnerConfigurationPatch, source = 'web', expectedRevision?: number): Promise<OwnerConfiguration> {
     validatePatch(patch);
-    const current = await this.get(ownerId);
+    const current = await this.stored(accountId);
     if (expectedRevision !== undefined && expectedRevision !== current.revision) {
       throw new ConfigurationConflictError();
     }
@@ -215,16 +252,16 @@ export class OwnerConfigurationService {
       type: channelEventType(patch) ?? (patch.assistant ? 'assistant.settings.updated'
         : patch.calls ? 'call.settings.updated'
           : patch.messages ? 'message.settings.updated' : 'onboarding.updated'),
-      ownerId,
+      accountId,
       revision: next.revision,
       source,
       occurredAt: new Date(),
     });
-    return structuredClone(next);
+    return effective(structuredClone(next));
   }
 
-  async events(ownerId: string): Promise<OwnerConfigurationAuditEvent[]> {
-    return this.store.events(ownerId);
+  async events(accountId: string): Promise<OwnerConfigurationAuditEvent[]> {
+    return this.store.events(accountId);
   }
 
   /**
@@ -232,15 +269,15 @@ export class OwnerConfigurationService {
    * (device connected/revoked, assistant chat chosen) and bump the revision,
    * so bridges following the revision pick it up.
    */
-  async recordChange(ownerId: string, type: string, source = 'web'): Promise<OwnerConfiguration> {
-    const current = await this.get(ownerId);
+  async recordChange(accountId: string, type: string, source = 'web'): Promise<OwnerConfiguration> {
+    const current = await this.stored(accountId);
     const next = { ...current, revision: current.revision + 1 };
-    await this.store.update(next, current.revision, { type, ownerId, revision: next.revision, source, occurredAt: new Date() });
-    return structuredClone(next);
+    await this.store.update(next, current.revision, { type, accountId, revision: next.revision, source, occurredAt: new Date() });
+    return effective(structuredClone(next));
   }
 
-  async isChannelEnabled(ownerId: string, channel: 'web' | 'macos_messages'): Promise<boolean> {
-    const configuration = await this.get(ownerId);
+  async isChannelEnabled(accountId: string, channel: 'web' | 'macos_messages'): Promise<boolean> {
+    const configuration = await this.get(accountId);
     return channel === 'web' ? configuration.messages.webEnabled : configuration.messages.macosMessagesEnabled;
   }
 }

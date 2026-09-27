@@ -10,7 +10,7 @@ export interface OwnerAttentionStore {
   create(attention: OwnerAttention): Promise<OwnerAttention>;
   get(id: string): Promise<OwnerAttention | null>;
   update(id: string, patch: { status: OwnerAttentionStatus; resolvedAt?: Date; metadata?: Record<string, unknown> }): Promise<void>;
-  list(ownerId: string, options?: { conversationId?: string; open?: boolean; limit?: number }): Promise<OwnerAttention[]>;
+  list(accountId: string, options?: { conversationId?: string; open?: boolean; limit?: number }): Promise<OwnerAttention[]>;
 }
 
 export interface NotificationDeliveryStore {
@@ -20,10 +20,15 @@ export interface NotificationDeliveryStore {
 }
 
 export interface OwnerSurfaceDeviceStore {
-  /** Registers or refreshes a device (same owner + token = same device). */
+  /**
+   * Registers or refreshes a device (same account + token = same device). A
+   * physical device (one push token) serves one signed-in account at a time:
+   * registering it here retires its registration in any other account, so a
+   * phone that switched accounts never gets the previous account's notifications.
+   */
   upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice>;
-  list(ownerId: string): Promise<OwnerSurfaceDevice[]>;
-  setStatus(id: string, status: OwnerSurfaceDevice['status']): Promise<void>;
+  list(accountId: string): Promise<OwnerSurfaceDevice[]>;
+  setStatus(accountId: string, id: string, status: OwnerSurfaceDevice['status']): Promise<void>;
 }
 
 /** Small key/value store for server-generated secrets (e.g. Web Push VAPID keys). */
@@ -38,7 +43,7 @@ export class InMemoryOwnerAttentionStore implements OwnerAttentionStore {
   private readonly items = new Map<string, OwnerAttention>();
 
   async create(attention: OwnerAttention): Promise<OwnerAttention> {
-    const existing = [...this.items.values()].find((item) => item.ownerId === attention.ownerId && item.dedupeKey === attention.dedupeKey);
+    const existing = [...this.items.values()].find((item) => item.accountId === attention.accountId && item.dedupeKey === attention.dedupeKey);
     if (existing) return structuredClone(existing);
     this.items.set(attention.id, structuredClone(attention));
     return structuredClone(attention);
@@ -60,9 +65,9 @@ export class InMemoryOwnerAttentionStore implements OwnerAttentionStore {
     });
   }
 
-  async list(ownerId: string, options: Parameters<OwnerAttentionStore['list']>[1] = {}): Promise<OwnerAttention[]> {
+  async list(accountId: string, options: Parameters<OwnerAttentionStore['list']>[1] = {}): Promise<OwnerAttention[]> {
     return [...this.items.values()]
-      .filter((item) => item.ownerId === ownerId)
+      .filter((item) => item.accountId === accountId)
       .filter((item) => !options.conversationId || item.conversationId === options.conversationId)
       .filter((item) => !options.open || OPEN.includes(item.status))
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
@@ -96,21 +101,24 @@ export class InMemoryOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
   private readonly items = new Map<string, OwnerSurfaceDevice>();
 
   async upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice> {
-    const existing = [...this.items.values()].find((item) => item.ownerId === device.ownerId && item.deviceToken === device.deviceToken);
+    for (const item of this.items.values()) {
+      if (item.deviceToken === device.deviceToken && item.accountId !== device.accountId && item.status === 'active') item.status = 'revoked';
+    }
+    const existing = [...this.items.values()].find((item) => item.accountId === device.accountId && item.deviceToken === device.deviceToken);
     const next = existing
-      ? { ...existing, capabilities: device.capabilities, label: device.label ?? existing.label, sessionId: device.sessionId, status: 'active' as const, lastSeenAt: new Date() }
+      ? { ...existing, capabilities: device.capabilities, label: device.label ?? existing.label, sessionId: device.sessionId, userId: device.userId ?? existing.userId, status: 'active' as const, lastSeenAt: new Date() }
       : device;
     this.items.set(next.id, structuredClone(next));
     return structuredClone(next);
   }
 
-  async list(ownerId: string): Promise<OwnerSurfaceDevice[]> {
-    return [...this.items.values()].filter((item) => item.ownerId === ownerId).map((item) => structuredClone(item));
+  async list(accountId: string): Promise<OwnerSurfaceDevice[]> {
+    return [...this.items.values()].filter((item) => item.accountId === accountId).map((item) => structuredClone(item));
   }
 
-  async setStatus(id: string, status: OwnerSurfaceDevice['status']): Promise<void> {
+  async setStatus(accountId: string, id: string, status: OwnerSurfaceDevice['status']): Promise<void> {
     const item = this.items.get(id);
-    if (item) this.items.set(id, { ...item, status });
+    if (item && item.accountId === accountId) this.items.set(id, { ...item, status });
   }
 }
 

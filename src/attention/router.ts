@@ -12,6 +12,8 @@ export interface NotificationPreferences {
   macosMessagesEnabled: boolean;
   includeSummary: boolean;
   includeSuggestedResponse: boolean;
+  /** The account opted in to texts at its verified personal number. */
+  smsEnabled: boolean;
 }
 
 export interface DeliveryPlan {
@@ -28,7 +30,11 @@ export interface DeliveryPlan {
 export function planDelivery(attention: Pick<OwnerAttention, 'type'>, preferences: NotificationPreferences): DeliveryPlan {
   if (!preferences.notifyOwner) return { push: false, mac: false, sms: 'never' };
   const plan = basePlan(attention, !preferences.interruptOnlyWhenNeeded);
-  return { ...plan, push: plan.push && preferences.webEnabled, mac: plan.mac && preferences.macosMessagesEnabled };
+  return {
+    push: plan.push && preferences.webEnabled,
+    mac: plan.mac && preferences.macosMessagesEnabled,
+    sms: preferences.smsEnabled ? plan.sms : 'never',
+  };
 }
 
 function basePlan(attention: Pick<OwnerAttention, 'type'>, notifyOnActivity: boolean): DeliveryPlan {
@@ -65,13 +71,13 @@ export class NotificationRouter {
       plan.mac ? this.surfaces.mac : undefined,
     ].filter((surface): surface is OwnerSurface => Boolean(surface));
     for (const surface of primary) {
-      if (!(await surface.available(attention.ownerId))) continue;
+      if (!(await surface.available(attention.accountId))) continue;
       for (const result of await surface.deliver(attention, preferences)) deliveries.push({ ...result, surface: result.surface ?? surface.kind });
     }
     const sms = this.surfaces.sms;
-    if (sms && plan.sms !== 'never' && await sms.available(attention.ownerId)) {
+    if (sms && plan.sms !== 'never' && await sms.available(attention.accountId)) {
       const delivered = deliveries.some((delivery) => delivery.status === 'sent');
-      const anySurface = await this.anyEnabledSurface(attention.ownerId, preferences);
+      const anySurface = await this.anyEnabledSurface(attention.accountId, preferences);
       if ((plan.sms === 'if_undelivered' && !delivered) || (plan.sms === 'if_no_surface' && !anySurface)) {
         for (const result of await sms.deliver(attention, preferences)) deliveries.push({ ...result, surface: sms.kind });
       }
@@ -79,14 +85,14 @@ export class NotificationRouter {
     return deliveries;
   }
 
-  /** A connected device only counts if its owner channel is enabled. */
-  private async anyEnabledSurface(ownerId: string, preferences: NotificationPreferences): Promise<boolean> {
+  /** A connected device only counts if its channel is enabled for this account. */
+  private async anyEnabledSurface(accountId: string, preferences: NotificationPreferences): Promise<boolean> {
     const enabled = [
       preferences.webEnabled ? this.surfaces.push : undefined,
       preferences.macosMessagesEnabled ? this.surfaces.mac : undefined,
     ];
     for (const surface of enabled) {
-      if (surface && await surface.available(ownerId)) return true;
+      if (surface && await surface.available(accountId)) return true;
     }
     return false;
   }

@@ -36,7 +36,7 @@ export class InMemoryConversationRepository implements ConversationRepository {
       endedAt: null,
       durationSeconds: null,
       events: [],
-      ownerId: input.ownerId,
+      accountId: input.accountId,
     };
 
     this.byProviderCallId.set(key, conversation.id);
@@ -60,8 +60,9 @@ export class InMemoryConversationRepository implements ConversationRepository {
     return id ? this.getById(id) : null;
   }
 
-  async list(): Promise<Conversation[]> {
+  async list(accountId: string): Promise<Conversation[]> {
     return [...this.conversations.values()]
+      .filter((conversation) => Boolean(accountId) && conversation.accountId === accountId)
       .sort((left, right) => right.startedAt.getTime() - left.startedAt.getTime())
       .map((conversation) => structuredClone(conversation));
   }

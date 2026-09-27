@@ -7,15 +7,15 @@ export class MacOSMessagesOwnerChannel implements OwnerChannel {
 
   constructor(
     private readonly adapter: MacMessagesAdapter,
-    private readonly recipient: string | ((ownerId: string) => string) | OwnerDeviceService,
+    private readonly recipient: string | ((accountId: string) => string) | OwnerDeviceService,
     private readonly settings?: OwnerChannelSettings,
   ) {}
 
   async sendMessage(input: Parameters<OwnerChannel['sendMessage']>[0]): Promise<{ deliveryId: string }> {
-    if (!input.ownerId || !input.conversationId || !input.messageId || !input.body.trim()) {
+    if (!input.accountId || !input.conversationId || !input.messageId || !input.body.trim()) {
       throw new Error('Owner message delivery is incomplete');
     }
-    if (this.settings && !(await this.settings.isChannelEnabled(input.ownerId, this.type))) {
+    if (this.settings && !(await this.settings.isChannelEnabled(input.accountId, this.type))) {
       throw new Error('Apple Messages owner channel is disabled');
     }
 
@@ -23,8 +23,8 @@ export class MacOSMessagesOwnerChannel implements OwnerChannel {
     const recipient = typeof this.recipient === 'string'
       ? this.recipient
       : typeof this.recipient === 'function'
-        ? this.recipient(input.ownerId)
-        : (await this.recipient.primary(input.ownerId))?.messagesIdentity?.address;
+        ? this.recipient(input.accountId)
+        : (await this.recipient.primary(input.accountId))?.messagesIdentity?.address;
     if (!recipient) throw new Error('A ready primary Mac Messages device is required');
     await this.adapter.send({
       recipient,

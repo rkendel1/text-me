@@ -10,10 +10,10 @@ import { OwnerConfigurationService } from '../src/owner/configuration.js';
 
 test('macOS owner channel sends only the requested owner delivery', async () => {
   const adapter = new FakeMacMessagesAdapter();
-  const channel = new MacOSMessagesOwnerChannel(adapter, (ownerId) => `address:${ownerId}`);
+  const channel = new MacOSMessagesOwnerChannel(adapter, (accountId) => `address:${accountId}`);
 
   const result = await channel.sendMessage({
-    ownerId: 'randy',
+    accountId: 'randy',
     conversationId: 'conversation-1',
     messageId: 'message-1',
     body: 'John called about Friday.',
@@ -44,7 +44,7 @@ test('macOS bridge filters chats and deduplicates observed owner replies', async
       confirmed.push(`${input.deliveryId}:${input.externalId}`);
     },
   }, {
-    ownerId: 'randy',
+    accountId: 'randy',
     deviceId: 'device-1',
     assistantChatId: 'assistant-chat',
     ownerSender: 'randy',
@@ -105,7 +105,7 @@ test('owner device pairing creates a short-lived session and revocation removes 
   const activated = await service.activate(pairing.device.id, pairing.pairingCode);
 
   assert.equal(activated.device.status, 'active');
-  assert.equal((await service.authenticate(activated.sessionToken))?.ownerId, 'randy');
+  assert.equal((await service.authenticate(activated.sessionToken))?.accountId, 'randy');
   await service.revoke('randy', pairing.device.id);
   assert.equal(await service.authenticate(activated.sessionToken), null);
 
@@ -140,7 +140,7 @@ test('QR pairing is opaque, single-use, and device readiness requires explicit c
 test('owner configuration update surfaces optimistic concurrency conflicts', async () => {
   class ConflictStore {
     private configuration = {
-      ownerId: 'randy',
+      accountId: 'randy',
       revision: 1,
       assistant: {
         assistantName: 'Assistant',

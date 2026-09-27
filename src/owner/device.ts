@@ -11,7 +11,7 @@ export type OwnerDeviceSetupStatus =
   | 'error';
 
 export interface OwnerMessagesIdentity {
-  ownerId: string;
+  accountId: string;
   deviceId: string;
   service: MessagesService;
   address: string;
@@ -46,7 +46,10 @@ export interface OwnerDeviceProbe {
 
 export interface OwnerDevice {
   id: string;
-  ownerId: string;
+  /** The owning account: the Mac only ever sees and acts on this account's configuration and deliveries. */
+  accountId: string;
+  /** The user who paired it. */
+  userId?: string;
   type: 'macos_messages';
   name: string;
   status: OwnerDeviceStatus;
@@ -67,12 +70,12 @@ export interface OwnerDevice {
 export interface OwnerDeviceStore {
   save(device: OwnerDevice): Promise<void>;
   get(id: string): Promise<OwnerDevice | null>;
-  list(ownerId: string): Promise<OwnerDevice[]>;
+  list(accountId: string): Promise<OwnerDevice[]>;
 }
 
 export interface OwnerPairingCredentialRecord {
   deviceId: string;
-  ownerId: string;
+  accountId: string;
   code: string;
   expiresAt: number;
 }
@@ -89,7 +92,7 @@ export interface OwnerPairingCredentialStore {
 export interface OwnerDeviceSessionRecord {
   token: string;
   deviceId: string;
-  ownerId: string;
+  accountId: string;
   createdAt: number;
   lastSeenAt: number;
 }
@@ -131,9 +134,9 @@ export class InMemoryOwnerDeviceStore implements OwnerDeviceStore {
     return structuredClone(this.devices.get(id) ?? null);
   }
 
-  async list(ownerId: string): Promise<OwnerDevice[]> {
+  async list(accountId: string): Promise<OwnerDevice[]> {
     return [...this.devices.values()]
-      .filter((device) => device.ownerId === ownerId)
+      .filter((device) => device.accountId === accountId)
       .map((device) => structuredClone(device));
   }
 }
@@ -201,16 +204,18 @@ export class OwnerDeviceService {
     private readonly sessions: OwnerDeviceSessionStore = new InMemoryOwnerDeviceSessionStore(),
   ) {}
 
-  async pair(ownerId: string, name: string): Promise<{
+  async pair(accountId: string, name: string, userId?: string): Promise<{
     device: OwnerDevice;
     pairingCode: string;
     pairingUri: string;
     expiresAt: Date;
   }> {
     const createdAt = new Date(this.now());
+    if (!accountId) throw new Error('An account is required');
     const device: OwnerDevice = {
       id: randomUUID(),
-      ownerId,
+      accountId,
+      ...(userId ? { userId } : {}),
       type: 'macos_messages',
       name: name.trim() || 'Mac Messages',
       status: 'pending',
@@ -234,7 +239,7 @@ export class OwnerDeviceService {
     await this.store.save(device);
     await this.pairings.save({
       deviceId: device.id,
-      ownerId,
+      accountId,
       code: pairingCode,
       expiresAt,
     });
@@ -245,7 +250,7 @@ export class OwnerDeviceService {
     const code = parsePairingCredential(pairingCode).code;
     const pairing = await this.pairings.consume(code, this.now());
     const device = await this.store.get(deviceId);
-    if (!pairing || pairing.deviceId !== deviceId || !device || device.status !== 'pending' || device.ownerId !== pairing.ownerId) {
+    if (!pairing || pairing.deviceId !== deviceId || !device || device.status !== 'pending' || device.accountId !== pairing.accountId) {
       throw new Error('Invalid or expired pairing code');
     }
 
@@ -258,7 +263,7 @@ export class OwnerDeviceService {
     await this.sessions.save({
       token: sessionToken,
       deviceId: device.id,
-      ownerId: device.ownerId,
+      accountId: device.accountId,
       createdAt: this.now(),
       lastSeenAt: this.now(),
     });
@@ -301,9 +306,9 @@ export class OwnerDeviceService {
     return device;
   }
 
-  async requestProbe(ownerId: string, deviceId: string): Promise<OwnerDevice> {
+  async requestProbe(accountId: string, deviceId: string): Promise<OwnerDevice> {
     const device = await this.store.get(deviceId);
-    if (!device || device.ownerId !== ownerId || device.status !== 'active') throw new Error('Device not found');
+    if (!device || device.accountId !== accountId || device.status !== 'active') throw new Error('Device not found');
     device.probe = { id: `probe_${randomBytes(8).toString('hex')}`, requestedAt: new Date(this.now()).toISOString() };
     device.updatedAt = new Date(this.now());
     await this.store.save(device);
@@ -320,17 +325,17 @@ export class OwnerDeviceService {
     return device;
   }
 
-  async list(ownerId: string): Promise<OwnerDevice[]> {
-    return this.store.list(ownerId);
+  async list(accountId: string): Promise<OwnerDevice[]> {
+    return this.store.list(accountId);
   }
 
   async get(deviceId: string): Promise<OwnerDevice | null> {
     return this.store.get(deviceId);
   }
 
-  async revoke(ownerId: string, deviceId: string): Promise<void> {
+  async revoke(accountId: string, deviceId: string): Promise<void> {
     const device = await this.store.get(deviceId);
-    if (!device || device.ownerId !== ownerId) throw new Error('Device not found');
+    if (!device || device.accountId !== accountId) throw new Error('Device not found');
     device.status = 'revoked';
     device.setupStatus = 'error';
     device.isPrimary = false;
@@ -352,7 +357,7 @@ export class OwnerDeviceService {
     const device = await this.requireSession(sessionToken);
     device.health = { ...capabilities, authorizedChat: device.assistantChat !== null };
     device.messagesIdentity = capabilities.authorizedIdentity
-      ? { ownerId: device.ownerId, deviceId: device.id, ...capabilities.authorizedIdentity }
+      ? { accountId: device.accountId, deviceId: device.id, ...capabilities.authorizedIdentity }
       : device.messagesIdentity;
     device.lastSeenAt = new Date(this.now());
     device.updatedAt = new Date(this.now());
@@ -376,9 +381,9 @@ export class OwnerDeviceService {
     return chats;
   }
 
-  async authorizeChat(ownerId: string, deviceId: string, chatId: string, service: MessagesService): Promise<OwnerDevice> {
+  async authorizeChat(accountId: string, deviceId: string, chatId: string, service: MessagesService): Promise<OwnerDevice> {
     const device = await this.store.get(deviceId);
-    if (!device || device.ownerId !== ownerId || device.status !== 'active') throw new Error('Device not found');
+    if (!device || device.accountId !== accountId || device.status !== 'active') throw new Error('Device not found');
     const chat = device.discoveredChats.find((candidate) => candidate.id === chatId && candidate.service === service);
     if (!chat || chat.isGroup) throw new Error('Chat was not discovered or is not compatible');
     device.assistantChat = {
@@ -395,11 +400,11 @@ export class OwnerDeviceService {
     return device;
   }
 
-  async setPrimary(ownerId: string, deviceId: string): Promise<OwnerDevice> {
+  async setPrimary(accountId: string, deviceId: string): Promise<OwnerDevice> {
     const device = await this.store.get(deviceId);
-    if (!device || device.ownerId !== ownerId || device.status !== 'active') throw new Error('Device not found');
+    if (!device || device.accountId !== accountId || device.status !== 'active') throw new Error('Device not found');
     if (!this.isReady(device)) throw new Error('Device is not ready');
-    for (const candidate of await this.store.list(ownerId)) {
+    for (const candidate of await this.store.list(accountId)) {
       if (candidate.isPrimary && candidate.id !== deviceId) {
         candidate.isPrimary = false;
         candidate.updatedAt = new Date(this.now());
@@ -412,8 +417,8 @@ export class OwnerDeviceService {
     return device;
   }
 
-  async primary(ownerId: string): Promise<OwnerDevice | null> {
-    return (await this.store.list(ownerId)).find((device) => device.isPrimary && this.isReady(device)) ?? null;
+  async primary(accountId: string): Promise<OwnerDevice | null> {
+    return (await this.store.list(accountId)).find((device) => device.isPrimary && this.isReady(device)) ?? null;
   }
 
   isReady(device: OwnerDevice): boolean {

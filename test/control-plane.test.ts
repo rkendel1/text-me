@@ -25,9 +25,11 @@ import type {
 } from '../src/voice/realtime/connector.js';
 import { MEDIA_STREAM_PATH, RealtimeVoiceService } from '../src/voice/realtime/realtime-voice.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
+import { onboardTenant, type Tenant } from './support/tenant.js';
 
-const OWNER_TOKEN = 'owner-token';
-const auth = { Authorization: `Bearer ${OWNER_TOKEN}` };
+// Top-level tests in a file run one after another; each builds its own plane and signs its own customer in.
+let auth = { Authorization: '' };
+let owner: Tenant;
 const MAC_CAPABILITIES = {
   messagesAccess: true, sendCapability: true, watcher: true,
   authorizedIdentity: { service: 'imessage', address: 'randy@icloud.example' },
@@ -54,7 +56,7 @@ async function eventually(check: () => boolean | Promise<boolean>, what: string)
   assert.fail(`Timed out waiting for ${what}`);
 }
 
-function controlPlane(options: { now?: () => number } = {}) {
+async function controlPlane(options: { now?: () => number } = {}) {
   const repository = new InMemoryConversationRepository();
   const configuration = new OwnerConfigurationService();
   const devices = new OwnerDeviceService(undefined, options.now);
@@ -68,11 +70,10 @@ function controlPlane(options: { now?: () => number } = {}) {
     publicKey: async () => 'BKey',
     send: async (_subscription, payload) => { pushes.push(payload); return { statusCode: 201 }; },
   };
+  const messaging = new FakeMessagingProvider();
   const app = createApp({
     repository,
-    ownerAuthToken: OWNER_TOKEN,
-    ownerPhone: '+15550009999',
-    messagingProvider: new FakeMessagingProvider(),
+    messagingProvider: messaging,
     ownerConfigurationService: configuration,
     ownerDeviceService: devices,
     ownerDeliveryStore: macDeliveries,
@@ -84,11 +85,14 @@ function controlPlane(options: { now?: () => number } = {}) {
     publicBaseUrl: 'https://text-me.vercel.app',
     providers: [new TwilioProvider({ mediaStreamUrl: `wss://example.test${MEDIA_STREAM_PATH}` }), new FakeTelephonyProvider()],
   });
-  return { app, repository, configuration, devices, macDeliveries, attentionStore, notificationDeliveries, connector, voice, pushes };
+  owner = await onboardTenant(app, messaging, { personal: '+15550009999' });
+  auth = owner.headers;
+  messaging.sentMessages.length = 0;
+  return { app, repository, configuration, devices, macDeliveries, attentionStore, notificationDeliveries, connector, voice, pushes, owner, messaging };
 }
 
 /** What the Mac bridge does after the owner scans the QR: redeem, report health, report chats. */
-async function pairMac(app: ReturnType<typeof controlPlane>['app']) {
+async function pairMac(app: Awaited<ReturnType<typeof controlPlane>>['app']) {
   const qr = await request(app).post('/owner/devices/pair/qr').set(auth).send({ name: 'MacBook Pro' });
   const activated = await request(app).post('/owner/devices/activate').send({ pairingCredential: qr.body.pairingUri });
   assert.equal(activated.status, 200, JSON.stringify(activated.body));
@@ -103,13 +107,13 @@ async function pairMac(app: ReturnType<typeof controlPlane>['app']) {
 
 test('QR pairing: short-lived, single-use, owner-bound, and the QR carries no credentials', async () => {
   let clock = Date.now();
-  const plane = controlPlane({ now: () => clock });
+  const plane = await controlPlane({ now: () => clock });
   const qr = await request(plane.app).post('/owner/devices/pair/qr').set(auth).send({});
   assert.equal(qr.status, 201);
   const parsed = parsePairingCredential(qr.body.pairingUri);
   assert.match(qr.body.pairingUri, /^attn:\/\/pair\/[A-Za-z0-9_-]{20,}\?s=https%3A%2F%2Ftext-me\.vercel\.app$/);
   assert.equal(parsed.server, 'https://text-me.vercel.app', 'the bridge learns where to connect from the QR');
-  assert.ok(!qr.body.pairingUri.includes(OWNER_TOKEN) && !qr.body.pairingUri.includes('owner') && !qr.body.pairingUri.includes(qr.body.deviceId));
+  assert.ok(!qr.body.pairingUri.includes(owner.token) && !qr.body.pairingUri.includes(owner.accountId) && !qr.body.pairingUri.includes(qr.body.deviceId));
   assert.ok(Math.abs(new Date(qr.body.expiresAt).getTime() - (clock + PAIRING_TTL_MS)) < 1000);
   assert.ok(PAIRING_TTL_MS <= 5 * 60 * 1000);
   assert.equal((await request(plane.app).post('/owner/devices/pair/qr').send({})).status, 401, 'only the signed-in owner can create a QR');
@@ -121,7 +125,7 @@ test('QR pairing: short-lived, single-use, owner-bound, and the QR carries no cr
   ]);
   assert.deepEqual([first.status, second.status].sort(), [200, 401]);
   const winner = first.status === 200 ? first : second;
-  assert.equal(winner.body.device.ownerId, 'owner');
+  assert.equal(winner.body.device.accountId, owner.accountId);
   assert.equal((await request(plane.app).post('/owner/devices/activate').send({ pairingCredential: qr.body.pairingUri })).status, 401, 'duplicate scan');
 
   // An expired QR is rejected.
@@ -131,7 +135,7 @@ test('QR pairing: short-lived, single-use, owner-bound, and the QR carries no cr
 });
 
 test('revoked Macs lose access immediately and come back only through a new QR', async () => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   const { deviceId, bridge } = await pairMac(plane.app);
   const pending = await request(plane.app).post('/owner/devices/pair/qr').set(auth).send({});
   assert.equal((await request(plane.app).post(`/owner/devices/${deviceId}/revoke`).set(auth)).status, 204);
@@ -147,7 +151,7 @@ test('revoked Macs lose access immediately and come back only through a new QR',
 });
 
 test('the bridge reports real health and chats; the owner picks the chat; the Mac receives configuration by revision', async () => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   const { deviceId, bridge } = await pairMac(plane.app);
   let [device] = (await request(plane.app).get('/owner/devices').set(auth)).body;
   assert.equal(device.online, true);
@@ -191,7 +195,7 @@ test('the bridge reports real health and chats; the owner picks the chat; the Ma
 });
 
 test('turning Apple Messages off stops owner deliveries; turning it on resumes them; no re-pairing', async (t) => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   const { deviceId, bridge } = await pairMac(plane.app);
   await request(plane.app).post(`/owner/devices/${deviceId}/messages/chat`).set(auth).send({ chatId: 'chat-self', service: 'imessage' });
   await request(plane.app).post(`/owner/devices/${deviceId}/heartbeat`).set(bridge).send({ capabilities: MAC_CAPABILITIES });
@@ -202,8 +206,8 @@ test('turning Apple Messages off stops owner deliveries; turning it on resumes t
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   const call = async (callId: string) => {
-    await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444' });
-    const conversation = (await plane.repository.list()).find((candidate) => candidate.providerCallId === callId)!;
+    await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444', to: owner.line });
+    const conversation = (await plane.repository.list(owner.accountId)).find((candidate) => candidate.providerCallId === callId)!;
     const socket = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}${MEDIA_STREAM_PATH}`);
     t.after(() => socket.close());
     await new Promise((resolve) => socket.once('open', resolve));
@@ -227,7 +231,7 @@ test('turning Apple Messages off stops owner deliveries; turning it on resumes t
   await request(plane.app).patch('/owner/configuration').set(auth).send({ messages: { macosMessagesEnabled: false } });
   await call('c2');
   ask('ask-2');
-  await eventually(async () => (await plane.attentionStore.list('owner')).some((item) => item.metadata.requestId === 'req_ask-2'), 'second attention');
+  await eventually(async () => (await plane.attentionStore.list(owner.accountId)).some((item) => item.metadata.requestId === 'req_ask-2'), 'second attention');
   assert.equal((await plane.macDeliveries.listPending(deviceId)).length, 1, 'disabled channel gets nothing new');
 
   // Summary and suggestion follow the message settings too.
@@ -248,8 +252,8 @@ async function liveCalls(plane: ReturnType<typeof controlPlane>, t: { after(fn: 
   t.after(() => server.close());
   return {
     async call(callId: string) {
-      await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444' });
-      const conversation = (await plane.repository.list()).find((candidate) => candidate.providerCallId === callId)!;
+      await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444', to: owner.line });
+      const conversation = (await plane.repository.list(owner.accountId)).find((candidate) => candidate.providerCallId === callId)!;
       const socket = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}${MEDIA_STREAM_PATH}`);
       t.after(() => socket.close());
       await new Promise((resolve) => socket.once('open', resolve));
@@ -263,16 +267,16 @@ async function liveCalls(plane: ReturnType<typeof controlPlane>, t: { after(fn: 
         type: 'function-call-arguments-done', responseId: 'r', itemId: 'i', callId,
         name: 'ask_owner', arguments: JSON.stringify({ question: 'Friday at 2?', suggestedReplies: ['Friday at 2 works'] }),
       });
-      await eventually(async () => (await plane.attentionStore.list('owner')).some((item) => item.metadata.requestId === `req_${callId}`), 'attention');
+      await eventually(async () => (await plane.attentionStore.list(owner.accountId)).some((item) => item.metadata.requestId === `req_${callId}`), 'attention');
       await new Promise((resolve) => setTimeout(resolve, 20));
-      const attention = (await plane.attentionStore.list('owner')).find((item) => item.metadata.requestId === `req_${callId}`)!;
+      const attention = (await plane.attentionStore.list(owner.accountId)).find((item) => item.metadata.requestId === `req_${callId}`)!;
       return { attention, deliveries: await plane.notificationDeliveries.list(attention.id) };
     },
   };
 }
 
 test('browser inbox and "send owner notifications" decide whether the iPhone is pushed', async (t) => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   await request(plane.app).post('/owner/push/devices').set(auth)
     .send({ subscription: { endpoint: 'https://web.push.apple.com/owner', keys: { p256dh: 'k', auth: 'a' } } });
   const calls = await liveCalls(plane, t);
@@ -298,14 +302,14 @@ test('browser inbox and "send owner notifications" decide whether the iPhone is 
 });
 
 test('call and assistant settings change the next call, with no Mac involved', async (t) => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   const server: Server = createServer(plane.app);
   plane.voice.attach(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(() => server.close());
   const start = async (callId: string) => {
-    const answer = await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444' });
-    const conversation = (await plane.repository.list()).find((candidate) => candidate.providerCallId === callId)!;
+    const answer = await request(plane.app).post('/webhooks/fake/voice').send({ callId, callerPhone: '+15553334444', to: owner.line });
+    const conversation = (await plane.repository.list(owner.accountId)).find((candidate) => candidate.providerCallId === callId)!;
     if (/can.t take/.test(answer.text)) return { answer, conversationId: conversation.id };
     const socket = new WebSocket(`ws://127.0.0.1:${(server.address() as AddressInfo).port}${MEDIA_STREAM_PATH}`);
     t.after(() => socket.close());
@@ -337,7 +341,7 @@ test('call and assistant settings change the next call, with no Mac involved', a
   const voicemail = await request(plane.app).post(`/webhooks/twilio/voicemail?conversationId=${declined.conversationId}`).type('form')
     .send({ RecordingUrl: 'https://api.twilio.com/rec/RE1', RecordingSid: 'RE1', RecordingDuration: '14' });
   assert.equal(voicemail.status, 200);
-  const attention = (await plane.attentionStore.list('owner')).find((item) => item.type === 'voicemail')!;
+  const attention = (await plane.attentionStore.list(owner.accountId)).find((item) => item.type === 'voicemail')!;
   assert.equal(attention.title, '+15553334444 left a voicemail');
 
   // Answering off, voicemail off: they're asked to text.
@@ -347,7 +351,7 @@ test('call and assistant settings change the next call, with no Mac involved', a
 });
 
 test('settings: defaults, persistence, revisions, conflicts, audit, and owner isolation', async () => {
-  const plane = controlPlane();
+  const plane = await controlPlane();
   const defaults = (await request(plane.app).get('/owner/configuration').set(auth)).body;
   assert.deepEqual(defaults.calls, {
     answerCalls: true, collectCallerName: true, collectReason: true, offerSmsTransition: true,
@@ -373,7 +377,7 @@ test('settings: defaults, persistence, revisions, conflicts, audit, and owner is
   await request(plane.app).patch('/owner/configuration').set(auth).send({ messages: { webEnabled: false } });
   const events = (await request(plane.app).get('/owner/configuration/events').set(auth)).body;
   assert.deepEqual(events.map((event: { type: string }) => event.type).slice(-2), ['assistant.settings.updated', 'owner.channel.disabled']);
-  assert.ok(events.every((event: Record<string, unknown>) => Object.keys(event).sort().join() === 'occurredAt,ownerId,revision,source,type'));
+  assert.ok(events.every((event: Record<string, unknown>) => Object.keys(event).sort().join() === 'accountId,occurredAt,revision,source,type'));
 
   // Owner isolation at the service level: one owner's changes never touch another's.
   await plane.configuration.update('someone-else', { messages: { macosMessagesEnabled: false } });

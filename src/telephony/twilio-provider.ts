@@ -48,11 +48,13 @@ export class TwilioProvider implements TelephonyProvider {
     const record = asRecord(payload);
     const providerCallId = requiredString(record, 'CallSid');
     const callerPhone = normalizePhoneNumber(requiredString(record, 'From'));
+    const calledNumber = typeof record.To === 'string' && record.To.trim() ? normalizePhoneNumber(record.To) : undefined;
 
     return {
       provider: this.name,
       providerCallId,
       callerPhone,
+      ...(calledNumber ? { calledNumber } : {}),
       payload: record,
     };
   }
@@ -96,12 +98,13 @@ export class TwilioProvider implements TelephonyProvider {
       provider: this.name,
       providerMessageId: requiredString(record, 'MessageSid'),
       from: normalizePhoneNumber(requiredString(record, 'From')),
+      ...(typeof record.To === 'string' && record.To.trim() ? { to: normalizePhoneNumber(record.To) } : {}),
       body: requiredString(record, 'Body'),
       payload: record,
     };
   }
 
-  answerCall(conversation?: Conversation): ProviderResponse {
+  answerCall(conversation?: Conversation, options: { greeting?: string } = {}): ProviderResponse {
     const response = new twilio.twiml.VoiceResponse();
     if (this.voice.mediaStreamUrl && conversation) {
       const stream = response.connect().stream({ url: this.voice.mediaStreamUrl });
@@ -113,9 +116,8 @@ export class TwilioProvider implements TelephonyProvider {
       }
       return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
     }
-    response.say(
-      "Hi. This is Randy's assistant. He isn't taking calls right now. What can I help you with?",
-    );
+    // Without realtime voice (local development): the account's own greeting, then a recording.
+    response.say(options.greeting || 'Hi. What can I help you with?');
     response.record({
       maxLength: 120,
       playBeep: true,

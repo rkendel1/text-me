@@ -13,7 +13,7 @@ import type {
   ConversationRepository,
   CreateConversationInput,
 } from './conversation-repository.js';
-import { migrate } from './schema-lock.js';
+import { migrate, renameOwnerColumn } from './schema-lock.js';
 
 interface ConversationRow {
   id: string;
@@ -28,7 +28,7 @@ interface ConversationRow {
   channels: ConversationChannel[] | null;
   primary_channel: ConversationChannel | null;
   participants: ConversationParticipant[] | null;
-  owner_id: string | null;
+  account_id: string | null;
   last_owner_read_at: Date | null;
 }
 
@@ -59,11 +59,12 @@ export class PostgresConversationRepository implements ConversationRepository {
           channels JSONB NOT NULL DEFAULT '["voice"]',
           primary_channel TEXT NOT NULL DEFAULT 'voice',
           participants JSONB NOT NULL DEFAULT '[]',
-          owner_id TEXT,
+          account_id TEXT,
           last_owner_read_at TIMESTAMPTZ,
           UNIQUE (provider, provider_call_id)
         );
       `);
+      await renameOwnerColumn(db, 'conversations');
 
       await db.query(`
         CREATE TABLE IF NOT EXISTS conversation_events (
@@ -80,9 +81,10 @@ export class PostgresConversationRepository implements ConversationRepository {
           ADD COLUMN IF NOT EXISTS channels JSONB NOT NULL DEFAULT '["voice"]',
           ADD COLUMN IF NOT EXISTS primary_channel TEXT NOT NULL DEFAULT 'voice',
           ADD COLUMN IF NOT EXISTS participants JSONB NOT NULL DEFAULT '[]',
-            ADD COLUMN IF NOT EXISTS owner_id TEXT,
+            ADD COLUMN IF NOT EXISTS account_id TEXT,
             ADD COLUMN IF NOT EXISTS last_owner_read_at TIMESTAMPTZ;
       `);
+      await db.query('CREATE INDEX IF NOT EXISTS idx_conversations_account ON conversations (account_id, started_at DESC)');
     });
   }
 
@@ -99,7 +101,7 @@ export class PostgresConversationRepository implements ConversationRepository {
           caller_phone,
           status,
           started_at
-          , owner_id
+          , account_id
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (provider, provider_call_id) DO NOTHING
@@ -112,7 +114,7 @@ export class PostgresConversationRepository implements ConversationRepository {
         input.callerPhone,
         input.status,
         input.startedAt,
-        input.ownerId ?? null,
+        input.accountId,
       ],
     );
 
@@ -161,13 +163,16 @@ export class PostgresConversationRepository implements ConversationRepository {
     return row ? this.getConversationWithEvents(row.id) : null;
   }
 
-  async list(): Promise<Conversation[]> {
+  async list(accountId: string): Promise<Conversation[]> {
+    if (!accountId) return [];
     const result = await this.pool.query<ConversationRow>(
       `
         SELECT *
         FROM conversations
+        WHERE account_id = $1
         ORDER BY GREATEST(started_at, COALESCE((SELECT MAX(occurred_at) FROM conversation_events e WHERE e.conversation_id = conversations.id), started_at)) DESC
       `,
+      [accountId],
     );
 
     const conversations = await Promise.all(
@@ -229,10 +234,10 @@ export class PostgresConversationRepository implements ConversationRepository {
     );
   }
 
-  async markOwnerRead(conversationId: string, ownerId: string, readAt: Date): Promise<void> {
+  async markOwnerRead(conversationId: string, accountId: string, readAt: Date): Promise<void> {
     await this.pool.query(
-      `UPDATE conversations SET last_owner_read_at = $3 WHERE id = $1 AND owner_id = $2`,
-      [conversationId, ownerId, readAt],
+      `UPDATE conversations SET last_owner_read_at = $3 WHERE id = $1 AND account_id = $2`,
+      [conversationId, accountId, readAt],
     );
   }
 
@@ -276,7 +281,7 @@ export class PostgresConversationRepository implements ConversationRepository {
       channels: row.channels ?? ['voice'],
       primaryChannel: row.primary_channel ?? 'voice',
       participants: row.participants ?? [],
-      ownerId: row.owner_id ?? undefined,
+      accountId: row.account_id ?? '',
       lastOwnerReadAt: row.last_owner_read_at ? new Date(row.last_owner_read_at) : null,
       events: eventsResult.rows.map((event) => ({
         id: event.id,

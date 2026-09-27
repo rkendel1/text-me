@@ -1,7 +1,15 @@
+import { createHash, randomInt } from 'node:crypto';
+
 import twilio from 'twilio';
 
-export interface PhoneNumberRecord {
-  sid: string;
+import { HttpError } from '../errors.js';
+import type { MessagingProvider } from '../messaging/provider.js';
+import { createAuditEventId, createPhoneNumberId, E164, type PhoneNumber } from '../tenancy/model.js';
+import { PhoneNumberTakenError, type TenancyStore } from '../tenancy/store.js';
+
+/** A number held in the platform's provider account (a platform resource until assigned to an account). */
+export interface ProviderNumber {
+  ref: string;
   phoneNumber: string;
   voiceUrl: string | null;
   smsUrl: string | null;
@@ -9,44 +17,92 @@ export interface PhoneNumberRecord {
 }
 
 export interface PhoneNumberClient {
-  find(phoneNumber: string): Promise<PhoneNumberRecord | null>;
-  /** Numbers in the account, so the assistant line needn't be configured. */
-  list(): Promise<PhoneNumberRecord[]>;
-  update(sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<PhoneNumberRecord>;
+  readonly provider: string;
+  find(phoneNumber: string): Promise<ProviderNumber | null>;
+  /** Numbers in the platform's provider account. */
+  list(): Promise<ProviderNumber[]>;
+  update(ref: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<ProviderNumber>;
+  /** Buy a new number into the platform account (optional; only when the platform allows it). */
+  purchase?(options: { country: string; areaCode?: string }): Promise<ProviderNumber>;
 }
 
+const fromTwilio = (number: { sid: string; phoneNumber: string; voiceUrl?: string | null; smsUrl?: string | null; statusCallback?: string | null }): ProviderNumber => ({
+  ref: number.sid, phoneNumber: number.phoneNumber, voiceUrl: number.voiceUrl ?? null,
+  smsUrl: number.smsUrl ?? null, statusCallback: number.statusCallback ?? null,
+});
+
+/** Twilio credentials are platform secrets; the numbers they hold are assigned to accounts in our database. */
 export class TwilioPhoneNumberClient implements PhoneNumberClient {
+  readonly provider = 'twilio';
   private readonly client: ReturnType<typeof twilio>;
 
   constructor(accountSid: string, authToken: string) {
     this.client = twilio(accountSid, authToken);
   }
 
-  async find(phoneNumber: string): Promise<PhoneNumberRecord | null> {
+  async find(phoneNumber: string): Promise<ProviderNumber | null> {
     const [number] = await this.client.incomingPhoneNumbers.list({ phoneNumber, limit: 1 });
-    return number ? {
-      sid: number.sid, phoneNumber: number.phoneNumber, voiceUrl: number.voiceUrl ?? null,
-      smsUrl: number.smsUrl ?? null, statusCallback: number.statusCallback ?? null,
-    } : null;
+    return number ? fromTwilio(number) : null;
   }
 
-  async list(): Promise<PhoneNumberRecord[]> {
-    const numbers = await this.client.incomingPhoneNumbers.list({ limit: 20 });
-    return numbers.map((number) => ({
-      sid: number.sid, phoneNumber: number.phoneNumber, voiceUrl: number.voiceUrl ?? null,
-      smsUrl: number.smsUrl ?? null, statusCallback: number.statusCallback ?? null,
-    }));
+  async list(): Promise<ProviderNumber[]> {
+    return (await this.client.incomingPhoneNumbers.list({ limit: 200 })).map(fromTwilio);
   }
 
-  async update(sid: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<PhoneNumberRecord> {
-    const number = await this.client.incomingPhoneNumbers(sid).update({
+  async update(ref: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<ProviderNumber> {
+    return fromTwilio(await this.client.incomingPhoneNumbers(ref).update({
       voiceUrl: urls.voiceUrl, voiceMethod: 'POST',
       smsUrl: urls.smsUrl, smsMethod: 'POST',
       statusCallback: urls.statusCallback, statusCallbackMethod: 'POST',
+    }));
+  }
+
+  async purchase(options: { country: string; areaCode?: string }): Promise<ProviderNumber> {
+    const [available] = await this.client.availablePhoneNumbers(options.country).local.list({
+      ...(options.areaCode ? { areaCode: Number(options.areaCode) } : {}), smsEnabled: true, voiceEnabled: true, limit: 1,
     });
-    return {
-      sid: number.sid, phoneNumber: number.phoneNumber, voiceUrl: number.voiceUrl ?? null,
-      smsUrl: number.smsUrl ?? null, statusCallback: number.statusCallback ?? null,
+    if (!available) throw new Error('No numbers are available to buy right now.');
+    return fromTwilio(await this.client.incomingPhoneNumbers.create({ phoneNumber: available.phoneNumber }));
+  }
+}
+
+/** A provider stand-in for local development and tests: a pool of numbers, plus "buying" new ones. */
+export class FakePhoneNumberClient implements PhoneNumberClient {
+  readonly provider = 'fake';
+  private readonly numbers = new Map<string, ProviderNumber>();
+
+  constructor(pool: string[] = [], private readonly purchasable = true) {
+    for (const number of pool) this.add(number);
+  }
+
+  add(phoneNumber: string): ProviderNumber {
+    const record = { ref: `PN${createHash('sha1').update(phoneNumber).digest('hex').slice(0, 30)}`, phoneNumber, voiceUrl: null, smsUrl: null, statusCallback: null };
+    this.numbers.set(phoneNumber, record);
+    return structuredClone(record);
+  }
+
+  async find(phoneNumber: string): Promise<ProviderNumber | null> {
+    return structuredClone(this.numbers.get(phoneNumber) ?? null);
+  }
+
+  async list(): Promise<ProviderNumber[]> {
+    return [...this.numbers.values()].map((number) => structuredClone(number));
+  }
+
+  async update(ref: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<ProviderNumber> {
+    const number = [...this.numbers.values()].find((candidate) => candidate.ref === ref);
+    if (!number) throw new Error('Unknown number');
+    Object.assign(number, urls);
+    return structuredClone(number);
+  }
+
+  get purchase(): PhoneNumberClient['purchase'] {
+    if (!this.purchasable) return undefined;
+    return async () => {
+      // Random 555 numbers: several fake "providers" (instances, test runs) can share one database.
+      let candidate: string;
+      do { candidate = `+1555${String(randomInt(0, 10_000_000)).padStart(7, '0')}`; } while (this.numbers.has(candidate));
+      return this.add(candidate);
     };
   }
 }
@@ -82,23 +138,43 @@ export function forwardingCodes(assistantLine: string): ForwardingCode[] {
   return codes;
 }
 
+export const VERIFICATION_TTL_MS = 10 * 60 * 1000;
+export const MAX_VERIFICATION_ATTEMPTS = 5;
+
+const codeHash = (numberId: string, code: string) => createHash('sha256').update(`${numberId}:${code}`).digest('hex');
+
+export interface AccountPhoneStatus {
+  assistantLine: PhoneNumber | null;
+  personal: PhoneNumber | null;
+  /** The assistant line's webhooks point at this deployment. */
+  connected: boolean;
+  forwarding: ForwardingCode[];
+  error?: string;
+}
+
 /**
- * The phone side. The owner keeps their real number; calls they don't take are
- * forwarded by their carrier to the assistant line, a number in the Twilio
- * account that callers never see. "Connect" points that line at this
- * deployment so nobody pastes webhook URLs into a provider console.
+ * Phone numbers are account resources. The provider credentials are platform
+ * secrets; which number belongs to which account lives in `phone_numbers`,
+ * with a lifecycle of unconfigured → pending_verification → verified → active.
+ *
+ * - The assistant line is claimed from the platform's provider pool (or bought,
+ *   when the platform allows it), verified against the provider, then activated
+ *   by pointing its webhooks at this deployment. Calls to it resolve its account.
+ * - The personal number (the owner's real mobile) is verified by a code texted
+ *   from the account's assistant line, and becomes active once the line is.
  */
 export class PhoneNumberService {
-  private resolved?: Promise<PhoneNumberRecord>;
-
   constructor(
+    private readonly store: TenancyStore,
     private readonly client: PhoneNumberClient,
-    /** Optional: without it, the account's only number is used. */
-    private readonly configuredLine: string | undefined,
     private readonly publicBaseUrl: string,
-    /** The owner's real number, which forwards to the assistant line. */
-    readonly ownerNumber?: string,
+    private readonly messaging: MessagingProvider | undefined,
+    private readonly options: { allowPurchase?: boolean; country?: string; now?: () => number } = {},
   ) {}
+
+  private now(): Date {
+    return new Date(this.options.now?.() ?? Date.now());
+  }
 
   private urls() {
     return {
@@ -108,66 +184,228 @@ export class PhoneNumberService {
     };
   }
 
-  /** Which number is the assistant line; cached. Its settings are always read fresh. */
-  private resolve(): Promise<PhoneNumberRecord> {
-    this.resolved ??= (async () => {
-      if (this.configuredLine) {
-        const number = await this.client.find(this.configuredLine);
-        if (!number) throw new Error(`${this.configuredLine} isn’t in this Twilio account`);
-        return number;
-      }
-      const numbers = await this.client.list();
-      if (numbers.length === 1) return numbers[0];
-      if (!numbers.length) {
-        throw new Error('Your Twilio account has no phone number yet. Add any local number: it stays behind the scenes as the line your calls forward to.');
-      }
-      throw new Error(`Your Twilio account has ${numbers.length} numbers. Set TWILIO_PHONE_NUMBER to the one your calls should forward to.`);
-    })();
-    this.resolved.catch(() => { this.resolved = undefined; });
-    return this.resolved;
+  private async numbers(accountId: string) {
+    const all = await this.store.listPhoneNumbers(accountId);
+    const personal = all.filter((number) => number.kind === 'personal');
+    const pending = personal.filter((number) => number.status === 'pending_verification')
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0] ?? null;
+    return {
+      line: all.find((number) => number.kind === 'assistant_line') ?? null,
+      // The number that is the owner's today (verified or active); a pending change doesn't replace it until verified.
+      personal: personal.find((number) => number.status === 'verified' || number.status === 'active') ?? pending,
+      pending,
+    };
   }
 
-  private async current(): Promise<PhoneNumberRecord> {
-    const line = await this.resolve();
-    const fresh = await this.client.find(line.phoneNumber);
-    if (!fresh) {
-      this.resolved = undefined;
-      throw new Error(`${line.phoneNumber} is no longer in this Twilio account`);
-    }
-    return fresh;
+  private async audit(accountId: string, type: string, detail: Record<string, unknown>, userId?: string) {
+    await this.store.recordAudit({ id: createAuditEventId(), accountId, userId, type, detail, occurredAt: this.now() });
   }
 
-  /** The number outbound texts come from. */
-  async assistantLine(): Promise<string> {
-    return (await this.resolve()).phoneNumber;
+  /** Which account a provider webhook is for. Only verified or active lines route calls. */
+  resolveLine(number: string): Promise<PhoneNumber | null> {
+    return this.store.findAssistantLine(number);
   }
 
-  async status(): Promise<{
-    phoneNumber: string | null; assistantLine: string | null; ownerNumber: string | null;
-    found: boolean; connected: boolean; error?: string; forwarding: ForwardingCode[];
-  }> {
+  /** The number this account's texts come from; null until it has a line. */
+  async assistantLine(accountId: string): Promise<string | null> {
+    const { line } = await this.numbers(accountId);
+    return line && (line.status === 'verified' || line.status === 'active') ? line.number : null;
+  }
+
+  /** The owner's verified personal number (their texts are replies; SMS fallback goes here). */
+  async personalNumber(accountId: string): Promise<string | null> {
+    const { personal } = await this.numbers(accountId);
+    return personal && (personal.status === 'verified' || personal.status === 'active') ? personal.number : null;
+  }
+
+  async status(accountId: string): Promise<AccountPhoneStatus> {
+    const { line, personal } = await this.numbers(accountId);
+    if (!line) return { assistantLine: null, personal, connected: false, forwarding: [] };
     try {
-      const number = await this.current();
+      const fresh = await this.client.find(line.number);
+      if (!fresh) return { assistantLine: line, personal, connected: false, forwarding: [], error: `${line.number} is no longer held by the provider` };
       const urls = this.urls();
       return {
-        phoneNumber: number.phoneNumber,
-        assistantLine: number.phoneNumber,
-        ownerNumber: this.ownerNumber ?? null,
-        found: true,
-        connected: number.voiceUrl === urls.voiceUrl && number.smsUrl === urls.smsUrl,
-        forwarding: forwardingCodes(number.phoneNumber),
+        assistantLine: line, personal,
+        connected: fresh.voiceUrl === urls.voiceUrl && fresh.smsUrl === urls.smsUrl,
+        forwarding: forwardingCodes(line.number),
       };
     } catch (error) {
-      return {
-        phoneNumber: null, assistantLine: null, ownerNumber: this.ownerNumber ?? null, found: false, connected: false,
-        error: error instanceof Error ? error.message : 'Couldn’t find your assistant line', forwarding: [],
-      };
+      return { assistantLine: line, personal, connected: false, forwarding: forwardingCodes(line.number), error: error instanceof Error ? error.message : 'Couldn’t reach the phone provider' };
     }
   }
 
-  async connect(): Promise<{ phoneNumber: string; connected: boolean }> {
-    const number = await this.current();
-    await this.client.update(number.sid, this.urls());
-    return { phoneNumber: number.phoneNumber, connected: true };
+  /**
+   * Give the account an assistant line: reuse its own, else claim a free number
+   * from the platform pool (the unique index makes two simultaneous claims of
+   * one number impossible), else buy one if the platform allows it.
+   */
+  async claimAssistantLine(accountId: string, maxLines: number, userId?: string): Promise<PhoneNumber> {
+    const { line } = await this.numbers(accountId);
+    if (line) return line.status === 'active' ? line : this.activateLine(accountId, line);
+    if (maxLines < 1) throw new HttpError(403, 'Your plan doesn’t include an assistant line.', 'entitlement');
+    const assigned = new Set(await this.store.listAssignedLines());
+    const free = (await this.client.list()).filter((number) => !assigned.has(number.phoneNumber));
+    for (const candidate of free) {
+      const claimed = await this.insertLine(accountId, candidate);
+      if (claimed) {
+        await this.audit(accountId, 'phone.line_claimed', { phoneNumberId: claimed.id, source: 'pool' }, userId);
+        return this.activateLine(accountId, claimed);
+      }
+    }
+    if (this.options.allowPurchase && this.client.purchase) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const bought = await this.client.purchase({ country: this.options.country ?? 'US' });
+        const claimed = await this.insertLine(accountId, bought);
+        if (!claimed) continue;
+        await this.audit(accountId, 'phone.line_claimed', { phoneNumberId: claimed.id, source: 'purchase' }, userId);
+        return this.activateLine(accountId, claimed);
+      }
+      throw new HttpError(409, 'That number was just taken. Try again.');
+    }
+    throw new HttpError(409, 'No assistant lines are available right now. Please try again later.', 'no_numbers_available');
+  }
+
+  /** Assign a specific provider number to an account (the legacy migration uses this for the existing line). */
+  async adoptAssistantLine(accountId: string, number: string): Promise<PhoneNumber> {
+    const { line } = await this.numbers(accountId);
+    if (line && line.number === number) return line.status === 'active' ? line : this.activateLine(accountId, line);
+    if (line) throw new HttpError(409, 'This account already has a different assistant line.');
+    const found = await this.client.find(number);
+    if (!found) throw new HttpError(404, `${number} isn’t held by the platform’s provider account`);
+    const claimed = await this.insertLine(accountId, found);
+    if (!claimed) throw new PhoneNumberTakenError(number);
+    await this.audit(accountId, 'phone.line_claimed', { phoneNumberId: claimed.id, source: 'migration' });
+    return this.activateLine(accountId, claimed);
+  }
+
+  private async insertLine(accountId: string, candidate: ProviderNumber): Promise<PhoneNumber | null> {
+    const now = this.now();
+    const record: PhoneNumber = {
+      id: createPhoneNumberId(), accountId, kind: 'assistant_line', number: candidate.phoneNumber,
+      status: 'pending_verification', provider: this.client.provider, providerRef: candidate.ref,
+      verificationStatus: 'unverified', verificationAttempts: 0, createdAt: now, updatedAt: now,
+    };
+    try {
+      await this.store.insertPhoneNumber(record);
+      return record;
+    } catch (error) {
+      if (error instanceof PhoneNumberTakenError) return null;
+      throw error;
+    }
+  }
+
+  /** pending_verification → verified (the provider holds it) → active (it answers for this deployment). */
+  private async activateLine(accountId: string, line: PhoneNumber): Promise<PhoneNumber> {
+    const found = await this.client.find(line.number);
+    if (!found) throw new HttpError(409, `${line.number} is no longer held by the provider`);
+    let current = line;
+    if (current.status === 'pending_verification') {
+      current = (await this.store.updatePhoneNumber(accountId, line.id, {
+        status: 'verified', verificationStatus: 'provider_verified', verifiedAt: this.now(), providerRef: found.ref,
+      }))!;
+    }
+    await this.client.update(found.ref, this.urls());
+    current = (await this.store.updatePhoneNumber(accountId, line.id, { status: 'active' }))!;
+    await this.promotePersonal(accountId);
+    return current;
+  }
+
+  /** Point the account's line at this deployment again (idempotent). */
+  async connect(accountId: string): Promise<{ phoneNumber: string; connected: boolean }> {
+    const { line } = await this.numbers(accountId);
+    if (!line) throw new HttpError(409, 'This account doesn’t have an assistant line yet', 'no_assistant_line');
+    const active = await this.activateLine(accountId, line);
+    return { phoneNumber: active.number, connected: true };
+  }
+
+  /** Text a one-time code to the owner's number from the account's own assistant line. */
+  async startPersonalVerification(accountId: string, rawNumber: string, userId?: string): Promise<PhoneNumber> {
+    const number = rawNumber.replace(/[\s().-]/g, '');
+    if (!E164.test(number)) throw new HttpError(400, 'Enter your number in international format, e.g. +15551234567.');
+    const from = await this.assistantLine(accountId);
+    if (!from) throw new HttpError(409, 'Get your assistant line first; the code is texted from it.', 'no_assistant_line');
+    if (number === from || await this.store.findAssistantLine(number)) throw new HttpError(400, 'That’s an assistant line, not your personal number.');
+    if (!this.messaging) throw new HttpError(503, 'Texting isn’t available right now.');
+    const { personal, pending } = await this.numbers(accountId);
+    if (personal && (personal.status === 'verified' || personal.status === 'active') && personal.number === number) return personal;
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const now = this.now();
+    const expiresAt = new Date(now.getTime() + VERIFICATION_TTL_MS);
+    let record: PhoneNumber;
+    if (pending) {
+      // A resend or a corrected number reuses the pending record; attempts start over with a new code.
+      record = (await this.store.updatePhoneNumber(accountId, pending.id, {
+        number, verificationStatus: 'code_sent', verificationAttempts: 0,
+        verificationCodeHash: codeHash(pending.id, code), verificationExpiresAt: expiresAt,
+      }))!;
+    } else {
+      // Changing a verified number: the old one stays the owner's until the new one is verified.
+      const id = createPhoneNumberId();
+      record = {
+        id, accountId, kind: 'personal', number, status: 'pending_verification', provider: 'carrier',
+        verificationStatus: 'code_sent', verificationAttempts: 0, verificationCodeHash: codeHash(id, code),
+        verificationExpiresAt: expiresAt, createdAt: now, updatedAt: now,
+      };
+      await this.store.insertPhoneNumber(record);
+    }
+    await this.messaging.sendMessage({
+      from, to: number, body: `Your Text Me code is ${code}. It expires in 10 minutes.`,
+      idempotencyKey: `verify:${record.id}:${code}`,
+    });
+    await this.audit(accountId, 'phone.verification_sent', { phoneNumberId: record.id }, userId);
+    return record;
+  }
+
+  async confirmPersonalVerification(accountId: string, code: string, userId?: string): Promise<PhoneNumber> {
+    const pending = (await this.store.listPhoneNumbers(accountId))
+      .filter((number) => number.kind === 'personal' && number.status === 'pending_verification')
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+    if (!pending?.verificationCodeHash) throw new HttpError(409, 'Ask for a new code first.', 'no_pending_verification');
+    if (pending.verificationAttempts >= MAX_VERIFICATION_ATTEMPTS) throw new HttpError(429, 'Too many tries. Ask for a new code.', 'verification_locked');
+    if (!pending.verificationExpiresAt || pending.verificationExpiresAt.getTime() <= this.now().getTime()) {
+      throw new HttpError(410, 'That code expired. Ask for a new one.', 'verification_expired');
+    }
+    if (codeHash(pending.id, String(code).trim()) !== pending.verificationCodeHash) {
+      await this.store.updatePhoneNumber(accountId, pending.id, { verificationAttempts: pending.verificationAttempts + 1 });
+      throw new HttpError(400, 'That code isn’t right.', 'verification_mismatch');
+    }
+    let verified: PhoneNumber;
+    try {
+      verified = (await this.store.updatePhoneNumber(accountId, pending.id, {
+        status: 'verified', verificationStatus: 'verified', verifiedAt: this.now(), verificationCodeHash: undefined, verificationExpiresAt: undefined,
+      }))!;
+    } catch (error) {
+      if (error instanceof PhoneNumberTakenError) throw new HttpError(409, 'That number is already verified on another account.', 'number_taken');
+      throw error;
+    }
+    // The previous personal number (if any) is released only now.
+    for (const other of await this.store.listPhoneNumbers(accountId)) {
+      if (other.kind === 'personal' && other.id !== verified.id) await this.store.updatePhoneNumber(accountId, other.id, { status: 'released' });
+    }
+    await this.audit(accountId, 'phone.verified', { phoneNumberId: verified.id, method: 'sms_code' }, userId);
+    return (await this.promotePersonal(accountId)) ?? verified;
+  }
+
+  /** The legacy migration attests the previously configured owner number (it was set by the operator). */
+  async attestPersonalNumber(accountId: string, number: string): Promise<PhoneNumber> {
+    if (!E164.test(number)) throw new HttpError(400, 'The personal number must be E.164');
+    const { personal } = await this.numbers(accountId);
+    if (personal && personal.number === number && (personal.status === 'verified' || personal.status === 'active')) return personal;
+    const now = this.now();
+    const record: PhoneNumber = {
+      id: createPhoneNumberId(), accountId, kind: 'personal', number, status: 'verified', provider: 'carrier',
+      verificationStatus: 'migrated', verificationAttempts: 0, verifiedAt: now, createdAt: now, updatedAt: now,
+    };
+    await this.store.insertPhoneNumber(record);
+    await this.audit(accountId, 'phone.verified', { phoneNumberId: record.id, method: 'legacy_migration' });
+    return (await this.promotePersonal(accountId)) ?? record;
+  }
+
+  /** A verified personal number becomes active once the account's line is active (forwarding has somewhere to go). */
+  private async promotePersonal(accountId: string): Promise<PhoneNumber | null> {
+    const { line, personal } = await this.numbers(accountId);
+    if (!personal || personal.status !== 'verified' || line?.status !== 'active') return personal;
+    return this.store.updatePhoneNumber(accountId, personal.id, { status: 'active' });
   }
 }

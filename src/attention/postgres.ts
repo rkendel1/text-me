@@ -7,11 +7,11 @@ import type {
   OwnerAttentionStore,
   OwnerSurfaceDeviceStore,
 } from './stores.js';
-import { migrate } from '../repositories/schema-lock.js';
+import { migrate, renameOwnerColumn } from '../repositories/schema-lock.js';
 
 interface AttentionRow {
   id: string;
-  owner_id: string;
+  account_id: string;
   conversation_id: string;
   type: OwnerAttention['type'];
   priority: OwnerAttention['priority'];
@@ -28,7 +28,7 @@ interface AttentionRow {
 
 const toAttention = (row: AttentionRow): OwnerAttention => ({
   id: row.id,
-  ownerId: row.owner_id,
+  accountId: row.account_id,
   conversationId: row.conversation_id,
   type: row.type,
   priority: row.priority,
@@ -51,7 +51,7 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_attention (
           id TEXT PRIMARY KEY,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           type TEXT NOT NULL,
           priority TEXT NOT NULL,
@@ -64,10 +64,11 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
           created_at TIMESTAMPTZ NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL,
           resolved_at TIMESTAMPTZ,
-          UNIQUE (owner_id, dedupe_key)
+          UNIQUE (account_id, dedupe_key)
         )
       `);
-      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_owner ON owner_attention (owner_id, created_at DESC)');
+      await renameOwnerColumn(db, 'owner_attention');
+      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_owner ON owner_attention (account_id, created_at DESC)');
       await db.query('CREATE INDEX IF NOT EXISTS idx_owner_attention_conversation ON owner_attention (conversation_id)');
     });
   }
@@ -75,17 +76,17 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
   async create(attention: OwnerAttention): Promise<OwnerAttention> {
     await this.pool.query(
       `
-        INSERT INTO owner_attention (id, owner_id, conversation_id, type, priority, title, body, actions, status, dedupe_key, metadata, created_at, updated_at)
+        INSERT INTO owner_attention (id, account_id, conversation_id, type, priority, title, body, actions, status, dedupe_key, metadata, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        ON CONFLICT (owner_id, dedupe_key) DO NOTHING
+        ON CONFLICT (account_id, dedupe_key) DO NOTHING
       `,
-      [attention.id, attention.ownerId, attention.conversationId, attention.type, attention.priority, attention.title,
+      [attention.id, attention.accountId, attention.conversationId, attention.type, attention.priority, attention.title,
         attention.body, JSON.stringify(attention.actions), attention.status, attention.dedupeKey, attention.metadata,
         attention.createdAt, attention.updatedAt],
     );
     const result = await this.pool.query<AttentionRow>(
-      'SELECT * FROM owner_attention WHERE owner_id = $1 AND dedupe_key = $2',
-      [attention.ownerId, attention.dedupeKey],
+      'SELECT * FROM owner_attention WHERE account_id = $1 AND dedupe_key = $2',
+      [attention.accountId, attention.dedupeKey],
     );
     return toAttention(result.rows[0]);
   }
@@ -109,17 +110,17 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
     );
   }
 
-  async list(ownerId: string, options: Parameters<OwnerAttentionStore['list']>[1] = {}): Promise<OwnerAttention[]> {
+  async list(accountId: string, options: Parameters<OwnerAttentionStore['list']>[1] = {}): Promise<OwnerAttention[]> {
     const result = await this.pool.query<AttentionRow>(
       `
         SELECT * FROM owner_attention
-         WHERE owner_id = $1
+         WHERE account_id = $1
            AND ($2::text IS NULL OR conversation_id = $2)
            AND (NOT $3 OR status IN ('pending', 'delivered', 'opened'))
          ORDER BY created_at DESC
          LIMIT $4
       `,
-      [ownerId, options.conversationId ?? null, options.open ?? false, options.limit ?? 100],
+      [accountId, options.conversationId ?? null, options.open ?? false, options.limit ?? 100],
     );
     return result.rows.map(toAttention);
   }
@@ -128,7 +129,7 @@ export class PostgresOwnerAttentionStore implements OwnerAttentionStore {
 interface DeliveryRow {
   id: string;
   attention_id: string;
-  owner_id: string;
+  account_id: string;
   surface: NotificationDelivery['surface'];
   device_id: string | null;
   status: NotificationDelivery['status'];
@@ -140,7 +141,7 @@ interface DeliveryRow {
 const toDelivery = (row: DeliveryRow): NotificationDelivery => ({
   id: row.id,
   attentionId: row.attention_id,
-  ownerId: row.owner_id,
+  accountId: row.account_id,
   surface: row.surface,
   status: row.status,
   createdAt: row.created_at,
@@ -158,7 +159,7 @@ export class PostgresNotificationDeliveryStore implements NotificationDeliverySt
         CREATE TABLE IF NOT EXISTS notification_deliveries (
           id TEXT PRIMARY KEY,
           attention_id TEXT NOT NULL REFERENCES owner_attention(id) ON DELETE CASCADE,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           surface TEXT NOT NULL,
           device_id TEXT,
           status TEXT NOT NULL,
@@ -167,6 +168,7 @@ export class PostgresNotificationDeliveryStore implements NotificationDeliverySt
           created_at TIMESTAMPTZ NOT NULL
         )
       `);
+      await renameOwnerColumn(db, 'notification_deliveries');
       await db.query('CREATE INDEX IF NOT EXISTS idx_notification_deliveries_attention ON notification_deliveries (attention_id)');
     });
   }
@@ -174,11 +176,11 @@ export class PostgresNotificationDeliveryStore implements NotificationDeliverySt
   async record(delivery: NotificationDelivery): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO notification_deliveries (id, attention_id, owner_id, surface, device_id, status, error, provider_id, created_at)
+        INSERT INTO notification_deliveries (id, attention_id, account_id, surface, device_id, status, error, provider_id, created_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (id) DO NOTHING
       `,
-      [delivery.id, delivery.attentionId, delivery.ownerId, delivery.surface, delivery.deviceId ?? null, delivery.status,
+      [delivery.id, delivery.attentionId, delivery.accountId, delivery.surface, delivery.deviceId ?? null, delivery.status,
         delivery.error ?? null, delivery.providerId ?? null, delivery.createdAt],
     );
   }
@@ -207,7 +209,7 @@ export class PostgresNotificationDeliveryStore implements NotificationDeliverySt
 
 interface SurfaceDeviceRow {
   id: string;
-  owner_id: string;
+  account_id: string;
   platform: OwnerSurfaceDevice['platform'];
   device_token: string;
   capabilities: OwnerSurfaceDevice['capabilities'];
@@ -216,11 +218,12 @@ interface SurfaceDeviceRow {
   created_at: Date;
   last_seen_at: Date;
   session_id: string | null;
+  user_id: string | null;
 }
 
 const toSurfaceDevice = (row: SurfaceDeviceRow): OwnerSurfaceDevice => ({
   id: row.id,
-  ownerId: row.owner_id,
+  accountId: row.account_id,
   platform: row.platform,
   deviceToken: row.device_token,
   capabilities: row.capabilities,
@@ -229,6 +232,7 @@ const toSurfaceDevice = (row: SurfaceDeviceRow): OwnerSurfaceDevice => ({
   lastSeenAt: row.last_seen_at,
   ...(row.label ? { label: row.label } : {}),
   ...(row.session_id ? { sessionId: row.session_id } : {}),
+  ...(row.user_id ? { userId: row.user_id } : {}),
 });
 
 export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore {
@@ -239,7 +243,7 @@ export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
       await db.query(`
         CREATE TABLE IF NOT EXISTS owner_surface_devices (
           id TEXT PRIMARY KEY,
-          owner_id TEXT NOT NULL,
+          account_id TEXT NOT NULL,
           platform TEXT NOT NULL,
           device_token TEXT NOT NULL,
           capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -247,42 +251,60 @@ export class PostgresOwnerSurfaceDeviceStore implements OwnerSurfaceDeviceStore 
           status TEXT NOT NULL,
           created_at TIMESTAMPTZ NOT NULL,
           last_seen_at TIMESTAMPTZ NOT NULL,
-          UNIQUE (owner_id, device_token)
+          UNIQUE (account_id, device_token)
         )
       `);
+      await renameOwnerColumn(db, 'owner_surface_devices');
       await db.query('ALTER TABLE owner_surface_devices ADD COLUMN IF NOT EXISTS session_id TEXT');
+      await db.query('ALTER TABLE owner_surface_devices ADD COLUMN IF NOT EXISTS user_id TEXT');
+      await db.query('CREATE INDEX IF NOT EXISTS idx_owner_surface_devices_token ON owner_surface_devices (device_token)');
     });
   }
 
   async upsert(device: OwnerSurfaceDevice): Promise<OwnerSurfaceDevice> {
-    const result = await this.pool.query<SurfaceDeviceRow>(
-      `
-        INSERT INTO owner_surface_devices (id, owner_id, platform, device_token, capabilities, label, status, created_at, last_seen_at, session_id)
-        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9)
-        ON CONFLICT (owner_id, device_token) DO UPDATE
-          SET capabilities = EXCLUDED.capabilities,
-              label = COALESCE(EXCLUDED.label, owner_surface_devices.label),
-              status = 'active',
-              last_seen_at = EXCLUDED.last_seen_at,
-              session_id = EXCLUDED.session_id
-        RETURNING *
-      `,
-      [device.id, device.ownerId, device.platform, device.deviceToken, JSON.stringify(device.capabilities),
-        device.label ?? null, device.createdAt, device.lastSeenAt, device.sessionId ?? null],
-    );
-    return toSurfaceDevice(result.rows[0]);
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        "UPDATE owner_surface_devices SET status = 'revoked' WHERE device_token = $1 AND account_id <> $2 AND status = 'active'",
+        [device.deviceToken, device.accountId],
+      );
+      const result = await client.query<SurfaceDeviceRow>(
+        `
+          INSERT INTO owner_surface_devices (id, account_id, platform, device_token, capabilities, label, status, created_at, last_seen_at, session_id, user_id)
+          VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10)
+          ON CONFLICT (account_id, device_token) DO UPDATE
+            SET capabilities = EXCLUDED.capabilities,
+                label = COALESCE(EXCLUDED.label, owner_surface_devices.label),
+                status = 'active',
+                last_seen_at = EXCLUDED.last_seen_at,
+                session_id = EXCLUDED.session_id,
+                user_id = COALESCE(EXCLUDED.user_id, owner_surface_devices.user_id)
+          RETURNING *
+        `,
+        [device.id, device.accountId, device.platform, device.deviceToken, JSON.stringify(device.capabilities),
+          device.label ?? null, device.createdAt, device.lastSeenAt, device.sessionId ?? null, device.userId ?? null],
+      );
+      await client.query('COMMIT');
+      return toSurfaceDevice(result.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async list(ownerId: string): Promise<OwnerSurfaceDevice[]> {
+  async list(accountId: string): Promise<OwnerSurfaceDevice[]> {
     const result = await this.pool.query<SurfaceDeviceRow>(
-      'SELECT * FROM owner_surface_devices WHERE owner_id = $1 ORDER BY created_at ASC',
-      [ownerId],
+      'SELECT * FROM owner_surface_devices WHERE account_id = $1 ORDER BY created_at ASC',
+      [accountId],
     );
     return result.rows.map(toSurfaceDevice);
   }
 
-  async setStatus(id: string, status: OwnerSurfaceDevice['status']): Promise<void> {
-    await this.pool.query('UPDATE owner_surface_devices SET status = $2 WHERE id = $1', [id, status]);
+  async setStatus(accountId: string, id: string, status: OwnerSurfaceDevice['status']): Promise<void> {
+    await this.pool.query('UPDATE owner_surface_devices SET status = $3 WHERE id = $1 AND account_id = $2', [id, accountId, status]);
   }
 }
 

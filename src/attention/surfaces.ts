@@ -1,7 +1,7 @@
 import webpush from 'web-push';
 
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
-import type { MessagingProvider } from '../messaging/provider.js';
+import type { AccountMessaging } from '../messaging/provider.js';
 import type { OwnerChannel } from '../owner/channel.js';
 import { attentionUrl, type NotificationDelivery, type OwnerAttention, type OwnerSurfaceKind } from './model.js';
 import type { NotificationPreferences } from './router.js';
@@ -20,7 +20,7 @@ export type SurfaceResult = Pick<NotificationDelivery, 'status' | 'deviceId' | '
 export interface OwnerSurface {
   readonly kind: OwnerSurfaceKind;
   /** Set up and usable for this owner right now (a registered phone, a paired Mac…). */
-  available(ownerId: string): Promise<boolean>;
+  available(accountId: string): Promise<boolean>;
   deliver(attention: OwnerAttention, preferences?: Pick<NotificationPreferences, 'includeSummary' | 'includeSuggestedResponse'>): Promise<SurfaceResult[]>;
 }
 
@@ -121,19 +121,20 @@ export class WebPushSurface implements OwnerSurface {
     private readonly apns?: ApnsSender,
   ) {}
 
-  private async targets(ownerId: string) {
-    return (await this.devices.list(ownerId)).filter((device) =>
+  private async targets(accountId: string) {
+    // The store is already scoped; the explicit account check keeps a store bug from ever crossing tenants.
+    return (await this.devices.list(accountId)).filter((device) => device.accountId === accountId &&
       device.status === 'active' && device.capabilities.includes('push') &&
       (device.platform === 'web' || (device.platform === 'ios' && Boolean(this.apns))));
   }
 
-  async available(ownerId: string): Promise<boolean> {
-    return (await this.targets(ownerId)).length > 0;
+  async available(accountId: string): Promise<boolean> {
+    return (await this.targets(accountId)).length > 0;
   }
 
   async deliver(attention: OwnerAttention): Promise<SurfaceResult[]> {
     const payload = pushPayload(attention);
-    return Promise.all((await this.targets(attention.ownerId)).map(async (device): Promise<SurfaceResult> => {
+    return Promise.all((await this.targets(attention.accountId)).map(async (device): Promise<SurfaceResult> => {
       if (device.platform === 'ios') return this.deliverNative(attention, device.id, device.deviceToken);
       try {
         const result = await this.sender.send(JSON.parse(device.deviceToken) as PushSubscriptionJSON, payload, {
@@ -145,7 +146,7 @@ export class WebPushSurface implements OwnerSurface {
       } catch (error) {
         const statusCode = (error as { statusCode?: number }).statusCode;
         // The browser unsubscribed or the subscription expired: stop sending to it.
-        if (statusCode === 404 || statusCode === 410) await this.devices.setStatus(device.id, 'expired');
+        if (statusCode === 404 || statusCode === 410) await this.devices.setStatus(attention.accountId, device.id, 'expired');
         return { status: 'failed', deviceId: device.id, error: statusCode ? `push service ${statusCode}` : (error as Error).message };
       }
     }));
@@ -156,7 +157,7 @@ export class WebPushSurface implements OwnerSurface {
       const result = await this.apns!.send(token, apnsMessage(attention));
       return { status: 'sent', deviceId, providerId: result.apnsId ?? '200', surface: 'apns' };
     } catch (error) {
-      if (error instanceof ApnsError && error.deviceGone) await this.devices.setStatus(deviceId, 'expired');
+      if (error instanceof ApnsError && error.deviceGone) await this.devices.setStatus(attention.accountId, deviceId, 'expired');
       return { status: 'failed', deviceId, error: (error as Error).message, surface: 'apns' };
     }
   }
@@ -169,12 +170,12 @@ export class MacMessagesSurface implements OwnerSurface {
   readonly kind = 'mac_messages' as const;
 
   constructor(
-    private readonly channel: OwnerChannel & { isAvailable?(ownerId: string): Promise<boolean> },
+    private readonly channel: OwnerChannel & { isAvailable?(accountId: string): Promise<boolean> },
     private readonly repository: ConversationRepository,
   ) {}
 
-  async available(ownerId: string): Promise<boolean> {
-    return this.channel.isAvailable ? this.channel.isAvailable(ownerId) : true;
+  async available(accountId: string): Promise<boolean> {
+    return this.channel.isAvailable ? this.channel.isAvailable(accountId) : true;
   }
 
   async deliver(attention: OwnerAttention, preferences?: Parameters<OwnerSurface['deliver']>[1]): Promise<SurfaceResult[]> {
@@ -184,7 +185,7 @@ export class MacMessagesSurface implements OwnerSurface {
       messageId, body, source: 'macos_messages', attentionId: attention.id,
     }, new Date());
     try {
-      const delivery = await this.channel.sendMessage({ ownerId: attention.ownerId, conversationId: attention.conversationId, messageId, body });
+      const delivery = await this.channel.sendMessage({ accountId: attention.accountId, conversationId: attention.conversationId, messageId, body });
       await this.repository.appendEvent(attention.conversationId, 'owner.delivery.requested', {
         messageId, deliveryId: delivery.deliveryId, source: 'macos_messages', attentionId: attention.id,
       }, new Date());
@@ -200,20 +201,28 @@ export class MacMessagesSurface implements OwnerSurface {
 
 // ---------------------------------------------------------------- Owner SMS (fallback)
 
-/** Texts the owner's phone number: the fallback when no other surface can reach them. */
+/**
+ * Texts the account's own verified personal number, from the account's own
+ * assistant line: the fallback when no other surface can reach the owner.
+ */
 export class OwnerSmsSurface implements OwnerSurface {
   readonly kind = 'owner_sms' as const;
 
-  constructor(private readonly messaging: MessagingProvider | undefined, private readonly ownerPhone: string | undefined) {}
+  constructor(
+    private readonly messaging: AccountMessaging | undefined,
+    private readonly personalNumber: (accountId: string) => Promise<string | null>,
+  ) {}
 
-  async available(): Promise<boolean> {
-    return Boolean(this.messaging && this.ownerPhone);
+  async available(accountId: string): Promise<boolean> {
+    return Boolean(this.messaging && await this.personalNumber(accountId));
   }
 
   async deliver(attention: OwnerAttention, preferences?: Parameters<OwnerSurface['deliver']>[1]): Promise<SurfaceResult[]> {
     try {
+      const to = await this.personalNumber(attention.accountId);
+      if (!to) return [{ status: 'failed', error: 'no verified number for this account' }];
       const body = ownerTextMessage(attention, preferences);
-      const result = await this.messaging!.sendMessage({ to: this.ownerPhone!, body, idempotencyKey: `attention:${attention.id}:sms` });
+      const result = await this.messaging!.send(attention.accountId, { to, body, idempotencyKey: `attention:${attention.id}:sms` });
       return [{ status: 'sent', providerId: result.providerMessageId }];
     } catch (error) {
       return [{ status: 'failed', error: error instanceof Error ? error.message : 'unknown' }];

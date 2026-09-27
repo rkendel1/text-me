@@ -4,7 +4,7 @@ import type { ConversationRepository } from '../repositories/conversation-reposi
 import type { ConversationModel, ConversationModelContext, ConversationTurn } from '../conversation/model.js';
 import type { AudioInput, SpeechProvider } from '../speech/provider.js';
 import type { VoiceProvider } from '../voice/provider.js';
-import type { MessagingProvider } from '../messaging/provider.js';
+import type { AccountMessaging } from '../messaging/provider.js';
 import type { RuntimeControlService } from '../runtime/service.js';
 
 const turnEvents = new Set(['speech.transcript', 'ai.response']);
@@ -15,7 +15,7 @@ export class ConversationEngine {
     private readonly speech: SpeechProvider,
     private readonly model: ConversationModel,
     private readonly voice: VoiceProvider,
-    private readonly messaging?: MessagingProvider,
+    private readonly messaging?: AccountMessaging,
     private readonly runtime?: RuntimeControlService,
     private readonly options: {
       /** Owner instructions and product tools for this conversation. */
@@ -92,7 +92,7 @@ export class ConversationEngine {
       }
 
       const idempotencyKey = `conversation:${conversationId}:sms:turn:${input.callbackId}`;
-      const result = await this.messaging.sendMessage({
+      const result = await this.messaging.send(currentConversation.accountId, {
         to: consent.payload.phoneNumber,
         body: text,
         idempotencyKey,
@@ -184,7 +184,7 @@ export class ConversationEngine {
     history.push({ speaker: 'owner', text: body, sequence: history.length + 1 });
     const text = await this.model.respond(history, await this.options.contextFor?.(conversationId));
     try {
-      const result = await this.messaging.sendMessage({
+      const result = await this.messaging.send(current.accountId, {
         to: consent.payload.phoneNumber, body: text, idempotencyKey: `${idempotencyKey}:sms`,
       });
       await this.repository.appendEvent(conversationId, 'assistant.message', {
@@ -222,7 +222,7 @@ export class ConversationEngine {
     const consent = [...conversation.events].reverse().find((event) => event.type === 'sms.consent.granted');
     if (typeof consent?.payload.phoneNumber !== 'string') return conversation;
     const text = await this.model.respond(this.history(conversation), await this.options.contextFor?.(conversationId));
-    const result = await this.messaging.sendMessage({ to: consent.payload.phoneNumber, body: text, idempotencyKey });
+    const result = await this.messaging.send(conversation.accountId, { to: consent.payload.phoneNumber, body: text, idempotencyKey });
     await this.repository.appendEvent(conversationId, 'assistant.message', {
       text, speaker: 'assistant', channel: 'sms', source: 'assistant', idempotencyKey,
       providerMessageId: result.providerMessageId, inReplyTo: providerMessageId,

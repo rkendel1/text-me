@@ -1,7 +1,7 @@
 import type { OwnerChannelType } from '../domain/conversation.js';
 
 export interface OwnerMessageDeliveryInput {
-  ownerId: string;
+  accountId: string;
   conversationId: string;
   messageId: string;
   body: string;
@@ -17,5 +17,5 @@ export interface OwnerChannel {
 }
 
 export interface OwnerChannelSettings {
-  isChannelEnabled(ownerId: string, channel: OwnerChannelType): boolean | Promise<boolean>;
+  isChannelEnabled(accountId: string, channel: OwnerChannelType): boolean | Promise<boolean>;
 }

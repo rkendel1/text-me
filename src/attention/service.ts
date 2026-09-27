@@ -11,7 +11,7 @@ import type { NotificationPreferences, NotificationRouter } from './router.js';
 import type { NotificationDeliveryStore, OwnerAttentionStore } from './stores.js';
 
 export interface RaiseAttentionInput {
-  ownerId: string;
+  accountId: string;
   conversationId: string;
   type: OwnerAttentionType;
   title: string;
@@ -35,15 +35,16 @@ export class OwnerAttentionService {
     private readonly store: OwnerAttentionStore,
     private readonly deliveries: NotificationDeliveryStore,
     private readonly router: NotificationRouter,
-    private readonly preferences: (ownerId: string) => Promise<NotificationPreferences>,
+    private readonly preferences: (accountId: string) => Promise<NotificationPreferences>,
     private readonly publish: (attention: OwnerAttention) => Promise<void> = async () => undefined,
   ) {}
 
   async raise(input: RaiseAttentionInput): Promise<OwnerAttention> {
+    if (!input.accountId) throw new Error('Attention needs the owning account');
     const now = new Date();
     const candidate: OwnerAttention = {
       id: createAttentionId(),
-      ownerId: input.ownerId,
+      accountId: input.accountId,
       conversationId: input.conversationId,
       type: input.type,
       priority: input.priority ?? (INTERRUPTING.includes(input.type) ? 'interrupt' : 'passive'),
@@ -60,10 +61,10 @@ export class OwnerAttentionService {
     if (attention.id !== candidate.id) return attention; // Already raised; don't notify twice.
 
     try {
-      const routed = await this.router.route(attention, await this.preferences(attention.ownerId));
+      const routed = await this.router.route(attention, await this.preferences(attention.accountId));
       for (const delivery of routed) {
         await this.deliveries.record({
-          id: createDeliveryId(), attentionId: attention.id, ownerId: attention.ownerId, createdAt: new Date(), ...delivery,
+          id: createDeliveryId(), attentionId: attention.id, accountId: attention.accountId, createdAt: new Date(), ...delivery,
         });
       }
       if (routed.some((delivery) => delivery.status === 'sent')) {
@@ -77,13 +78,13 @@ export class OwnerAttentionService {
     return attention;
   }
 
-  async get(id: string, ownerId: string): Promise<OwnerAttention | null> {
+  async get(id: string, accountId: string): Promise<OwnerAttention | null> {
     const attention = await this.store.get(id);
-    return attention && attention.ownerId === ownerId ? attention : null;
+    return attention && attention.accountId === accountId ? attention : null;
   }
 
-  list(ownerId: string, options?: { conversationId?: string; open?: boolean; limit?: number }) {
-    return this.store.list(ownerId, options);
+  list(accountId: string, options?: { conversationId?: string; open?: boolean; limit?: number }) {
+    return this.store.list(accountId, options);
   }
 
   deliveriesFor(attentionId: string) {
@@ -114,8 +115,8 @@ export class OwnerAttentionService {
   }
 
   /** The condition that raised it no longer holds (call ended, owner answered…). */
-  async resolve(ownerId: string, conversationId: string, types: OwnerAttentionType[], reason: string): Promise<void> {
-    for (const attention of await this.store.list(ownerId, { conversationId, open: true })) {
+  async resolve(accountId: string, conversationId: string, types: OwnerAttentionType[], reason: string): Promise<void> {
+    for (const attention of await this.store.list(accountId, { conversationId, open: true })) {
       if (types.includes(attention.type) && OPEN.includes(attention.status)) {
         await this.store.update(attention.id, { status: 'resolved', resolvedAt: new Date(), metadata: { resolvedBecause: reason } });
       }
