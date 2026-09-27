@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CalendarCapability, type CalendarProvider } from '../src/integrations/calendar.js';
+import {
+  CalendarCapability,
+  CalendarSelectionService,
+  InMemoryCalendarSelectionStore,
+  type CalendarProvider,
+} from '../src/integrations/calendar.js';
 import { IdentityService, InMemoryIdentityStore } from '../src/integrations/identity.js';
 import { EntitlementService, type TransactionVerifier } from '../src/integrations/payments.js';
 
@@ -37,6 +42,35 @@ test('calendar writes fail closed when provider authorization is not writable', 
   assert.equal(writes, 0);
 });
 
+test('calendar selection is durable, explicit, and chooses an unambiguous write target', async () => {
+  const selections = new CalendarSelectionService(new InMemoryCalendarSelectionStore(), () => 123);
+  const saved = await selections.save('usr_1', 'google', [
+    { id: 'personal', name: 'Personal', readOnly: false },
+    { id: 'birthdays', name: 'Birthdays', readOnly: true },
+  ], ['personal', 'birthdays']);
+  assert.deepEqual(saved.calendarIds, ['personal', 'birthdays']);
+  assert.equal(saved.writeCalendarId, 'personal');
+  assert.equal((await selections.get('usr_1', 'google'))?.updatedAt.getTime(), 123);
+  assert.equal(await selections.ready('usr_1', 'google'), true);
+});
+
+test('calendar authorization exposes a native recovery action', async () => {
+  const provider: CalendarProvider = {
+    name: 'apple',
+    authorization: async () => 'unauthorized',
+    listCalendars: async () => [],
+    getAvailability: async () => [],
+    listEvents: async () => [],
+    createEvent: async (event) => ({ ...event, id: 'event_1' }),
+    updateEvent: async (event) => event,
+    deleteEvent: async () => undefined,
+  };
+  assert.deepEqual(await new CalendarCapability(provider).authorizationStatus(), {
+    state: 'unauthorized',
+    action: 'open_settings',
+  });
+});
+
 test('entitlements are granted only from verified transactions', async () => {
   const verifier: TransactionVerifier = {
     async verify(transaction) {
@@ -55,4 +89,24 @@ test('entitlements are granted only from verified transactions', async () => {
   await service.applyTransaction({ signedTransaction: 'valid' });
   assert.equal(service.hasActiveEntitlement('usr_1', 'pro', 2), true);
   assert.equal(service.hasActiveEntitlement('usr_1', 'pro', 10_000), false);
+});
+
+test('verified billing retry and grace states retain access until authority changes them', async () => {
+  const verifier: TransactionVerifier = {
+    async verify(transaction) {
+      return {
+        transactionId: String(transaction),
+        userId: 'usr_1',
+        productId: 'pro',
+        state: transaction === 'grace' ? 'grace_period' : 'billing_retry',
+        verifiedAt: new Date(1),
+        expiresAt: new Date(2),
+      };
+    },
+  };
+  const service = new EntitlementService(verifier);
+  await service.applyTransaction('grace');
+  assert.equal(service.hasActiveEntitlement('usr_1', 'pro', 10_000), true);
+  await service.applyTransaction('retry');
+  assert.equal(service.hasActiveEntitlement('usr_1', 'pro', 10_000), true);
 });
