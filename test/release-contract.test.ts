@@ -3,6 +3,7 @@ import { createPublicKey, generateKeyPairSync, verify } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { createServer as createHttp2Server, type Http2Server, type IncomingHttpHeaders } from 'node:http2';
 import type { AddressInfo } from 'node:net';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import request from 'supertest';
@@ -415,6 +416,12 @@ test('the deployed app shell and static assets return through Express', async (t
   assert.equal((await request(p.app).get('/health/ready')).status, 503);
   assert.equal((await request(p.app).get('/sw.js')).status, 200);
   assert.equal((await request(p.app).get('/manifest.webmanifest')).status, 200);
+});
+
+test('auth forms return to the app root after signing in from a deep link', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes("location.replace('/');"));
+  assert.ok(!html.includes('location.replace(location.pathname'));
 });
 
 test('keep your real number: the account’s line comes from the platform pool, and forwarding is proven by a forwarded call', async () => {

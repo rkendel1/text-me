@@ -1067,7 +1067,7 @@ $('#signinForm').onsubmit = async (event) => {
     });
     $('#passwordInput').value = '';
     // A fresh page for the account that just signed in: no state from anyone before.
-    location.replace(location.pathname === '/' ? '/' : location.href);
+    location.replace('/');
   } catch (error) {
     $('#signinError').textContent = error.message;
     const form = $('#signinForm'); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake');
