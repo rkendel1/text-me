@@ -130,6 +130,7 @@ export function buildServerWithPool(
     messagingProvider,
     tenancyStore,
     twilioAuthToken: config.twilioAuthToken,
+    billingBypassAccountId: config.billingBypassAccountId,
     stripe: config.stripe ? { ...config.stripe, baseUrl: config.publicBaseUrl } : undefined,
     ownerDeviceService,
     ownerConfigurationService,

@@ -133,6 +133,8 @@ export interface AppOptions {
   healthCheck?: () => Promise<void>;
   /** Shown by /health: which build is running. */
   release?: { environment: string; commit?: string };
+  /** One explicit temporary test account that may activate without Stripe. */
+  billingBypassAccountId?: string;
   stripe?: StripeBilling;
 }
 
@@ -1399,15 +1401,20 @@ export function createApp(options: AppOptions): express.Express {
 
   app.post('/billing/checkout', billingLimit, principal, async (request, response, next) => {
     try {
-      if (!options.stripe) throw new HttpError(503, 'Billing is not configured.', 'billing_unavailable');
       const session = currentSession(request)!;
-      const user = await tenancy.getUser(session.userId);
-      if (!user) throw new HttpError(401, 'Authentication required', 'unauthenticated');
       const subscription = await tenancy.getSubscription(session.accountId);
       if (subscription?.status === 'active') {
         response.status(409).json({ error: 'This account already has an active subscription.', code: 'already_subscribed' });
         return;
       }
+      if (options.billingBypassAccountId === session.accountId) {
+        await tenancyStore.updateSubscription(session.accountId, { status: 'active' });
+        response.json({ url: `${options.publicBaseUrl ?? 'http://localhost:3000'}/?checkout=bypassed`, status: 'active' });
+        return;
+      }
+      if (!options.stripe) throw new HttpError(503, 'Billing is not configured.', 'billing_unavailable');
+      const user = await tenancy.getUser(session.userId);
+      if (!user) throw new HttpError(401, 'Authentication required', 'unauthenticated');
       const result = await checkout(options.stripe, { accountId: session.accountId, email: user.email });
       await tenancyStore.updateSubscription(session.accountId, {
         stripeCustomerId: result.customer,

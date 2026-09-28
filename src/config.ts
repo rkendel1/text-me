@@ -46,6 +46,8 @@ export interface AppConfig {
   allowNumberPurchase: boolean;
   /** Present when calls should be answered by the AI Gateway realtime voice agent. */
   realtimeVoice?: RealtimeVoiceConfig;
+  /** Temporary test account that may activate without contacting Stripe. */
+  billingBypassAccountId?: string;
   stripe?: { secretKey: string; productId: string; publishableKey?: string };
 }
 
@@ -172,6 +174,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     realtimeVoice: resolveRealtimeVoice(env),
+    billingBypassAccountId: env.BILLING_BYPASS_ACCOUNT_ID?.trim() || undefined,
     stripe: env.STRIPE_SECRET_KEY && env.STRIPE_PRODUCT_ID ? {
       secretKey: env.STRIPE_SECRET_KEY.trim(), productId: env.STRIPE_PRODUCT_ID.trim(),
       publishableKey: env.STRIPE_PUBLISHABLE_KEY?.trim(),

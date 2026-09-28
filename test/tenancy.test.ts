@@ -107,6 +107,26 @@ test('a verified Neon social identity creates or resumes one app account and ses
   assert.equal(resumed.body.activeAccountId, me.body.activeAccountId, 'the provider callback never creates duplicate accounts');
 });
 
+test('account-scoped billing bypass activates only the named test account without contacting Stripe', async () => {
+  const tenancyStore = new InMemoryTenancyStore();
+  const options = {
+    repository: new InMemoryConversationRepository(), tenancyStore,
+    messagingProvider: new FakeMessagingProvider(),
+    billingBypassAccountId: undefined as string | undefined,
+    publicBaseUrl: 'https://text-me.example.test',
+  };
+  const app = createApp(options);
+  const created = await signUp(app, { name: 'Test Owner' });
+  const denied = await request(app).post('/billing/checkout').set(created.headers).send({});
+  assert.equal(denied.status, 503, 'other accounts still require Stripe');
+  options.billingBypassAccountId = created.accountId;
+  const checkout = await request(app).post('/billing/checkout').set(created.headers).send({});
+  assert.equal(checkout.status, 200, JSON.stringify(checkout.body));
+  assert.deepEqual(checkout.body, { url: 'https://text-me.example.test/?checkout=bypassed', status: 'active' });
+  const me = await request(app).get('/me').set(created.headers);
+  assert.equal(me.body.account.subscription, 'active');
+});
+
 test('onboarding is a state machine derived from durable facts, and the UI can show what is left', async () => {
   const { app, messaging } = saas();
   const { headers } = await signUp(app, { name: 'Sam' });
