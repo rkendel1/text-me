@@ -427,6 +427,18 @@ test('auth forms return to the app root after signing in from a deep link', asyn
   assert.ok(!html.includes('location.replace(location.pathname'));
 });
 
+test('authenticated surfaces dismiss the landing and sign-in overlays', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const transition = html.slice(html.indexOf('function showAuthenticatedSurface('), html.indexOf('/** Welcome:', html.indexOf('function showAuthenticatedSurface(')));
+  assert.match(transition, /\$\('#landing'\)\.hidden = true/);
+  assert.match(transition, /\$\('#signin'\)\.hidden = true/);
+  assert.match(transition, /\$\('#app'\)\.hidden = surface !== 'app'/);
+  assert.match(transition, /\$\('#onboard'\)\.hidden = surface !== 'onboard'/);
+  assert.match(html.slice(html.indexOf('async function showSetup()'), html.indexOf('async function nextSetup()')), /showAuthenticatedSurface\('onboard'\)/);
+  assert.match(html.slice(html.indexOf('async function showAccountPicker()'), html.indexOf('/\* ---------------- Deep links')), /showAuthenticatedSurface\('onboard'\)/);
+  assert.match(html.slice(html.indexOf('async function bootControlPlane()')), /showAuthenticatedSurface\('app'\)/);
+});
+
 test('keep your real number: the account’s line comes from the platform pool, and forwarding is proven by a forwarded call', async () => {
   const { FakePhoneNumberClient, forwardingCodes } = await import('../src/telephony/phone-number.js');
   assert.deepEqual(forwardingCodes('+15550000000').map((code) => [code.enable, code.disable]), [['**004*+15550000000#', '##004#'], ['*715550000000', '*73']]);

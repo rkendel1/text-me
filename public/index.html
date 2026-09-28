@@ -2111,9 +2111,17 @@ async function refreshMe() {
   state.me = await api('/me');
   return state.me;
 }
+/** Public auth screens sit above the app, so every authenticated route must dismiss them. */
+function showAuthenticatedSurface(surface) {
+  $('#landing').hidden = true;
+  $('#signin').hidden = true;
+  $('#app').hidden = surface !== 'app';
+  $('#onboard').hidden = surface !== 'onboard';
+}
 /** Welcome: what's done and what's left. Nobody sees an empty control plane before it's ready. */
 async function showSetup() {
-  const node = $('#onboard'); node.hidden = false; $('#app').hidden = true;
+  showAuthenticatedSurface('onboard');
+  const node = $('#onboard');
   const me = state.me || await refreshMe();
   const onboarding = me.onboarding;
   if (me.account?.subscription !== 'active') {
@@ -2242,7 +2250,8 @@ async function setupStep(step) {
 /** Users can belong to several accounts; the session operates on one at a time. */
 async function showAccountPicker() {
   const me = state.me || await refreshMe();
-  const node = $('#onboard'); node.hidden = false;
+  showAuthenticatedSurface('onboard');
+  const node = $('#onboard');
   node.innerHTML = `<div class="inner">
     <h1 style="text-align:left;font-size:28px">Choose an account</h1>
     <p class="lede" style="text-align:left">Each account has its own line, devices and conversations.</p>
@@ -2431,7 +2440,7 @@ async function boot() {
   bootControlPlane();
 }
 async function bootControlPlane() {
-  $('#signin').hidden = true; $('#app').hidden = false;
+  showAuthenticatedSurface('app');
   go(state.tab);
   await loadList();
   api('/owner/configuration').then((config) => { state.config = config; if (state.tab === 'settings') renderSettings(); }).catch(() => {});
