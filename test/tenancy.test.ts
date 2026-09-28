@@ -230,10 +230,17 @@ test('the owner can test the real assistant by having its line call their verifi
   assert.equal(numbers.testCalls[0].url,
     'https://text-me.vercel.app/webhooks/twilio/voice/test?assistantLine=%2B15550000000');
 
-  const answered = await request(app)
+  const prompt = await request(app)
     .post('/webhooks/twilio/voice/test?assistantLine=%2B15550000000')
     .type('form')
     .send({ CallSid: started.body.id, From: owner.line, To: owner.personal, CallStatus: 'in-progress' });
+  assert.equal(prompt.status, 200, prompt.text);
+  assert.match(prompt.text, /Press 1 to talk to your assistant/);
+
+  const answered = await request(app)
+    .post('/webhooks/twilio/voice/test?assistantLine=%2B15550000000&confirmed=1')
+    .type('form')
+    .send({ CallSid: started.body.id, From: owner.line, To: owner.personal, CallStatus: 'in-progress', Digits: '1' });
   assert.equal(answered.status, 200, answered.text);
   assert.match(answered.type, /xml/);
   const conversations = await request(app).get('/conversations').set(owner.headers);

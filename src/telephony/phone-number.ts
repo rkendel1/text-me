@@ -87,9 +87,9 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
       statusCallback: options.statusCallback,
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['completed'],
-      // Test calls are meant for the owner to answer and talk to. Waiting for
-      // AMD prevents iPhone Live Voicemail from impersonating the caller.
-      ...(options.humanOnly ? { machineDetection: 'Enable', machineDetectionTimeout: 12 } : {}),
+      // Human confirmation happens in the test-call TwiML. Twilio's answering-
+      // machine detection can misclassify a real iPhone pickup and hang up on
+      // the owner before the assistant ever gets a chance to speak.
     });
     return { id: call.sid };
   }

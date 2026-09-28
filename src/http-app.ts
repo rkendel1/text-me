@@ -735,9 +735,25 @@ export function createApp(options: AppOptions): express.Express {
     // signed query parameter as the account line so the rest is the exact inbound call path.
     return { ...call, callerPhone: call.calledNumber ?? call.callerPhone, calledNumber: assistantLine };
   }, (request) => {
-    const answeredBy = typeof request.body?.AnsweredBy === 'string' ? request.body.AnsweredBy.toLowerCase() : '';
-    if (!answeredBy.startsWith('machine') && answeredBy !== 'fax') return undefined;
+    const assistantLine = typeof request.query.assistantLine === 'string' ? request.query.assistantLine : '';
+    if (!assistantLine) throw new HttpError(400, 'assistantLine is required');
+    const confirmed = request.query.confirmed === '1';
+    const digit = typeof request.body?.Digits === 'string' ? request.body.Digits : '';
+    if (confirmed && digit === '1') return undefined;
+
     const twiml = new twilio.twiml.VoiceResponse();
+    if (!confirmed) {
+      const gather = twiml.gather({
+        input: ['dtmf'],
+        numDigits: 1,
+        timeout: 10,
+        method: 'POST',
+        action: `/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(assistantLine)}&confirmed=1`,
+      });
+      gather.say('Press 1 to talk to your assistant.');
+    }
+    // Live Voicemail cannot press a key, and an unexpected key must not start a
+    // conversation that would make a recording look like the real caller.
     twiml.hangup();
     return { body: twiml.toString(), contentType: 'text/xml; charset=utf-8' };
   });

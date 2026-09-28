@@ -137,18 +137,28 @@ test('a text-model outage ends a live call cleanly and alerts the owner instead 
   assert.ok(audit.body.timeline.some((event: { type: string }) => event.type === 'assistant.failed'));
 });
 
-test('an outbound test call never lets voicemail impersonate the caller', async () => {
+test('an outbound test call requires keypad confirmation before starting the assistant', async () => {
   const { app, auth, owner } = await ownedApp({
     providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
   });
-  const response = await request(app)
+  const prompt = await request(app)
     .post(`/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(owner.line)}`)
     .type('form')
-    .send({ CallSid: 'CA-VOICEMAIL', From: owner.line, To: '+15555550199', AnsweredBy: 'machine_start' });
+    .send({ CallSid: 'CA-TEST', From: owner.line, To: '+15555550199' });
 
-  assert.equal(response.status, 200);
-  assert.match(response.text, /<Hangup/);
+  assert.equal(prompt.status, 200);
+  assert.match(prompt.text, /<Gather/);
+  assert.match(prompt.text, /Press 1 to talk to your assistant/);
+  assert.match(prompt.text, /confirmed=1/);
   assert.deepEqual((await request(app).get('/conversations').set(auth)).body, []);
+
+  const confirmed = await request(app)
+    .post(`/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(owner.line)}&confirmed=1`)
+    .type('form')
+    .send({ CallSid: 'CA-TEST', From: owner.line, To: '+15555550199', Digits: '1' });
+  assert.equal(confirmed.status, 200, confirmed.text);
+  assert.match(confirmed.text, /<Gather/);
+  assert.equal((await request(app).get('/conversations').set(auth)).body.length, 1);
 });
 
 test('a call to a number no account owns is not answered and creates nothing', async () => {
