@@ -12,8 +12,12 @@ npm run ios
 
 `npm run ios` is the local Xcode 27-compatible runner. It finds or boots an
 iPhone simulator, keeps Metro on port 8081, builds with Xcode, and installs the
-app with `simctl`. Expo SDK 54's built-in `i` command still looks for the old
+app with `simctl`. It then selects that iPhone in Xcode 27 Device Hub so the
+native screen is visible. Expo SDK 54's built-in `i` command still looks for the old
 `Simulator.app` location, so do not use that command on this Xcode version.
+
+Do not open `http://127.0.0.1:8081` to use the native app. That address belongs
+to Metro's development server; the iOS app is the window shown in Device Hub.
 
 Remote push needs a development or release build; do not use Expo Go for push testing. To point a development build at the local server:
 

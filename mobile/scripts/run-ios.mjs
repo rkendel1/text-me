@@ -36,6 +36,19 @@ function simulator() {
   return selected;
 }
 
+function showSimulator(device) {
+  // Xcode 27 replaced Simulator.app with Device Hub. Selecting the booted device
+  // by URL opens its live, interactive screen instead of a headless simulator.
+  const result = spawnSync('open', [`devices://manage/select?id=${encodeURIComponent(device.udid)}`], {
+    cwd: projectRoot,
+    env: process.env,
+    stdio: 'ignore',
+  });
+  if (result.status !== 0) {
+    console.warn('Could not foreground Device Hub. Open Xcode → Open Developer Tool → Device Hub.');
+  }
+}
+
 function podEnvironment() {
   const env = { ...process.env };
   try {
@@ -60,6 +73,7 @@ async function metroIsRunning() {
 
 const device = simulator();
 console.log(`Using ${device.name} (${device.udid})`);
+showSimulator(device);
 
 if (!existsSync(`${projectRoot}/ios/TextMe.xcworkspace`)) {
   run('npx', ['expo', 'prebuild', '--platform', 'ios']);
@@ -95,7 +109,9 @@ const app = 'ios/build/Build/Products/Debug-iphonesimulator/TextMe.app';
 run('xcrun', ['simctl', 'install', device.udid, app]);
 spawnSync('xcrun', ['simctl', 'terminate', device.udid, 'app.textme.owner'], { stdio: 'ignore' });
 run('xcrun', ['simctl', 'launch', device.udid, 'app.textme.owner']);
-console.log('Text Me is running. Press Ctrl+C to stop Metro.');
+showSimulator(device);
+console.log(`Text Me is running natively on ${device.name} in Device Hub.`);
+console.log('The page at http://127.0.0.1:8081 is Metro, not the native app. Press Ctrl+C to stop Metro.');
 
 if (metro) {
   const stop = () => metro.kill('SIGINT');
