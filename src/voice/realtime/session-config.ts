@@ -107,6 +107,8 @@ export function buildInstructions(
       ? `Find out ${identity.join(' and ')}, and record it with note_caller.`
       : 'Don\'t ask for the caller\'s name or reason unless they offer it; if they do, record it with note_caller.',
     'If you can handle the request yourself, do it. If the caller refers to an earlier conversation, use lookup_conversation.',
+    `For appointment requests, always help: collect the purpose, preferred dates and times, and the caller's name and best callback number. ` +
+      `Then check with ${owner} before confirming. Never refuse an appointment request just because you cannot access a calendar.`,
     `When ${owner} needs to decide, say "Let me check with ${owner}" and call ask_owner. ` +
       'Never leave the caller waiting in silence; when the answer comes, relay it naturally.',
     escalationGuidance(runtime, owner),

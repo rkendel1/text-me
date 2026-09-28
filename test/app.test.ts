@@ -106,7 +106,7 @@ test('HTTPS voice turns keep a spoken assistant call working without a WebSocket
   ]);
 });
 
-test('a text-model outage ends a live call cleanly and alerts the owner instead of returning a Twilio application error', async () => {
+test('a text-model outage keeps appointment intake going instead of ending the call', async () => {
   const { app, auth, owner } = await ownedApp({
     providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
     conversationModel: {
@@ -123,18 +123,19 @@ test('a text-model outage ends a live call cleanly and alerts the owner instead 
   const turn = await request(app)
     .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=1`)
     .type('form')
-    .send({ CallSid: 'CA-MODEL-DOWN', SpeechResult: 'Please ask Randy to call me.' });
+    .send({ CallSid: 'CA-MODEL-DOWN', SpeechResult: 'I need to make an appointment.' });
 
   assert.equal(turn.status, 200, turn.text);
   assert.match(turn.headers['content-type'], /text\/xml/);
-  assert.match(turn.text, /having trouble helping right now/);
-  assert.match(turn.text, /let Randy know you called/);
-  assert.match(turn.text, /<Hangup/);
+  assert.match(turn.text, /what is the appointment for/i);
+  assert.match(turn.text, /what day and time/i);
+  assert.match(turn.text, /turn=2/);
+  assert.doesNotMatch(turn.text, /<Hangup/);
 
   const details = await request(app).get(`/conversations/${conversation.id}`).set(auth);
-  assert.equal(details.body.messages.at(-1).body, 'Please ask Randy to call me.');
+  assert.equal(details.body.messages.at(-1).body, 'Absolutely. What is the appointment for, and what day and time work best for you?');
   const audit = await request(app).get(`/conversations/${conversation.id}/audit`).set(auth);
-  assert.ok(audit.body.timeline.some((event: { type: string }) => event.type === 'assistant.failed'));
+  assert.ok(audit.body.timeline.some((event: { type: string }) => event.type === 'assistant.degraded'));
 });
 
 test('an outbound test call requires keypad confirmation before starting the assistant', async () => {

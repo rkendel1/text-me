@@ -6,6 +6,7 @@ import type { AudioInput, SpeechProvider } from '../speech/provider.js';
 import type { VoiceProvider } from '../voice/provider.js';
 import type { AccountMessaging } from '../messaging/provider.js';
 import type { RuntimeControlService } from '../runtime/service.js';
+import { degradedAssistantReply } from '../conversation/degraded-assistant.js';
 
 const turnEvents = new Set(['speech.transcript', 'ai.response']);
 
@@ -80,23 +81,23 @@ export class ConversationEngine {
     );
     await this.runtime?.noteAiStarted(conversationId, input.callbackId);
     let text: string;
+    let context: ConversationModelContext = {};
     try {
-      text = await this.model.respond(history, await this.options.contextFor?.(conversationId, 'voice'));
+      context = await this.options.contextFor?.(conversationId, 'voice') ?? {};
+      text = await this.model.respond(history, context);
     } catch (error) {
+      console.error(`[conversation ${conversationId}] model unavailable; continuing with safe intake`, error);
       await this.repository.appendEvent(
         conversationId,
-        'assistant.failed',
+        'assistant.degraded',
         {
           callbackId: input.callbackId,
           channel: 'voice',
-          reason: 'assistant_unavailable',
+          reason: 'model_unavailable',
         },
         new Date(),
       );
-      // Do not leave the owner UI stuck on “Assistant thinking” when the model
-      // provider rejects a request or is temporarily unavailable.
-      await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
-      throw error;
+      text = await degradedAssistantReply(history, context);
     }
     const currentConversation = await this.requireConversation(conversationId);
     if (currentConversation.state === 'text_active' || currentConversation.events.some(

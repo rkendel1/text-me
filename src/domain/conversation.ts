@@ -52,6 +52,7 @@ export type ConversationEventType =
   | 'owner.delivery.failed'
   | 'owner.message.received'
   | 'assistant.message'
+  | 'assistant.degraded'
   | 'assistant.failed'
   | 'owner.read'
   | 'owner.attention.requested'
