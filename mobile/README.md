@@ -7,13 +7,18 @@ This is the Expo replacement for the legacy Swift shell in `../ios`. It hosts th
 ```bash
 cd mobile
 npm install
-npx expo run:ios
+npm run ios
 ```
+
+`npm run ios` is the local Xcode 27-compatible runner. It finds or boots an
+iPhone simulator, keeps Metro on port 8081, builds with Xcode, and installs the
+app with `simctl`. Expo SDK 54's built-in `i` command still looks for the old
+`Simulator.app` location, so do not use that command on this Xcode version.
 
 Remote push needs a development or release build; do not use Expo Go for push testing. To point a development build at the local server:
 
 ```bash
-EXPO_PUBLIC_API_BASE_URL=http://localhost:3000 npx expo run:ios
+EXPO_PUBLIC_API_BASE_URL=http://localhost:3000 npm run ios
 ```
 
 For EAS builds:

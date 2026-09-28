@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, BackHandler, Linking, Platform, SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, BackHandler, Linking, Platform, StyleSheet, Text, View } from 'react-native';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as Notifications from 'expo-notifications';
 import * as SecureStore from 'expo-secure-store';
 import { StatusBar } from 'expo-status-bar';
 import { WebView, type WebViewMessageEvent, type WebViewNavigation } from 'react-native-webview';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 const SESSION_KEY = 'app.textme.session';
 const ATTENTION_CATEGORY = 'OWNER_ATTENTION';
@@ -56,7 +57,7 @@ async function api(path: string, token: string, body: Record<string, unknown>) {
   }
 }
 
-export default function App() {
+function AppContent() {
   const webView = useRef<WebView>(null);
   const session = useRef<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -252,6 +253,10 @@ export default function App() {
       />
     </SafeAreaView>
   );
+}
+
+export default function App() {
+  return <SafeAreaProvider><AppContent /></SafeAreaProvider>;
 }
 
 const styles = StyleSheet.create({
