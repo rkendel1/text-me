@@ -409,3 +409,11 @@ test('every Settings control in the owner UI is bound to a real, typed setting',
     assert.ok(section in defaults && key in defaults[section], `Settings control "${path}" has no stored setting`);
   }
 });
+
+test('owner surfaces do not replace visible screens on polling timers', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /setInterval\(loadList/);
+  assert.doesNotMatch(html, /setInterval\(\(\) => \{ if \(state\.selectedId\) loadDetail/);
+  assert.doesNotMatch(html, /Keep device status current while Settings is on screen/);
+});

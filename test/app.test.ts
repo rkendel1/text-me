@@ -636,6 +636,38 @@ test('an owner can resolve a voice-call request after hangup without caller SMS 
     message.role === 'owner' && message.body === "I'll call them back" && message.channel === 'internal'));
 });
 
+test('a queued owner decision is spoken on the next turn of an active voice call', async () => {
+  const { app, auth, owner, repository } = await ownedApp({
+    providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
+  });
+  await request(app).post('/webhooks/twilio/voice').type('form')
+    .send({ CallSid: 'CA-OWNER-RELAY', From: '+15555550123', To: owner.line });
+  const [conversation] = await repository.list(owner.accountId);
+  await repository.appendEvent(conversation.id, 'owner.attention.requested', {
+    requestId: 'req_another_time', question: 'What should I tell the caller?',
+    suggestedReplies: ["I'll call them back", 'Ask for another time'], source: 'voice',
+  }, new Date());
+
+  const reply = await request(app).post(`/conversations/${conversation.id}/messages`).set(auth)
+    .send({ body: 'Ask for another time', idempotencyKey: 'web-another-time' });
+  assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  assert.equal(reply.body.ownerReply.delivery, 'queued_for_voice');
+
+  const turn = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=3`)
+    .type('form').send({ CallSid: 'CA-OWNER-RELAY', SpeechResult: '' });
+  assert.equal(turn.status, 200, turn.text);
+  assert.match(turn.text, /Randy asked me to find another time/i);
+  assert.match(turn.text, /What other day and time would work for you/i);
+
+  const replay = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=4`)
+    .type('form').send({ CallSid: 'CA-OWNER-RELAY', SpeechResult: '' });
+  assert.doesNotMatch(replay.text, /Randy asked me to find another time/i);
+  const updated = await repository.getById(conversation.id);
+  assert.equal(updated?.events.filter((event) => event.type === 'owner.message.relayed').length, 1);
+});
+
 async function answeredConversation(repository: InMemoryConversationRepository, accountId: string, callId: string) {
   return (await repository.createIfAbsent({
     provider: 'fake', providerCallId: callId, callerPhone: '+15555550123', status: 'answered', startedAt: new Date(), accountId,

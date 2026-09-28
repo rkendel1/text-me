@@ -190,6 +190,18 @@ function notInService(): string {
   return twiml.toString();
 }
 
+/** Turn an owner's control-plane shortcut into words that make sense to the caller. */
+function ownerVoiceReply(ownerName: string, instruction: string): string {
+  const name = ownerName.trim() || 'the account owner';
+  if (/another time/i.test(instruction)) {
+    return `${name} asked me to find another time. What other day and time would work for you?`;
+  }
+  if (/call (?:them|you) back/i.test(instruction)) {
+    return `${name} will call you back. Is the number you're calling from the best number to use?`;
+  }
+  return `${name} says: ${instruction}`;
+}
+
 function registerIncomingCallRoute(
   app: express.Express,
   path: string,
@@ -772,6 +784,52 @@ export function createApp(options: AppOptions): express.Express {
         twiml.say('Thanks for calling. Goodbye.');
         twiml.hangup();
         response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
+
+      // Turn-based calls cannot receive a pushed WebSocket command. Consume the
+      // owner's queued answer on Twilio's next Gather callback and speak it once.
+      const relayedMessageIds = new Set(conversation.events
+        .filter((event) => event.type === 'owner.message.relayed' && typeof event.payload.messageId === 'string')
+        .map((event) => String(event.payload.messageId)));
+      const pendingOwnerReply = [...conversation.events].reverse().find((event) =>
+        event.type === 'owner.message' && event.payload.channel === 'voice' &&
+        event.payload.delivery === 'queued_for_voice' && typeof event.payload.text === 'string' &&
+        typeof event.payload.messageId === 'string' && !relayedMessageIds.has(String(event.payload.messageId)));
+      if (pendingOwnerReply) {
+        const messageId = String(pendingOwnerReply.payload.messageId);
+        const callbackId = `${callSid}:owner:${messageId}`;
+        const sequence = conversation.events.reduce((highest, event) => {
+          const value = Number(event.payload.sequence);
+          return Number.isFinite(value) ? Math.max(highest, value) : highest;
+        }, 0) + 1;
+
+        // Preserve anything the caller said while the owner was answering. The
+        // owner instruction takes precedence for this spoken turn.
+        if (speech && !conversation.events.some((event) =>
+          event.type === 'speech.transcript' && event.payload.callbackId === `${callSid}:gather:${turn}`)) {
+          const speechCallbackId = `${callSid}:gather:${turn}`;
+          await service.recordEvent(conversationId, 'speech.started', { callbackId: speechCallbackId, sequence });
+          await runtime.noteSpeechStarted(conversationId, speechCallbackId);
+          await service.recordEvent(conversationId, 'speech.transcript', {
+            callbackId: speechCallbackId, speaker: 'caller', text: speech, sequence,
+          });
+          await runtime.noteTranscript(conversationId, speechCallbackId, speech);
+        }
+
+        const configuration = await ownerConfiguration.get(conversation.accountId);
+        const prompt = ownerVoiceReply(configuration.assistant.ownerName, String(pendingOwnerReply.payload.text));
+        await service.recordEvent(conversationId, 'ai.response', {
+          callbackId, speaker: 'assistant', text: prompt, source: 'owner_relay',
+          messageId, sequence: sequence + 1,
+        });
+        await service.recordEvent(conversationId, 'owner.message.relayed', {
+          messageId, requestId: pendingOwnerReply.payload.requestId,
+          instruction: pendingOwnerReply.payload.text, text: prompt, channel: 'voice',
+        });
+        await runtime.noteAiCompleted(conversationId, callbackId, prompt);
+        const providerResponse = twilioProvider.turn(conversationId, prompt, turn + 1);
+        response.status(200).type(providerResponse.contentType).send(providerResponse.body);
         return;
       }
 

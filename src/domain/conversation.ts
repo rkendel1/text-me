@@ -46,6 +46,7 @@ export type ConversationEventType =
   | 'sms.sent'
   | 'caller.message'
   | 'owner.message'
+  | 'owner.message.relayed'
   | 'owner.message.created'
   | 'owner.delivery.requested'
   | 'owner.delivery.sent'

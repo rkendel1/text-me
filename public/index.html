@@ -1975,7 +1975,8 @@ function renderSettings() {
   const sw = (path, value, disabled) => switchHTML(path, value, disabled);
   const macs = activeMacs();
   const { assistant, calls, messages } = config;
-  $('#settingsBody').innerHTML = `
+  const body = $('#settingsBody');
+  const html = `
     <div class="group-header">Assistant</div>
     <div class="group">
       ${textRow('Your name', 'assistant.ownerName', assistant.ownerName, 60)}
@@ -2045,7 +2046,7 @@ function renderSettings() {
       ${state.token ? '<button class="row destructive" id="signOut">Sign Out</button>' : ''}
     </div>
     <div style="height:24px"></div>`;
-  const body = $('#settingsBody');
+  if (!replaceHTML(body, html)) return;
   const commit = async (path, value) => { await saveSetting(path, value); renderSettings(); };
   body.querySelectorAll('input[data-field]').forEach((input) => input.onchange = () => {
     haptic(); input.disabled = true; commit(input.dataset.field, input.checked);
@@ -2096,13 +2097,6 @@ async function refreshSessions() {
     refreshSessions();
   });
 }
-// Keep device status current while Settings is on screen.
-setInterval(() => {
-  if (state.tab === 'settings' && !document.hidden && !document.querySelector('.sheet') && !(document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName))) {
-    loadDevices().then(() => { if (state.tab === 'settings') renderSettings(); });
-  }
-}, 15000);
-
 async function refreshPushRow() {
   const status = await pushState();
   const label = { on: 'On', off: 'Off', denied: 'Blocked in iOS Settings', install: 'Add to Home Screen to turn on', unsupported: 'Not available in this browser' }[status];
@@ -2609,9 +2603,8 @@ async function bootControlPlane() {
   else if (await pushState() === 'on') enablePush().catch(() => {});
   if (!booted) {
     booted = true;
-    // The owner stream carries changes as they happen; this is only a safety net.
-    setInterval(loadList, 30000);
-    setInterval(() => { if (state.selectedId) loadDetail(); }, 30000);
+    // The owner stream carries changes as they happen. Reconcile after returning
+    // to the app, but never replace visible screens on a polling timer.
     document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadList(); loadDetail(); } });
     phoneMq.addEventListener('change', () => { if (!isPhone() && state.selectedId) $('#liveTab').classList.add('pushed'); renderList(); renderInspector(); updateTabbar(); });
     addEventListener('resize', () => renderInspector());
