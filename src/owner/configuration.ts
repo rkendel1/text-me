@@ -2,6 +2,7 @@ export type AssistantTone = 'friendly' | 'professional' | 'warm';
 export type AssistantResponseStyle = 'concise' | 'normal' | 'detailed';
 /** How calls are normally handled; each conversation can override it live. */
 export type AssistantBehavior = 'automatic' | 'ask_when_unsure' | 'ask_before_commitments';
+export type PhoneSetupChoice = 'existing' | 'new' | 'later';
 
 export interface OwnerAssistantSettings {
   /** Who the assistant works for, as callers should hear it. Set by the account during onboarding. */
@@ -44,7 +45,7 @@ export interface OwnerConfiguration {
   assistant: OwnerAssistantSettings;
   calls: OwnerCallSettings;
   messages: OwnerMessageSettings;
-  onboarding: { completed: boolean };
+  onboarding: { completed: boolean; phoneChoice?: PhoneSetupChoice };
 }
 
 export interface OwnerConfigurationAuditEvent {
@@ -196,6 +197,9 @@ function validatePatch(patch: OwnerConfigurationPatch): void {
     if (value !== undefined && (typeof value !== 'string' || !value.trim() || value.length > 300)) {
       throw new Error(`Invalid value for ${key}`);
     }
+  }
+  if (patch.onboarding?.phoneChoice !== undefined && !['existing', 'new', 'later'].includes(patch.onboarding.phoneChoice)) {
+    throw new Error('Invalid phone setup choice');
   }
 }
 

@@ -1587,6 +1587,14 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
+  app.post('/account/onboarding/phone-choice', tenant('phone.manage'), async (request, response, next) => {
+    try {
+      response.json(await tenancy.configurePhoneChoice(tenantOf(request), { choice: request.body?.choice }));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get('/account/members', tenant('account.read'), async (request, response, next) => {
     try {
       response.json(await tenancy.members(accountOf(request)));

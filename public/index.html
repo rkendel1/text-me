@@ -2058,12 +2058,12 @@ async function refreshPhoneRow() {
     const forwarding = phone.forwardingSeen
       ? [`Forwarding works · last call ${relTime(phone.lastForwardedAt)}`, 'var(--green)']
       : phone.available && phone.connected ? ['Set up forwarding so your assistant gets calls you miss', 'var(--orange)']
-        : [phone.error || 'Assistant line not connected yet', 'var(--orange)'];
+        : [phone.error || 'Calling is not set up yet', 'var(--orange)'];
     $('#phoneStatus').textContent = forwarding[0];
     $('#phoneStatus').style.color = forwarding[1];
     $('#phoneConnect').hidden = !phone.available;
     $('#phoneConnect').textContent = phone.forwardingSeen ? 'Details' : 'Set Up';
-    $('#phoneConnect').onclick = () => forwardingSheet();
+    $('#phoneConnect').onclick = () => phone.assistantLine ? forwardingSheet() : setupStep('phone');
   } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
 }
 
@@ -2173,37 +2173,74 @@ async function setupStep(step) {
     };
   } else if (step === 'phone') {
     let phone = await api('/account/phone').catch(() => ({}));
-    const hasLine = Boolean(phone.assistantLine);
-    const pending = phone.numbers && phone.numbers.personal && phone.numbers.personal.status === 'pending_verification' ? phone.numbers.personal : null;
-    node.innerHTML = `<div class="inner">${heading('Your number', 'Keep your number. Calls you don’t take forward to your own assistant line.')}
-      <div class="group-header" style="padding-left:4px">1 · Your assistant line</div>
-      <div id="obLine">${hasLine ? `<p class="lede" style="text-align:left;margin:0 0 14px"><b style="color:var(--label)">${esc(formatPhone(phone.assistantLine))}</b> is yours.</p>`
-        : '<button class="btn tinted" id="obClaim">Get My Assistant Line</button>'}</div>
-      <div class="group-header" style="padding-left:4px;margin-top:18px">2 · Your mobile number</div>
-      <input class="field" id="obNumber" type="tel" autocomplete="tel" placeholder="+1 555 123 4567" value="${esc(pending ? pending.number : '')}" ${hasLine ? '' : 'disabled'}>
-      <button class="btn tinted" id="obSend" ${hasLine ? '' : 'disabled'}>${pending ? 'Send a New Code' : 'Text Me a Code'}</button>
-      <input class="field" id="obCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="margin-top:12px" ${pending ? '' : 'hidden'}>
-      <div class="err" id="obError"></div><div class="grow"></div>
-      <button class="btn filled" id="obVerify" ${pending ? '' : 'hidden'}>Verify</button></div>`;
-    if ($('#obClaim')) $('#obClaim').onclick = async () => {
-      try { await api('/account/phone/line', { method: 'POST' }); setupStep('phone'); } catch (error) { setupError(error); }
+    let onboarding = await api('/account/onboarding');
+    const saveChoice = async (choice) => {
+      onboarding = await api('/account/onboarding/phone-choice', { method: 'POST', body: { choice } });
     };
-    $('#obSend').onclick = async () => {
-      try {
-        await api('/account/phone/personal', { method: 'POST', body: { number: $('#obNumber').value } });
-        $('#obCode').hidden = false; $('#obVerify').hidden = false; $('#obCode').focus(); toast('Code sent', 'message', 'var(--green)');
-      } catch (error) { setupError(error); }
+    const chooseAgain = () => renderChoices();
+    const renderChoices = () => {
+      node.innerHTML = `<div class="inner">${heading('How do you want to use calling?', 'Choose what fits now. You can change this later in Settings.')}
+        <button class="big-choice" data-phone-choice="existing"><b>Keep my existing number</b><span>People keep calling your current number. Missed calls forward privately to your assistant.</span></button>
+        <button class="big-choice" data-phone-choice="new"><b>Use a new Text Me number</b><span>Get a dedicated number that callers dial directly.</span></button>
+        <button class="big-choice" data-phone-choice="later"><b>Set up calling later</b><span>Continue setting up your assistant without connecting a phone yet.</span></button>
+        <div class="err" id="obError"></div></div>`;
+      node.querySelector('[data-phone-choice="existing"]').onclick = async () => {
+        try { await saveChoice('existing'); renderExisting(); } catch (error) { setupError(error); }
+      };
+      node.querySelector('[data-phone-choice="new"]').onclick = async () => {
+        try { await saveChoice('new'); renderNew(); } catch (error) { setupError(error); }
+      };
+      node.querySelector('[data-phone-choice="later"]').onclick = async () => {
+        try { await saveChoice('later'); nextSetup(); } catch (error) { setupError(error); }
+      };
     };
-    $('#obVerify').onclick = async () => {
-      try {
-        phone = await api('/account/phone/personal/verify', { method: 'POST', body: { code: $('#obCode').value.trim() } });
-        node.innerHTML = `<div class="inner">${heading('Keep your number')}<div id="obForwarding">${forwardingHTML(phone)}</div>
-          <div class="grow"></div><button class="btn filled" id="obNext">I’ve Turned On Forwarding</button>
-          <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">Do This Later</button></div>`;
-        bindForwardingCopy($('#obForwarding'), phone);
-        $('#obNext').onclick = nextSetup; $('#obSkip').onclick = nextSetup;
-      } catch (error) { setupError(error); }
+    const renderExisting = () => {
+      const pending = phone.numbers && phone.numbers.personal && phone.numbers.personal.status === 'pending_verification' ? phone.numbers.personal : null;
+      node.innerHTML = `<div class="inner">${heading('Connect your existing number', 'Keep your current mobile number. Your plan uses private routing so your assistant can receive calls you miss.')}
+        <div class="group-header" style="padding-left:4px">Your mobile number</div>
+        <input class="field" id="obNumber" type="tel" autocomplete="tel" placeholder="+1 555 123 4567" value="${esc(pending ? pending.number : '')}">
+        <button class="btn tinted" id="obSend">${pending ? 'Send a New Code' : 'Connect My Number'}</button>
+        <input class="field" id="obCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="margin-top:12px" ${pending ? '' : 'hidden'}>
+        <div class="err" id="obError"></div><div class="grow"></div>
+        <button class="btn filled" id="obVerify" ${pending ? '' : 'hidden'}>Verify</button>
+        <button class="btn" style="color:var(--blue);margin-top:6px" id="obChooseAgain">Choose Another Option</button></div>`;
+      $('#obChooseAgain').onclick = chooseAgain;
+      $('#obSend').onclick = async () => {
+        try {
+          if (!phone.assistantLine) phone = await api('/account/phone/line', { method: 'POST' });
+          await api('/account/phone/personal', { method: 'POST', body: { number: $('#obNumber').value } });
+          $('#obCode').hidden = false; $('#obVerify').hidden = false; $('#obCode').focus(); toast('Code sent', 'message', 'var(--green)');
+        } catch (error) { setupError(error); }
+      };
+      $('#obVerify').onclick = async () => {
+        try {
+          phone = await api('/account/phone/personal/verify', { method: 'POST', body: { code: $('#obCode').value.trim() } });
+          node.innerHTML = `<div class="inner">${heading('Your number is connected')}<div id="obForwarding">${forwardingHTML(phone)}</div>
+            <div class="grow"></div><button class="btn filled" id="obNext">I’ve Turned On Forwarding</button>
+            <button class="btn" style="color:var(--blue);margin-top:6px" id="obSkip">Do This Later</button></div>`;
+          bindForwardingCopy($('#obForwarding'), phone);
+          $('#obNext').onclick = nextSetup; $('#obSkip').onclick = nextSetup;
+        } catch (error) { setupError(error); }
+      };
     };
+    const renderNew = () => {
+      const hasLine = Boolean(phone.assistantLine);
+      node.innerHTML = `<div class="inner">${heading('Use a new Text Me number', 'This dedicated number goes directly to your assistant. Share it anywhere you want to receive calls.')}
+        ${hasLine ? `<div class="group"><div class="row"><span class="row-body"><span class="row-title">Your Text Me number</span><div class="row-sub">${esc(formatPhone(phone.assistantLine))}</div></span></div></div>` : ''}
+        <div class="err" id="obError"></div><div class="grow"></div>
+        <button class="btn filled" id="obNewLine">${hasLine ? 'Continue' : 'Get My Text Me Number'}</button>
+        <button class="btn" style="color:var(--blue);margin-top:6px" id="obChooseAgain">Choose Another Option</button></div>`;
+      $('#obChooseAgain').onclick = chooseAgain;
+      $('#obNewLine').onclick = async () => {
+        try {
+          if (!phone.assistantLine) { phone = await api('/account/phone/line', { method: 'POST' }); renderNew(); }
+          else nextSetup();
+        } catch (error) { setupError(error); }
+      };
+    };
+    if (onboarding.phoneChoice === 'existing') renderExisting();
+    else if (onboarding.phoneChoice === 'new') renderNew();
+    else renderChoices();
   } else if (step === 'application') {
     node.innerHTML = `<div class="inner">${heading('Your assistant', 'It answers your line. You can change this anytime — even during a call.')}
       <input class="field" id="obAssistant" placeholder="Assistant’s name" value="Assistant">

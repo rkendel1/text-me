@@ -177,6 +177,30 @@ test('onboarding is a state machine derived from durable facts, and the UI can s
   assert.equal(after.steps.find((step: { id: string }) => step.id === 'notifications').done, false, 'but the step shows what is missing');
 });
 
+test('onboarding offers existing number, new number, and calling-later paths', async () => {
+  const deferred = saas();
+  const later = await signUp(deferred.app, { name: 'Later' });
+  await request(deferred.app).post('/account/onboarding/identity').set(later.headers).send({ name: 'Later' });
+  const invalid = await request(deferred.app).post('/account/onboarding/phone-choice').set(later.headers).send({ choice: 'magic' });
+  assert.equal(invalid.status, 400);
+  const skipped = await request(deferred.app).post('/account/onboarding/phone-choice').set(later.headers).send({ choice: 'later' });
+  assert.equal(skipped.status, 200);
+  assert.equal(skipped.body.phoneChoice, 'later');
+  assert.equal(skipped.body.steps.find((step: { id: string }) => step.id === 'phone').done, true);
+  assert.equal(skipped.body.next, 'application');
+
+  const dedicated = saas();
+  const fresh = await signUp(dedicated.app, { name: 'Dedicated' });
+  await request(dedicated.app).post('/account/onboarding/identity').set(fresh.headers).send({ name: 'Dedicated' });
+  const selected = await request(dedicated.app).post('/account/onboarding/phone-choice').set(fresh.headers).send({ choice: 'new' });
+  assert.equal(selected.body.phoneChoice, 'new');
+  assert.equal(selected.body.steps.find((step: { id: string }) => step.id === 'phone').done, false);
+  await request(dedicated.app).post('/account/phone/line').set(fresh.headers);
+  const withLine = await request(dedicated.app).get('/account/onboarding').set(fresh.headers);
+  assert.equal(withLine.body.steps.find((step: { id: string }) => step.id === 'phone').done, true);
+  assert.equal(withLine.body.next, 'application');
+});
+
 test('phone number lifecycle: codes expire, attempts are limited, and a verified number belongs to one account', async () => {
   const { app, messaging } = saas();
   const a = await onboardTenant(app, messaging, { personal: '+15553330001' });

@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import { HttpError } from '../errors.js';
-import type { AssistantBehavior, OwnerConfigurationService } from '../owner/configuration.js';
+import type { AssistantBehavior, OwnerConfigurationService, PhoneSetupChoice } from '../owner/configuration.js';
 import type { PhoneNumberService } from '../telephony/phone-number.js';
 import type { TenantContext } from './authorization.js';
 import type { NotificationChannelResolver } from './channels.js';
@@ -36,6 +36,7 @@ export interface OnboardingView {
   steps: OnboardingStep[];
   /** The first step that isn't done, if any. */
   next: OnboardingStep['id'] | null;
+  phoneChoice?: PhoneSetupChoice;
 }
 
 const cleanName = (value: unknown, max = 80): string => (typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').slice(0, max) : '');
@@ -241,6 +242,18 @@ export class TenancyService {
     return this.refreshOnboarding(context.accountId);
   }
 
+  /** Choose how calling fits this account: keep a carrier number, use a dedicated line, or defer it. */
+  async configurePhoneChoice(context: TenantContext, input: { choice?: unknown }): Promise<OnboardingView> {
+    const choices: PhoneSetupChoice[] = ['existing', 'new', 'later'];
+    if (!choices.includes(input.choice as PhoneSetupChoice)) {
+      throw new HttpError(400, 'Choose whether to keep your number, use a new number, or set up calling later.', 'invalid_phone_choice');
+    }
+    const choice = input.choice as PhoneSetupChoice;
+    await this.deps.configuration.update(context.accountId, { onboarding: { phoneChoice: choice } }, 'onboarding');
+    await this.audit(context.accountId, 'onboarding.phone_choice_configured', { choice }, context.userId);
+    return this.refreshOnboarding(context.accountId);
+  }
+
   /** Onboarding: the application/plane — the assistant that answers this account's line. */
   async configurePlane(context: TenantContext, input: { name?: unknown; behavior?: unknown }): Promise<Plane> {
     const behaviors: AssistantBehavior[] = ['automatic', 'ask_when_unsure', 'ask_before_commitments'];
@@ -272,17 +285,21 @@ export class TenancyService {
     ]);
     const line = numbers.find((number) => number.kind === 'assistant_line');
     const personal = numbers.find((number) => number.kind === 'personal' && (number.status === 'verified' || number.status === 'active'));
+    const phoneChoice = configuration.onboarding.phoneChoice;
+    const phoneDone = phoneChoice === 'later' || (phoneChoice === 'new' && line?.status === 'active') ||
+      ((phoneChoice === 'existing' || phoneChoice === undefined) && line?.status === 'active' && Boolean(personal));
     const steps: OnboardingStep[] = [
       { id: 'account', label: 'Account created', done: true },
       { id: 'identity', label: 'Your name', done: configuration.assistant.ownerName.trim().length > 0 },
-      { id: 'phone', label: 'Your number', done: line?.status === 'active' && Boolean(personal) },
+      { id: 'phone', label: 'Calling setup', done: phoneDone },
       { id: 'application', label: 'Your assistant', done: Boolean(plane) },
       { id: 'notifications', label: 'Notifications', done: channels.some((channel) => channel.enabled && channel.available) },
     ];
     const firstOpen = steps.findIndex((step) => !step.done);
     const derived: OnboardingState = firstOpen === -1 ? 'ready' : ONBOARDING_STATES[firstOpen - 1];
     const state = account.onboardingState === 'ready' ? 'ready' : derived;
-    return { state, ready: state === 'ready', steps, next: firstOpen === -1 ? null : steps[firstOpen].id };
+    return { state, ready: state === 'ready', steps, next: firstOpen === -1 ? null : steps[firstOpen].id,
+      ...(phoneChoice ? { phoneChoice } : {}) };
   }
 
   async refreshOnboarding(accountId: string): Promise<OnboardingView> {
