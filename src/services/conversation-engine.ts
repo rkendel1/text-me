@@ -19,7 +19,7 @@ export class ConversationEngine {
     private readonly runtime?: RuntimeControlService,
     private readonly options: {
       /** Owner instructions and product tools for this conversation. */
-      contextFor?: (conversationId: string) => Promise<ConversationModelContext>;
+      contextFor?: (conversationId: string, channel?: 'voice' | 'text') => Promise<ConversationModelContext>;
       /** Reply to caller texts automatically (production, with the AI SDK text agent). */
       autoReplyToCallerTexts?: boolean;
     } = {},
@@ -79,7 +79,7 @@ export class ConversationEngine {
       new Date(),
     );
     await this.runtime?.noteAiStarted(conversationId, input.callbackId);
-    const text = await this.model.respond(history);
+    const text = await this.model.respond(history, await this.options.contextFor?.(conversationId, 'voice'));
     const currentConversation = await this.requireConversation(conversationId);
     if (currentConversation.state === 'text_active' || currentConversation.events.some(
       (event) => event.type === 'conversation.channel_transitioned',

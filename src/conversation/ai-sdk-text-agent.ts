@@ -26,7 +26,7 @@ export class AiSdkTextAgent implements ConversationModel {
     const task = last?.speaker === 'owner'
       ? `${owner} just replied (the last "Owner" line). Relay that to the caller as a text message in your own words, ` +
         `e.g. "${owner} says…". Do not add anything ${owner} did not say.`
-      : 'Write your next text message to the caller.';
+      : 'Write your next reply to the caller.';
     const transcript = history.map((turn) => `${labels[turn.speaker]}: ${turn.text}`).join('\n');
 
     const tools: ToolSet = {};

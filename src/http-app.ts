@@ -442,25 +442,26 @@ export function createApp(options: AppOptions): express.Express {
     runtime,
     {
       autoReplyToCallerTexts: options.autoReplyToCallerTexts ?? false,
-      contextFor: async (conversationId) => {
+      contextFor: async (conversationId, channel = 'text') => {
         const conversation = await service.getConversation(conversationId);
         if (!conversation) return {};
         const configuration = await ownerConfiguration.get(conversation.accountId);
         const snapshot = await runtime.getRuntimeForConversation(conversation);
         return {
-          instructions: buildInstructions(snapshot, configuration, 'text'),
+          instructions: buildInstructions(snapshot, configuration, channel),
           ownerName: configuration.assistant.ownerName,
           tools: {
             askOwner: async (question, suggestedReplies) => {
-              const requestId = await service.requestOwner(conversationId, { question, suggestedReplies, source: 'sms' });
+              const source = channel === 'voice' ? 'voice' : 'sms';
+              const requestId = await service.requestOwner(conversationId, { question, suggestedReplies, source });
               await options.repository.appendEvent(conversationId, 'assistant.activity', {
-                tool: 'ask_owner', summary: `Asked ${configuration.assistant.ownerName}: "${question}"`, requestId, source: 'sms',
+                tool: 'ask_owner', summary: `Asked ${configuration.assistant.ownerName}: "${question}"`, requestId, source,
               }, new Date());
               await runtime.noteOwnerNeeded(conversationId, requestId, question);
             },
             noteCaller: async (name, reason) => {
               await options.repository.appendEvent(conversationId, 'caller.identified', {
-                ...(name ? { name } : {}), ...(reason ? { reason } : {}), source: 'sms',
+                ...(name ? { name } : {}), ...(reason ? { reason } : {}), source: channel,
               }, new Date());
             },
           },
@@ -705,7 +706,7 @@ export function createApp(options: AppOptions): express.Express {
     });
   }
 
-  const twilioProvider = providers.get('twilio');
+  const twilioProvider = providers.get('twilio') as TwilioProvider | undefined;
   if (!twilioProvider) {
     throw new Error('Twilio provider is required');
   }
@@ -717,6 +718,40 @@ export function createApp(options: AppOptions): express.Express {
     // An outbound test rings the owner's phone. Treat the destination as the caller and the
     // signed query parameter as the account line so the rest is the exact inbound call path.
     return { ...call, callerPhone: call.calledNumber ?? call.callerPhone, calledNumber: assistantLine };
+  });
+  app.post('/webhooks/twilio/voice/turn', async (request, response, next) => {
+    try {
+      const conversationId = typeof request.query.conversationId === 'string' ? request.query.conversationId : '';
+      const turn = Math.max(1, Math.min(20, Number(request.query.turn) || 1));
+      const callSid = typeof request.body?.CallSid === 'string' ? request.body.CallSid : '';
+      const speech = typeof request.body?.SpeechResult === 'string' ? request.body.SpeechResult.trim() : '';
+      if (!conversationId || !callSid) throw new HttpError(400, 'conversationId and CallSid are required');
+      const conversation = await service.getConversation(conversationId);
+      if (!conversation) throw new HttpError(404, 'Conversation not found');
+
+      if (turn >= 20) {
+        const twiml = new twilio.twiml.VoiceResponse();
+        twiml.say('Thanks for calling. Goodbye.');
+        twiml.hangup();
+        response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
+
+      let prompt = "I didn't hear anything. What can I help you with?";
+      if (speech) {
+        const callbackId = `${callSid}:gather:${turn}`;
+        const updated = await engine.respond(conversationId, { callbackId, audio: speech });
+        const reply = [...updated.events].reverse().find((event) =>
+          event.type === 'ai.response' && event.payload.callbackId === callbackId);
+        prompt = typeof reply?.payload.text === 'string' && reply.payload.text.trim()
+          ? reply.payload.text.trim()
+          : 'Let me check on that. Is there anything else you would like me to know?';
+      }
+      const providerResponse = twilioProvider.turn(conversationId, prompt, turn + 1);
+      response.status(200).type(providerResponse.contentType).send(providerResponse.body);
+    } catch (error) {
+      next(error);
+    }
   });
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
 

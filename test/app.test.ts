@@ -75,6 +75,35 @@ test('inbound webhook creates conversation, persists identifiers, and returns Tw
   assert.equal(listResponse.body[0].status, 'answered');
 });
 
+test('HTTPS voice turns keep a spoken assistant call working without a WebSocket host', async () => {
+  const { app, auth, owner } = await ownedApp({
+    providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
+    conversationModel: new FakeConversationModel(['I can help with that.']),
+  });
+  const answered = await request(app)
+    .post('/webhooks/twilio/voice')
+    .type('form')
+    .send({ CallSid: 'CA-TURN', From: '+15555550123', To: owner.line });
+  assert.equal(answered.status, 200);
+  assert.match(answered.text, /<Gather/);
+  assert.match(answered.text, /voice\/turn\?conversationId=/);
+
+  const [conversation] = (await request(app).get('/conversations').set(auth)).body;
+  const turn = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=1`)
+    .type('form')
+    .send({ CallSid: 'CA-TURN', SpeechResult: 'Can you help me?' });
+  assert.equal(turn.status, 200, turn.text);
+  assert.match(turn.text, /I can help with that/);
+  assert.match(turn.text, /turn=2/);
+
+  const details = await request(app).get(`/conversations/${conversation.id}`).set(auth);
+  assert.deepEqual(details.body.messages.map((message: { role: string; body: string }) => [message.role, message.body]), [
+    ['caller', 'Can you help me?'],
+    ['assistant', 'I can help with that.'],
+  ]);
+});
+
 test('a call to a number no account owns is not answered and creates nothing', async () => {
   const { app, auth, repository, owner } = await ownedApp();
 

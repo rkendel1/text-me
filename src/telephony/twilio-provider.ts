@@ -37,6 +37,8 @@ export interface TwilioVoiceOptions {
   mediaStreamUrl?: string;
   /** Webhook Twilio continues to once the media stream ends (goodbye or failure fallback). */
   continueUrl?: string;
+  /** HTTPS turn endpoint used where persistent Media Stream WebSockets are unavailable. */
+  turnUrl?: string;
 }
 
 export class TwilioProvider implements TelephonyProvider {
@@ -116,6 +118,9 @@ export class TwilioProvider implements TelephonyProvider {
       }
       return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
     }
+    if (this.voice.turnUrl && conversation) {
+      return this.turn(conversation.id, options.greeting || 'Hi. What can I help you with?', 1);
+    }
     // Without realtime voice (local development): the account's own greeting, then a recording.
     response.say(options.greeting || 'Hi. What can I help you with?');
     response.record({
@@ -129,5 +134,24 @@ export class TwilioProvider implements TelephonyProvider {
       body: response.toString(),
       contentType: 'text/xml; charset=utf-8',
     };
+  }
+
+  /** One turn of an HTTPS speech conversation: speak, listen, then post the transcript back. */
+  turn(conversationId: string, prompt: string, turn: number): ProviderResponse {
+    const response = new twilio.twiml.VoiceResponse();
+    if (!this.voice.turnUrl) {
+      response.say(prompt);
+      response.hangup();
+      return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
+    }
+    const action = new URL(this.voice.turnUrl);
+    action.searchParams.set('conversationId', conversationId);
+    action.searchParams.set('turn', String(turn));
+    const gather = response.gather({
+      input: ['speech'], action: action.toString(), method: 'POST',
+      speechTimeout: 'auto', timeout: 5, actionOnEmptyResult: true,
+    });
+    gather.say(prompt);
+    return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
   }
 }

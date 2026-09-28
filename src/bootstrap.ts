@@ -120,14 +120,19 @@ export function buildServerWithPool(
     messagingProvider,
     { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification, verificationMessaging, verification },
   );
-  const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
+  // Vercel Functions do not expose the Node HTTP upgrade event. Use turn-based HTTPS voice
+  // there; long-running Node deployments retain the lower-latency bidirectional stream.
+  const mediaStreamUrl = process.env.VERCEL
+    ? undefined
+    : `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 
   const app = createApp({
     repository,
     providers: [
       new TwilioProvider(realtimeVoice ? {
-        mediaStreamUrl,
+        ...(mediaStreamUrl ? { mediaStreamUrl } : {}),
         continueUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/continue`,
+        turnUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/turn`,
       } : {}),
       // The fake provider exists for local development only; production never registers it.
       ...(config.production ? [] : [new FakeTelephonyProvider()]),
