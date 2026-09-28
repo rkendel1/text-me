@@ -42,4 +42,6 @@ export interface TelephonyProvider {
   parseStatusUpdate(payload: unknown): StatusUpdate;
   answerCall(conversation: Conversation, options?: { greeting?: string }): ProviderResponse;
   parseIncomingSms?(payload: unknown): IncomingSms;
+  /** End an active provider call. Optional for local/fake providers. */
+  endCall?(providerCallId: string): Promise<void>;
 }

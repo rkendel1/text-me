@@ -43,8 +43,19 @@ export interface TwilioVoiceOptions {
 
 export class TwilioProvider implements TelephonyProvider {
   readonly name = 'twilio';
+  readonly endCall?: (providerCallId: string) => Promise<void>;
 
-  constructor(private readonly voice: TwilioVoiceOptions = {}) {}
+  constructor(
+    private readonly voice: TwilioVoiceOptions = {},
+    credentials?: { accountSid: string; authToken: string },
+  ) {
+    if (credentials) {
+      const client = twilio(credentials.accountSid, credentials.authToken);
+      this.endCall = async (providerCallId) => {
+        await client.calls(providerCallId).update({ status: 'completed' });
+      };
+    }
+  }
 
   parseIncomingCall(payload: unknown): IncomingCall {
     const record = asRecord(payload);

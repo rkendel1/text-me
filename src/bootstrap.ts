@@ -133,7 +133,7 @@ export function buildServerWithPool(
         ...(mediaStreamUrl ? { mediaStreamUrl } : {}),
         continueUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/continue`,
         turnUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/turn`,
-      } : {}),
+      } : {}, { accountSid: config.twilioAccountSid, authToken: config.twilioAuthToken }),
       // The fake provider exists for local development only; production never registers it.
       ...(config.production ? [] : [new FakeTelephonyProvider()]),
     ],

@@ -779,6 +779,17 @@ export function createApp(options: AppOptions): express.Express {
       const conversation = await service.getConversation(conversationId);
       if (!conversation) throw new HttpError(404, 'Conversation not found');
 
+      // Provider termination is normally immediate, but this also prevents a
+      // Gather already in flight (or a transient Twilio REST failure) from
+      // starting another assistant turn after the owner pressed Stop.
+      const currentRuntime = await runtime.getRuntimeForConversation(conversation);
+      if (currentRuntime.state === 'stopped' || !currentRuntime.assistantEnabled) {
+        const twiml = new twilio.twiml.VoiceResponse();
+        twiml.hangup();
+        response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
+
       if (turn >= 20) {
         const twiml = new twilio.twiml.VoiceResponse();
         twiml.say('Thanks for calling. Goodbye.');
@@ -2140,7 +2151,13 @@ export function createApp(options: AppOptions): express.Express {
 
   app.post('/conversations/:id/runtime/stop', tenant('conversation.control'), async (request, response, next) => {
     try {
-      response.json(presentRuntime(await runtime.stop(String(request.params.id), accountOf(request), runtimeInput(request))));
+      const conversation = await service.requireOwnedConversation(String(request.params.id), accountOf(request));
+      const stopped = await runtime.stop(conversation.id, accountOf(request), runtimeInput(request));
+      if (conversation.status !== 'completed') {
+        const provider = providers.get(conversation.provider);
+        if (provider?.endCall) await provider.endCall(conversation.providerCallId);
+      }
+      response.json(presentRuntime(stopped));
     } catch (error) {
       next(error);
     }

@@ -1473,7 +1473,7 @@ async function onQuick(command) {
   if (command === 'stop') {
     const confirmed = await actionSheet({
       title: `End the assistant for ${name}?`,
-      message: state.detail.voice?.live ? 'The assistant will say goodbye and hang up. You can follow up by text.' : 'The assistant will stop responding in this conversation.',
+      message: state.detail.voice?.live ? 'This will hang up the active call now. You can follow up by text.' : 'The assistant will stop responding in this conversation.',
       actions: [{ label: state.detail.voice?.live ? 'End Call' : 'Stop Assistant', value: true, destructive: true }],
     });
     if (!confirmed) return;
