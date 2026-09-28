@@ -427,6 +427,18 @@ test('auth forms return to the app root after signing in from a deep link', asyn
   assert.ok(!html.includes('location.replace(location.pathname'));
 });
 
+test('live UI coalesces duplicate streams and preserves unchanged DOM', async () => {
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  const list = html.slice(html.indexOf('function renderList()'), html.indexOf('/** One-tap answer'));
+  const streams = html.slice(html.indexOf('/* ---------------- Live updates'), html.indexOf('/* ---------------- Connected devices'));
+  const transcript = html.slice(html.indexOf('function renderTranscript('), html.indexOf('function renderComposer('));
+  assert.match(list, /if \(!replaceHTML\(listNode, html\)\) return/);
+  assert.match(streams, /function scheduleLiveRefresh\(/);
+  assert.match(streams, /const refresh = \(\) => scheduleLiveRefresh\(id, true\)/);
+  assert.match(transcript, /data-transient-typing/);
+  assert.doesNotMatch(transcript, /replaceHTML\(node, html\)/);
+});
+
 test('authenticated surfaces dismiss the landing and sign-in overlays', async () => {
   const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
   const transition = html.slice(html.indexOf('function showAuthenticatedSurface('), html.indexOf('/** Welcome:', html.indexOf('function showAuthenticatedSurface(')));

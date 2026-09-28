@@ -1196,7 +1196,13 @@ async function loadPlane() {
     $('#planeText').textContent = text;
   } catch { /* the list still renders; status returns with the next refresh */ }
 }
+let listLoading = null;
 async function loadList() {
+  // SSE, the per-conversation stream, visibility changes and the safety poll
+  // can all request this at once. One read is enough; remember only that one
+  // more pass is needed if an event arrived while it was in flight.
+  if (listLoading) { listLoading.again = true; return; }
+  listLoading = { again: false };
   try {
     const previous = new Map(state.conversations.map((conversation) => [conversation.id, conversation.ownerRequest && conversation.ownerRequest.requestId]));
     state.conversations = await api('/conversations');
@@ -1210,6 +1216,11 @@ async function loadList() {
     renderList();
     loadPlane();
   } catch (error) { if (error.status !== 401) console.warn(error); }
+  finally {
+    const again = listLoading.again;
+    listLoading = null;
+    if (again) loadList();
+  }
 }
 
 function quickRepliesHTML(conversation, request) {
@@ -1264,7 +1275,10 @@ function renderList() {
         <span class="row-body"><span class="row-title" style="font-weight:600">${esc(displayName(conversation))}</span><div class="row-sub">${esc(recentSubtitle(conversation))}</div></span>
         <span class="row-value" style="font-size:15px">${esc(relTime(conversation.updatedAt || conversation.startedAt))}</span>${I.chevronRight}</button>`).join('')}</div>`;
   }
-  listNode.innerHTML = html;
+  // Keep the current nodes, scroll position and compositor layers when the
+  // server snapshot is unchanged. Replacing this tree on every heartbeat was
+  // visible as a full-screen flash in both browsers and the native WebView.
+  if (!replaceHTML(listNode, html)) return;
   listNode.querySelectorAll('[data-open]').forEach((node) => node.addEventListener('click', (event) => {
     if (event.target.closest('button[data-reply],button[data-else],button[data-takeover]')) return;
     haptic(); openConversation(node.dataset.open);
@@ -1316,7 +1330,7 @@ async function openConversation(id, options = {}) {
   if (options.instant) { $('#liveTab').classList.add('dragging'); setTimeout(() => $('#liveTab').classList.remove('dragging'), 50); }
   if (changed) {
     state.detail = null;
-    const transcript = $('#transcript'); transcript.innerHTML = ''; transcript.__textMeHTML = undefined;
+    const transcript = $('#transcript'); transcript.innerHTML = ''; transcript.__textMeHTML = undefined; transcript.__textMeTranscriptHTML = undefined;
     $('#composerInput').value = '';
   }
   $('#detailEmpty').hidden = true; $('#detailBody').hidden = false;
@@ -1543,11 +1557,25 @@ function renderTranscript(detail) {
     lastRole = message.role;
   });
   const runtimeState = detail.runtime && detail.runtime.state;
-  if (runtimeState === 'transcribing') html += '<div class="bubble in tail typing" aria-label="Caller is speaking"><i></i><i></i><i></i></div>';
-  if (runtimeState === 'thinking') html += '<div class="bubble out tail typing" aria-label="Assistant is thinking"><i></i><i></i><i></i></div>';
-  if (!items.length && !html) html = `<div class="empty-state" style="padding-top:40px">${I.wave}<h3>Waiting for the Caller</h3><p>The transcript appears here the moment anyone speaks.</p></div>`;
+  const typingRole = runtimeState === 'transcribing' ? 'caller' : runtimeState === 'thinking' ? 'assistant' : null;
+  if (!items.length && !html && !typingRole) html = `<div class="empty-state" style="padding-top:40px">${I.wave}<h3>Waiting for the Caller</h3><p>The transcript appears here the moment anyone speaks.</p></div>`;
   if (state.pendingMessage) html += `<div class="bubble out owner tail">${esc(state.pendingMessage)}</div><div class="receipt">Sending…</div>`;
-  replaceHTML(node, html);
+  // Runtime state changes several times per spoken turn. Keep all existing
+  // transcript bubbles mounted and change only the transient typing bubble;
+  // replacing the whole transcript made WebKit and Chrome visibly flash.
+  if (node.__textMeTranscriptHTML !== html) {
+    node.__textMeTranscriptHTML = html;
+    node.innerHTML = html;
+  }
+  const existingTyping = node.querySelector('[data-transient-typing]');
+  if (!typingRole) {
+    existingTyping?.remove();
+  } else if (!existingTyping || existingTyping.dataset.transientTyping !== typingRole) {
+    existingTyping?.remove();
+    node.insertAdjacentHTML('beforeend', typingRole === 'caller'
+      ? '<div class="bubble in tail typing" data-transient-typing="caller" aria-label="Caller is speaking"><i></i><i></i><i></i></div>'
+      : '<div class="bubble out tail typing" data-transient-typing="assistant" aria-label="Assistant is thinking"><i></i><i></i><i></i></div>');
+  }
   if (nearBottom || state.forceScroll) { node.scrollTop = node.scrollHeight; state.forceScroll = false; }
 }
 
@@ -1696,14 +1724,29 @@ function openAdjust() {
 $('#controlsBtn').onclick = openAdjust;
 
 /* ---------------- Live updates (SSE + polling) ---------------- */
+let liveRefreshTimer = null;
+let liveRefreshList = false;
+let liveRefreshDetail = null;
+function scheduleLiveRefresh(conversationId, includeDetail = false) {
+  liveRefreshList = true;
+  if (includeDetail && conversationId === state.selectedId) liveRefreshDetail = conversationId;
+  clearTimeout(liveRefreshTimer);
+  liveRefreshTimer = setTimeout(() => {
+    const detailId = liveRefreshDetail;
+    const shouldLoadList = liveRefreshList;
+    liveRefreshDetail = null;
+    liveRefreshList = false;
+    if (detailId && detailId === state.selectedId) loadDetail(detailId);
+    if (shouldLoadList) loadList();
+  }, 180);
+}
 function closeStream() { if (state.stream) { state.stream.close(); state.stream = null; state.streamId = null; } }
 function openStream(id) {
   if (state.streamId === id && state.stream) return;
   closeStream();
   const url = `/conversations/${encodeURIComponent(id)}/runtime/events${state.token ? `?token=${encodeURIComponent(state.token)}` : ''}`;
   const source = new EventSource(url);
-  let timer;
-  const refresh = () => { clearTimeout(timer); timer = setTimeout(() => { if (state.selectedId === id) { loadDetail(id); loadList(); } }, 120); };
+  const refresh = () => scheduleLiveRefresh(id, true);
   ['runtime.state_changed', 'runtime.transcript_final', 'runtime.ai_started', 'runtime.ai_completed', 'runtime.voice_started', 'runtime.voice_stopped',
     'runtime.owner_needed', 'runtime.configuration_changed', 'runtime.paused', 'runtime.resumed', 'runtime.stopped', 'runtime.started',
     'runtime.takeover', 'runtime.returned_to_assistant', 'runtime.sms_transition_requested', 'runtime.interrupted']
@@ -2437,15 +2480,12 @@ function openOwnerStream() {
     // A stream that won't reopen is usually an expired or revoked session: ask the API, which signs out cleanly.
     if (ownerStream && ownerStream.readyState === EventSource.CLOSED) api('/auth/session').then(openOwnerStream, () => {});
   };
-  let timer;
   const refresh = (conversationId) => {
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      loadList();
-      // The conversation-specific stream owns the open screen. Avoid fetching
-      // and rebuilding it twice for every realtime event.
-      if (state.selectedId && conversationId === state.selectedId && state.streamId !== state.selectedId) loadDetail();
-    }, 150);
+    // The conversation-specific stream owns the open detail. Both streams use
+    // one scheduler so a single server event causes one list read and one
+    // detail read, never two competing repaints.
+    scheduleLiveRefresh(conversationId,
+      Boolean(state.selectedId && conversationId === state.selectedId && state.streamId !== state.selectedId));
   };
   ownerStream.addEventListener('runtime.attention', (event) => {
     const data = JSON.parse(event.data);
