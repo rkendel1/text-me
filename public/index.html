@@ -2165,11 +2165,10 @@ async function setupStep(step) {
   if (step === 'identity') {
     node.innerHTML = `<div class="inner">${heading('Your name', 'Your assistant introduces you by name to the people who call.')}
       <input class="field" id="obName" autocomplete="name" placeholder="Your name" value="${esc(state.me.user.name || '')}">
-      <input class="field" id="obAccountName" placeholder="Account name (optional)" value="${esc(state.me.account ? state.me.account.name : '')}">
       <div class="err" id="obError"></div><div class="grow"></div>
       <button class="btn filled" id="obSave">Continue</button></div>`;
     $('#obSave').onclick = async () => {
-      try { await api('/account/onboarding/identity', { method: 'POST', body: { name: $('#obName').value, accountName: $('#obAccountName').value } }); nextSetup(); }
+      try { await api('/account/onboarding/identity', { method: 'POST', body: { name: $('#obName').value } }); nextSetup(); }
       catch (error) { setupError(error); }
     };
   } else if (step === 'phone') {
