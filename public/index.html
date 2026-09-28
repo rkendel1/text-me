@@ -1989,7 +1989,6 @@ function renderSettings() {
     <div class="group">
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--indigo, #5856d6)">${I.person}</span><span class="row-body"><span class="row-title">${esc((state.me && state.me.account && state.me.account.name) || 'Your account')}</span><div class="row-sub">${esc(state.me ? `${state.me.user.email} · ${state.me.account ? state.me.account.role : ''}` : '')}</div></span></div>
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--blue)">${I.phone}</span><span class="row-body"><span class="row-title" id="phoneNumber">Your number</span><div class="row-sub" id="phoneStatus">Checking…</div></span><button class="btn tinted" id="phoneConnect" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Connect</button></div>
-      <button class="row action" id="phoneTest" style="--inset:57px" hidden><span class="tile" style="background:var(--green)">${I.phone}</span><span class="row-body"><span class="row-title">Test My Assistant</span><div class="row-sub">Call directly so voicemail can’t intercept the test</div></span></button>
       ${(state.me && state.me.memberships.length > 1) ? '<button class="row action" id="switchAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">' + I.person + '</span><span class="row-body">Switch Account…</span></button>' : ''}
       <button class="row action" id="newAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">${I.person}</span><span class="row-body">Create Another Account…<div class="row-sub" style="font-size:13px">Its own line, devices and conversations</div></span></button>
     </div>
@@ -2090,9 +2089,9 @@ async function refreshPhoneRow() {
     $('#phoneConnect').hidden = !phone.available;
     $('#phoneConnect').textContent = phone.forwardingSeen ? 'Details' : 'Set Up';
     $('#phoneConnect').onclick = () => phone.assistantLine ? forwardingSheet() : setupStep('phone');
-    [$('#phoneTest'), $('#assistantTest')].filter(Boolean).forEach((test) => {
+    [$('#assistantTest')].filter(Boolean).forEach((test) => {
       test.hidden = !(phone.connected && phone.ownerNumber);
-      test.onclick = () => chooseAssistantTest(phone);
+      test.onclick = () => callAssistant(phone);
     });
   } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
 }
@@ -2112,32 +2111,10 @@ function forwardingHTML(phone) {
     <div class="group-footer" id="forwardSeen">${phone.forwardingSeen ? `✓ Forwarded calls are arriving (last ${esc(relTime(phone.lastForwardedAt))}).` : 'Waiting for the first forwarded call.'}</div>`;
 }
 
-async function placeTestCall() {
-  haptic();
-  try {
-    await api('/owner/phone/test-call', { method: 'POST' });
-    toast('Answer the call to hear your assistant — don’t send it to Live Voicemail', 'phone', 'var(--green)');
-  } catch (error) { errorToast(error); }
-}
-
-async function chooseAssistantTest(phone) {
+function callAssistant(phone) {
   haptic();
   if (!phone.assistantLine) return;
-  const choice = await actionSheet({
-    title: 'Test Your Assistant',
-    message: `Call ${formatPhone(phone.assistantLine)} directly for a reliable test. “Call me” may be silently intercepted by Live Voicemail or unknown-caller filtering.`,
-    actions: [
-      { label: 'Call Assistant Now', value: 'direct' },
-      { label: 'Copy Assistant Number', value: 'copy' },
-      { label: 'Have Assistant Call Me', value: 'outbound' },
-    ],
-  });
-  if (choice === 'direct') window.location.href = `tel:${phone.assistantLine}`;
-  if (choice === 'copy') {
-    try { await navigator.clipboard.writeText(phone.assistantLine); toast('Assistant number copied', 'phone', 'var(--green)'); }
-    catch { toast(formatPhone(phone.assistantLine), 'phone', 'var(--blue)'); }
-  }
-  if (choice === 'outbound') await placeTestCall();
+  window.location.href = `tel:${phone.assistantLine}`;
 }
 
 async function forwardingSheet() {
@@ -2161,7 +2138,7 @@ function bindForwardingCopy(root, phone) {
     catch { toast(code, 'info', 'var(--blue)'); }
   });
   const test = root.querySelector('[data-test-call]');
-  if (test) test.onclick = () => chooseAssistantTest(phone);
+  if (test) test.onclick = () => callAssistant(phone);
 }
 
 /* ---------------- Account setup: the server's onboarding state machine, step by step ---------------- */

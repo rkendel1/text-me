@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -15,6 +15,8 @@ function nativeBuildEnvironment() {
 
 const buildEnvironment = nativeBuildEnvironment();
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
+const derivedData = `${projectRoot}/build-device`;
+const legacyDerivedData = `${projectRoot}/ios/build-device`;
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -76,6 +78,11 @@ console.log('Building, signing, installing and launching Text Me on your iPhoneâ
 // Expo CLI currently asks Xcode 27 for Simulator.app even for a physical
 // --device build. Perform the same native steps directly so this path never
 // depends on a simulator being installed.
+// Older versions put DerivedData below ios/. React Native's CocoaPods hook
+// recursively finds every Info.plist there and tries to parse binary build
+// products as UTF-8 source plists, so remove that generated cache first and
+// keep all future build output outside the native project directory.
+rmSync(legacyDerivedData, { recursive: true, force: true });
 run('pod', ['install'], { cwd: `${projectRoot}/ios` });
 
 const identities = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
@@ -99,7 +106,7 @@ run('xcodebuild', [
   '-scheme', 'TextMe',
   '-configuration', 'Release',
   '-destination', `id=${deviceId}`,
-  '-derivedDataPath', 'ios/build-device',
+  '-derivedDataPath', derivedData,
   '-allowProvisioningUpdates',
   '-allowProvisioningDeviceRegistration',
   `DEVELOPMENT_TEAM=${developmentTeam}`,
@@ -107,12 +114,21 @@ run('xcodebuild', [
   'build',
 ]);
 
-const app = `${projectRoot}/ios/build-device/Build/Products/Release-iphoneos/TextMe.app`;
+const app = `${derivedData}/Build/Products/Release-iphoneos/TextMe.app`;
 runWithRetry('xcrun', [
   'devicectl', 'device', 'install', 'app', '--device', deviceId, '--timeout', '180', app,
 ], 3);
-run('xcrun', [
+const launch = spawnSync('xcrun', [
   'devicectl', 'device', 'process', 'launch', '--device', deviceId,
   '--terminate-existing', 'app.textme.owner',
-]);
+], { cwd: projectRoot, env: buildEnvironment, encoding: 'utf8' });
+if (launch.status !== 0) {
+  const details = `${launch.stdout ?? ''}\n${launch.stderr ?? ''}`;
+  if (/Locked|could not be unlocked/i.test(details)) {
+    console.log('Text Me is installed. Unlock your iPhone and tap the Text Me icon to open it.');
+    process.exit(0);
+  }
+  process.stderr.write(details);
+  process.exit(launch.status ?? 1);
+}
 console.log('Text Me is installed and running on your iPhone.');
