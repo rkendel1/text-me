@@ -64,8 +64,10 @@ test('rate-limited auth accepts Vercel forwarded client addresses', async () => 
 
 test('a verified Neon social identity creates or resumes one app account and session', async (t) => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
+  globalThis.fetch = async (input, init) => {
     assert.match(String(input), /\/get-session(?:\?|$)/);
+    const method = input instanceof Request ? input.method : init?.method ?? 'GET';
+    assert.equal(method, 'GET', 'Neon get-session must never inherit the browser handoff POST');
     return Response.json({
       user: {
         id: 'neon-user-1', email: 'Social@Example.test', name: 'Social Owner', emailVerified: true,

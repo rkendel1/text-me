@@ -563,6 +563,16 @@ export function createApp(options: AppOptions): express.Express {
       ...(!['GET', 'HEAD'].includes(method) ? { body: rawBody ?? JSON.stringify(request.body ?? {}) } : {}),
     });
   };
+  const neonSessionRequest = (request: Request): globalThis.Request => {
+    const source = neonWebRequest(request);
+    const headers = new Headers(source.headers);
+    // Neon's get-session route is a body-less GET even though our same-origin
+    // browser handoff is POST (so it cannot be triggered by navigation).
+    headers.delete('content-type');
+    headers.delete('content-length');
+    headers.delete('transfer-encoding');
+    return new globalThis.Request(source.url, { method: 'GET', headers });
+  };
   const copyNeonCookies = (upstream: globalThis.Response, response: Response): void => {
     const cookies = upstream.headers.getSetCookie();
     if (cookies.length) response.setHeader('Set-Cookie', cookies);
@@ -612,7 +622,7 @@ export function createApp(options: AppOptions): express.Express {
     app.post('/auth/neon/session', async (request, response, next) => {
       try {
         const upstream = await handleAuthProxyRequest({
-          request: neonWebRequest(request), path: 'get-session', baseUrl: neon.baseUrl,
+          request: neonSessionRequest(request), path: 'get-session', baseUrl: neon.baseUrl,
           cookieSecret: neon.cookieSecret, sameSite: 'lax',
         });
         copyNeonCookies(upstream, response);
