@@ -226,6 +226,7 @@ test('the owner can test the real assistant by having its line call their verifi
   assert.equal(started.status, 202, JSON.stringify(started.body));
   assert.deepEqual({ from: started.body.from, to: started.body.to }, { from: owner.line, to: owner.personal });
   assert.equal(numbers.testCalls.length, 1);
+  assert.equal(numbers.testCalls[0].humanOnly, true);
   assert.equal(numbers.testCalls[0].url,
     'https://text-me.vercel.app/webhooks/twilio/voice/test?assistantLine=%2B15550000000');
 

@@ -747,6 +747,13 @@ document.querySelectorAll('[data-icon]').forEach((node) => { node.outerHTML = I[
 
 /* ---------------- Helpers ---------------- */
 const $ = (selector, root = document) => root.querySelector(selector);
+/** Preserve live DOM nodes (focus, scroll and compositing) when their content did not change. */
+function replaceHTML(node, html) {
+  if (node.__textMeHTML === html) return false;
+  node.__textMeHTML = html;
+  node.innerHTML = html;
+  return true;
+}
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 const phoneMq = matchMedia('(max-width: 759px)');
 const isPhone = () => phoneMq.matches;
@@ -1307,7 +1314,11 @@ async function openConversation(id, options = {}) {
   const livePath = `/conversations/${encodeURIComponent(id)}/live`;
   if (location.pathname !== livePath) history.replaceState(null, '', livePath);
   if (options.instant) { $('#liveTab').classList.add('dragging'); setTimeout(() => $('#liveTab').classList.remove('dragging'), 50); }
-  if (changed) { state.detail = null; $('#transcript').innerHTML = ''; $('#composerInput').value = ''; }
+  if (changed) {
+    state.detail = null;
+    const transcript = $('#transcript'); transcript.innerHTML = ''; transcript.__textMeHTML = undefined;
+    $('#composerInput').value = '';
+  }
   $('#detailEmpty').hidden = true; $('#detailBody').hidden = false;
   if (isPhone()) pushDetail();
   const summary = state.conversations.find((conversation) => conversation.id === id);
@@ -1383,7 +1394,8 @@ function renderOwnerCard(detail) {
   const node = $('#ownerCard'); const request = detail.ownerRequest;
   node.hidden = !request;
   if (!request) return;
-  node.innerHTML = `<div class="card-kicker">${I.bell} Owner Needed</div><div class="question">${esc(request.question)}</div>${quickRepliesHTML(detail, request)}`;
+  const html = `<div class="card-kicker">${I.bell} Owner Needed</div><div class="question">${esc(request.question)}</div>${quickRepliesHTML(detail, request)}`;
+  if (!replaceHTML(node, html)) return;
   node.querySelectorAll('[data-reply]').forEach((button) => button.onclick = () => answerOwner(detail.id, button.dataset.reply, button));
   node.querySelector('[data-else]').onclick = () => { $('#composerInput').focus(); };
   node.querySelector('[data-takeover]').onclick = () => onQuick('takeover');
@@ -1405,12 +1417,14 @@ const MODE_LABEL = { everything: 'Automatic', unsure: 'Ask me', commitments: 'As
 function renderStrip(detail) {
   const runtime = detail.runtime || {};
   const onOff = (value) => (value ? 'On' : 'Off');
-  $('#strip').innerHTML = `<div class="chips">
+  const strip = $('#strip');
+  const html = `<div class="chips">
       <span class="chip${runtime.voiceEnabled ? '' : ' off'}">Voice <b>${onOff(runtime.voiceEnabled)}</b></span>
       <span class="chip${runtime.transcriptionEnabled ? '' : ' off'}">Transcribe <b>${onOff(runtime.transcriptionEnabled)}</b></span>
       <span class="chip">AI <b>${esc(MODE_LABEL[currentHandling(runtime)])}</b></span>
       ${runtime.temporarySettings ? '<span class="chip temp">Temporary settings</span>' : ''}</div>
     <button class="adjust" id="adjustInline" aria-label="Adjust this conversation">${I.sliders}Adjust</button>`;
+  if (!replaceHTML(strip, html)) return;
   $('#adjustInline').onclick = openAdjust;
   $('#strip .chips').onclick = openAdjust;
 }
@@ -1429,8 +1443,10 @@ function renderQuick(detail) {
     { id: 'transition-to-sms', label: runtime.state === 'transferring' ? 'Waiting…' : 'Text', icon: 'message', disabled: !textAvailable || stopped },
     { id: 'stop', label: 'Stop', icon: 'phoneDown', cls: 'red', disabled: stopped },
   ];
-  $('#quick').innerHTML = buttons.map((button) => `<button class="qa ${button.cls || ''}" data-cmd="${button.id}" ${button.disabled ? 'disabled' : ''} aria-label="${esc(button.label)}"><span class="circle">${I[button.icon]}</span>${esc(button.label)}</button>`).join('');
-  $('#quick').querySelectorAll('[data-cmd]').forEach((node) => node.onclick = () => { haptic(); onQuick(node.dataset.cmd); });
+  const quick = $('#quick');
+  const html = buttons.map((button) => `<button class="qa ${button.cls || ''}" data-cmd="${button.id}" ${button.disabled ? 'disabled' : ''} aria-label="${esc(button.label)}"><span class="circle">${I[button.icon]}</span>${esc(button.label)}</button>`).join('');
+  if (!replaceHTML(quick, html)) return;
+  quick.querySelectorAll('[data-cmd]').forEach((node) => node.onclick = () => { haptic(); onQuick(node.dataset.cmd); });
 }
 
 async function onQuick(command) {
@@ -1531,7 +1547,7 @@ function renderTranscript(detail) {
   if (runtimeState === 'thinking') html += '<div class="bubble out tail typing" aria-label="Assistant is thinking"><i></i><i></i><i></i></div>';
   if (!items.length && !html) html = `<div class="empty-state" style="padding-top:40px">${I.wave}<h3>Waiting for the Caller</h3><p>The transcript appears here the moment anyone speaks.</p></div>`;
   if (state.pendingMessage) html += `<div class="bubble out owner tail">${esc(state.pendingMessage)}</div><div class="receipt">Sending…</div>`;
-  node.innerHTML = html;
+  replaceHTML(node, html);
   if (nearBottom || state.forceScroll) { node.scrollTop = node.scrollHeight; state.forceScroll = false; }
 }
 
@@ -1541,9 +1557,11 @@ function renderComposer(detail) {
   const textable = canText(detail);
   const name = callerName(detail) || 'the caller';
   let enabled = true;
-  if (live) { input.placeholder = `Reply to ${name}…`; hint.innerHTML = `${I.mic.replace('<svg', '<svg style="display:inline;width:11px;height:11px;vertical-align:-1px"')} Your assistant will <b>tell ${esc(name)}</b> on the call`; }
-  else if (textable) { input.placeholder = `Tell your assistant what to text ${name}…`; hint.innerHTML = `Your assistant will <b>text ${esc(name)}</b> on your behalf`; }
-  else { enabled = false; input.placeholder = 'Texting isn’t available yet'; hint.innerHTML = `Tap <b>Text</b> to ask ${esc(name)} to continue by message`; }
+  let hintHTML;
+  if (live) { input.placeholder = `Reply to ${name}…`; hintHTML = `${I.mic.replace('<svg', '<svg style="display:inline;width:11px;height:11px;vertical-align:-1px"')} Your assistant will <b>tell ${esc(name)}</b> on the call`; }
+  else if (textable) { input.placeholder = `Tell your assistant what to text ${name}…`; hintHTML = `Your assistant will <b>text ${esc(name)}</b> on your behalf`; }
+  else { enabled = false; input.placeholder = 'Texting isn’t available yet'; hintHTML = `Tap <b>Text</b> to ask ${esc(name)} to continue by message`; }
+  replaceHTML(hint, hintHTML);
   hint.hidden = !hint.innerHTML;
   input.disabled = !enabled;
   updateSend();
@@ -1663,8 +1681,9 @@ let controlsSheet = null;
 const typingIn = (root) => root.contains(document.activeElement) && /^(TEXTAREA|INPUT)$/.test(document.activeElement.tagName) && document.activeElement.type !== 'checkbox';
 function renderInspector() {
   const inspector = $('#inspectorBody');
-  if (getComputedStyle($('#inspector')).display !== 'none' && !typingIn(inspector)) { inspector.innerHTML = adjustHTML(); bindAdjust(inspector); }
-  if (controlsSheet && !typingIn(controlsSheet.body)) { controlsSheet.body.innerHTML = adjustHTML(); bindAdjust(controlsSheet.body); }
+  const html = adjustHTML();
+  if (getComputedStyle($('#inspector')).display !== 'none' && !typingIn(inspector) && replaceHTML(inspector, html)) bindAdjust(inspector);
+  if (controlsSheet && !typingIn(controlsSheet.body) && replaceHTML(controlsSheet.body, html)) bindAdjust(controlsSheet.body);
 }
 function openAdjust() {
   if (!state.detail) return;
@@ -1915,6 +1934,7 @@ function renderSettings() {
       ${textRow('Assistant name', 'assistant.assistantName', assistant.assistantName, 40)}
       ${areaRow('Greeting', 'assistant.greeting', assistant.greeting)}
       ${areaRow('About you', 'assistant.ownerIntroduction', assistant.ownerIntroduction)}
+      <button class="row action" id="assistantTest" style="--inset:57px" hidden><span class="tile" style="background:var(--green)">${I.phone}</span><span class="row-body"><span class="row-title">Hear & Test My Assistant</span><div class="row-sub">Your iPhone rings. Answer and have a real conversation.</div></span></button>
     </div>
     <div class="group-footer">What callers hear first, and what your assistant says about you.</div>
     <div class="group-header">Tone</div>
@@ -2070,11 +2090,10 @@ async function refreshPhoneRow() {
     $('#phoneConnect').hidden = !phone.available;
     $('#phoneConnect').textContent = phone.forwardingSeen ? 'Details' : 'Set Up';
     $('#phoneConnect').onclick = () => phone.assistantLine ? forwardingSheet() : setupStep('phone');
-    const test = $('#phoneTest');
-    if (test) {
+    [$('#phoneTest'), $('#assistantTest')].filter(Boolean).forEach((test) => {
       test.hidden = !(phone.connected && phone.ownerNumber);
       test.onclick = placeTestCall;
-    }
+    });
   } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
 }
 
@@ -2097,7 +2116,7 @@ async function placeTestCall() {
   haptic();
   try {
     await api('/owner/phone/test-call', { method: 'POST' });
-    toast('Calling your phone now — answer it to test your assistant', 'phone', 'var(--green)');
+    toast('Answer the call to hear your assistant — don’t send it to Live Voicemail', 'phone', 'var(--green)');
   } catch (error) { errorToast(error); }
 }
 
@@ -2424,7 +2443,12 @@ function openOwnerStream() {
   let timer;
   const refresh = (conversationId) => {
     clearTimeout(timer);
-    timer = setTimeout(() => { loadList(); if (state.selectedId && conversationId === state.selectedId) loadDetail(); }, 150);
+    timer = setTimeout(() => {
+      loadList();
+      // The conversation-specific stream owns the open screen. Avoid fetching
+      // and rebuilding it twice for every realtime event.
+      if (state.selectedId && conversationId === state.selectedId && state.streamId !== state.selectedId) loadDetail();
+    }, 150);
   };
   ownerStream.addEventListener('runtime.attention', (event) => {
     const data = JSON.parse(event.data);

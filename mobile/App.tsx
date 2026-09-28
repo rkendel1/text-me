@@ -184,6 +184,9 @@ function AppContent() {
     const platform = JSON.stringify(Platform.OS);
     return `window.__ATTN_SESSION__=${token};window.__ATTN_PLATFORM__=${platform};true;`;
   }, [ready]);
+  // Keep the WebView source identity stable. Recreating this object during a
+  // native state update can make react-native-webview reload the whole page.
+  const webSource = useMemo(() => ({ uri: sourceUrl }), [sourceUrl]);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     let message: NativeMessage;
@@ -232,7 +235,7 @@ function AppContent() {
       <StatusBar style="auto" />
       <WebView
         ref={webView}
-        source={{ uri: sourceUrl }}
+        source={webSource}
         injectedJavaScriptBeforeContentLoaded={bootstrap}
         onMessage={onMessage}
         onNavigationStateChange={onNavigationStateChange}

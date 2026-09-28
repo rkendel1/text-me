@@ -89,6 +89,7 @@ test('HTTPS voice turns keep a spoken assistant call working without a WebSocket
   assert.match(answered.text, /voice\/turn\?conversationId=/);
 
   const [conversation] = (await request(app).get('/conversations').set(auth)).body;
+  assert.deepEqual(conversation.lastAssistantMessage, "Hi, this is Randy's assistant. How can I help?");
   const turn = await request(app)
     .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=1`)
     .type('form')
@@ -99,9 +100,24 @@ test('HTTPS voice turns keep a spoken assistant call working without a WebSocket
 
   const details = await request(app).get(`/conversations/${conversation.id}`).set(auth);
   assert.deepEqual(details.body.messages.map((message: { role: string; body: string }) => [message.role, message.body]), [
+    ['assistant', "Hi, this is Randy's assistant. How can I help?"],
     ['caller', 'Can you help me?'],
     ['assistant', 'I can help with that.'],
   ]);
+});
+
+test('an outbound test call never lets voicemail impersonate the caller', async () => {
+  const { app, auth, owner } = await ownedApp({
+    providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
+  });
+  const response = await request(app)
+    .post(`/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(owner.line)}`)
+    .type('form')
+    .send({ CallSid: 'CA-VOICEMAIL', From: owner.line, To: '+15555550199', AnsweredBy: 'machine_start' });
+
+  assert.equal(response.status, 200);
+  assert.match(response.text, /<Hangup/);
+  assert.deepEqual((await request(app).get('/conversations').set(auth)).body, []);
 });
 
 test('a call to a number no account owns is not answered and creates nothing', async () => {

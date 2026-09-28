@@ -6,6 +6,7 @@
   "scripts": {
     "start": "expo start --localhost --port 8081",
     "ios": "node scripts/run-ios.mjs",
+    "ios:device": "node scripts/run-ios-device.mjs",
     "ios:prebuild": "expo prebuild --platform ios",
     "android": "expo run:android",
     "web": "expo start --web",

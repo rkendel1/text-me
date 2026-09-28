@@ -29,7 +29,7 @@ export interface PhoneNumberClient {
   /** Place an automated verification call when SMS registration is unavailable. */
   callVerificationCode?(options: { from: string; to: string; code: string }): Promise<void>;
   /** Call the owner and connect the answered call to the real assistant webhook. */
-  placeTestCall?(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }>;
+  placeTestCall?(options: { from: string; to: string; url: string; statusCallback: string; humanOnly?: boolean }): Promise<{ id: string }>;
 }
 
 const fromTwilio = (number: { sid: string; phoneNumber: string; voiceUrl?: string | null; smsUrl?: string | null; statusCallback?: string | null }): ProviderNumber => ({
@@ -78,7 +78,7 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
     await this.client.calls.create({ from: options.from, to: options.to, twiml: response.toString() });
   }
 
-  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }> {
+  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string; humanOnly?: boolean }): Promise<{ id: string }> {
     const call = await this.client.calls.create({
       from: options.from,
       to: options.to,
@@ -87,6 +87,9 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
       statusCallback: options.statusCallback,
       statusCallbackMethod: 'POST',
       statusCallbackEvent: ['completed'],
+      // Test calls are meant for the owner to answer and talk to. Waiting for
+      // AMD prevents iPhone Live Voicemail from impersonating the caller.
+      ...(options.humanOnly ? { machineDetection: 'Enable', machineDetectionTimeout: 12 } : {}),
     });
     return { id: call.sid };
   }
@@ -96,7 +99,7 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
 export class FakePhoneNumberClient implements PhoneNumberClient {
   readonly provider = 'fake';
   readonly verificationCalls: Array<{ from: string; to: string; code: string }> = [];
-  readonly testCalls: Array<{ id: string; from: string; to: string; url: string; statusCallback: string }> = [];
+  readonly testCalls: Array<{ id: string; from: string; to: string; url: string; statusCallback: string; humanOnly?: boolean }> = [];
   private readonly numbers = new Map<string, ProviderNumber>();
 
   constructor(pool: string[] = [], private readonly purchasable = true) {
@@ -128,7 +131,7 @@ export class FakePhoneNumberClient implements PhoneNumberClient {
     this.verificationCalls.push(structuredClone(options));
   }
 
-  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }> {
+  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string; humanOnly?: boolean }): Promise<{ id: string }> {
     const call = { id: `CA${String(this.testCalls.length + 1).padStart(32, '0')}`, ...structuredClone(options) };
     this.testCalls.push(call);
     return { id: call.id };
@@ -382,6 +385,7 @@ export class PhoneNumberService {
       to: personal.number,
       url: url.toString(),
       statusCallback: this.urls().statusCallback,
+      humanOnly: true,
     });
     await this.audit(accountId, 'phone.test_call_started', { providerCallId: call.id, from: line.number, to: personal.number }, userId);
     return { id: call.id, from: line.number, to: personal.number };

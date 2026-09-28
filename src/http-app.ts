@@ -15,7 +15,7 @@ import { openOwnerRequest } from './domain/owner-requests.js';
 import type { ConversationRepository } from './repositories/conversation-repository.js';
 import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
-import type { IncomingCall, TelephonyProvider } from './telephony/provider.js';
+import type { IncomingCall, ProviderResponse, TelephonyProvider } from './telephony/provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
 import { FakeConversationModel } from './conversation/fake-model.js';
 import type { ConversationModel } from './conversation/model.js';
@@ -198,9 +198,15 @@ function registerIncomingCallRoute(
   configuration: OwnerConfigurationService,
   phoneNumbers: PhoneNumberService,
   transform?: (request: Request, call: IncomingCall) => IncomingCall,
+  reject?: (request: Request) => ProviderResponse | undefined,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
+      const rejected = reject?.(request);
+      if (rejected) {
+        response.status(200).type(rejected.contentType).send(rejected.body);
+        return;
+      }
       const parsed = provider.parseIncomingCall(request.body);
       const incomingCall = transform ? transform(request, parsed) : parsed;
       // The called number is the only thing that says whose call this is. Unknown line: fail closed.
@@ -238,6 +244,16 @@ function registerIncomingCallRoute(
       }
       const providerResponse = provider.answerCall(conversation, { greeting: settings.assistant.greeting });
       await service.answerCall(conversation.id, incomingCall.payload);
+      if (providerResponse.spokenGreeting && !conversation.events.some((event) =>
+        event.type === 'ai.response' && event.payload.callbackId === `${conversation.providerCallId}:greeting`)) {
+        await service.recordEvent(conversation.id, 'ai.response', {
+          callbackId: `${conversation.providerCallId}:greeting`,
+          speaker: 'assistant',
+          text: providerResponse.spokenGreeting,
+          source: 'telephony_tts',
+          sequence: 0,
+        });
+      }
       // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
       await service.raiseAttention(conversation.id, {
         type: 'conversation_started',
@@ -718,6 +734,12 @@ export function createApp(options: AppOptions): express.Express {
     // An outbound test rings the owner's phone. Treat the destination as the caller and the
     // signed query parameter as the account line so the rest is the exact inbound call path.
     return { ...call, callerPhone: call.calledNumber ?? call.callerPhone, calledNumber: assistantLine };
+  }, (request) => {
+    const answeredBy = typeof request.body?.AnsweredBy === 'string' ? request.body.AnsweredBy.toLowerCase() : '';
+    if (!answeredBy.startsWith('machine') && answeredBy !== 'fax') return undefined;
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.hangup();
+    return { body: twiml.toString(), contentType: 'text/xml; charset=utf-8' };
   });
   app.post('/webhooks/twilio/voice/turn', async (request, response, next) => {
     try {

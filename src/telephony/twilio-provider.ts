@@ -142,7 +142,7 @@ export class TwilioProvider implements TelephonyProvider {
     if (!this.voice.turnUrl) {
       response.say(prompt);
       response.hangup();
-      return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
+      return { body: response.toString(), contentType: 'text/xml; charset=utf-8', spokenGreeting: prompt };
     }
     const action = new URL(this.voice.turnUrl);
     action.searchParams.set('conversationId', conversationId);
@@ -152,6 +152,6 @@ export class TwilioProvider implements TelephonyProvider {
       speechTimeout: 'auto', timeout: 5, actionOnEmptyResult: true,
     });
     gather.say(prompt);
-    return { body: response.toString(), contentType: 'text/xml; charset=utf-8' };
+    return { body: response.toString(), contentType: 'text/xml; charset=utf-8', spokenGreeting: prompt };
   }
 }

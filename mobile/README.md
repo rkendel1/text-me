@@ -19,6 +19,20 @@ native screen is visible. Expo SDK 54's built-in `i` command still looks for the
 Do not open `http://127.0.0.1:8081` to use the native app. That address belongs
 to Metro's development server; the iOS app is the window shown in Device Hub.
 
+## Install on a physical iPhone
+
+Connect and unlock the iPhone, trust this Mac, and enable **Settings → Privacy &
+Security → Developer Mode**. Then run:
+
+```bash
+npm run ios:device
+```
+
+This creates a signed Release build, installs it on the connected iPhone, and
+launches it. It deliberately refuses to substitute a simulator. If Xcode has
+not signed an app for this phone before, add the Apple ID under **Xcode →
+Settings → Accounts** and select its development team when Xcode asks.
+
 Remote push needs a development or release build; do not use Expo Go for push testing. To point a development build at the local server:
 
 ```bash

@@ -32,6 +32,8 @@ export interface IncomingSms {
 export interface ProviderResponse {
   body: string;
   contentType: string;
+  /** Text the provider itself speaks before the conversational model takes over. */
+  spokenGreeting?: string;
 }
 
 export interface TelephonyProvider {
