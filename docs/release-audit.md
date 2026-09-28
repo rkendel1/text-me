@@ -205,6 +205,8 @@ Set these in **Vercel → your project → Settings → Environment Variables**
 | Variable | What | How to get it |
 |---|---|---|
 | `TELEPHONY_NUMBER_PURCHASE` | `on` lets an account buy a new assistant line when the pool is empty (the platform pays for it) | Leave unset to hand out only numbers already in the Twilio account. To text US callers from any line, complete **Messaging → Regulatory Compliance → A2P 10DLC** registration |
+| `TWILIO_MESSAGING_SERVICE_SID` | The single registered Messaging Service used for every onboarding verification text | Twilio → Messaging → Services. Its sender pool must contain the onboarding number and its A2P Campaign must be `VERIFIED` |
+| `TELEPHONY_SMS_VERIFICATION` | `on` exposes text-message verification during onboarding | Turn on only after the Messaging Service's A2P Campaign is `VERIFIED`; call verification remains available while approval is pending |
 | `PUBLIC_BASE_URL` | A custom domain, e.g. `https://assistant.example.com` | Vercel → Settings → Domains; then set it here (https only) |
 | `AI_GATEWAY_API_KEY` | Only when **not** on Vercel | Vercel dashboard → **AI Gateway → API Keys → Create** |
 | `AI_GATEWAY_TEAM` | Team slug, only if the key belongs to a different team | Vercel team settings |

@@ -8,7 +8,7 @@ import { getConfig, type AppConfig } from './config.js';
 import { OwnerConfigurationService } from './owner/configuration.js';
 import { OwnerDeviceService } from './owner/device.js';
 import { QueuedMacMessagesOwnerChannel } from './owner/delivery.js';
-import { TwilioMessagingProvider } from './messaging/twilio-provider.js';
+import { TwilioMessagingProvider, TwilioMessagingServiceProvider } from './messaging/twilio-provider.js';
 import { PostgresConversationRepository } from './repositories/postgres-conversation-repository.js';
 import {
   PostgresConversationRuntimeEventStore,
@@ -106,12 +106,15 @@ export function buildServerWithPool(
     : undefined;
   // Platform credentials; each account's numbers are records in `phone_numbers`.
   const messagingProvider = platform.messagingProvider ?? new TwilioMessagingProvider(config.twilioAccountSid, config.twilioAuthToken);
+  const verificationMessaging = !platform.messagingProvider && config.twilioMessagingServiceSid
+    ? new TwilioMessagingServiceProvider(config.twilioAccountSid, config.twilioAuthToken, config.twilioMessagingServiceSid)
+    : undefined;
   const phoneNumbers = new PhoneNumberService(
     tenancyStore,
     platform.phoneNumberClient ?? new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
     config.publicBaseUrl,
     messagingProvider,
-    { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification },
+    { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification, verificationMessaging },
   );
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 

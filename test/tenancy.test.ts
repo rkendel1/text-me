@@ -5,7 +5,7 @@ import request from 'supertest';
 
 import { createApp } from '../src/http-app.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
-import { FakePhoneNumberClient, MAX_VERIFICATION_ATTEMPTS, VERIFICATION_TTL_MS } from '../src/telephony/phone-number.js';
+import { FakePhoneNumberClient, MAX_VERIFICATION_ATTEMPTS, PhoneNumberService, VERIFICATION_TTL_MS } from '../src/telephony/phone-number.js';
 import { can, type TenantAction } from '../src/tenancy/authorization.js';
 import { InMemoryTenancyStore, PhoneNumberTakenError } from '../src/tenancy/store.js';
 import { verifyPassword } from '../src/tenancy/passwords.js';
@@ -216,6 +216,31 @@ test('existing-number onboarding can verify by voice call and accepts friendly f
   const verified = await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code });
   assert.equal(verified.status, 200);
   assert.equal(verified.body.ownerNumber, '+14014842831');
+});
+
+test('a registered platform Messaging Service can text every onboarding code before an account has a line', async () => {
+  const messaging = new FakeMessagingProvider();
+  const tenancyStore = new InMemoryTenancyStore();
+  const numbers = new FakePhoneNumberClient([], false);
+  const sent: Array<{ to: string; body: string }> = [];
+  const phoneNumbers = new PhoneNumberService(tenancyStore, numbers, 'https://text-me.vercel.app', messaging, {
+    allowSmsVerification: true,
+    verificationMessaging: {
+      async sendVerification(input) {
+        sent.push({ to: input.to, body: input.body });
+        return { providerMessageId: 'SM-onboarding' };
+      },
+    },
+  });
+  const app = createApp({ repository: new InMemoryConversationRepository(), messagingProvider: messaging, tenancyStore, phoneNumbers });
+  const owner = await signUp(app, { name: 'Texted' });
+  const started = await request(app).post('/account/phone/personal').set(owner.headers)
+    .send({ number: '+1 (401) 484-2831', channel: 'sms' });
+  assert.equal(started.status, 202, JSON.stringify(started.body));
+  assert.equal(sent[0].to, '+14014842831');
+  const code = sent[0].body.match(/\b(\d{6})\b/)?.[1];
+  assert.ok(code);
+  assert.equal((await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code })).status, 200);
 });
 
 test('phone number lifecycle: codes expire, attempts are limited, and a verified number belongs to one account', async () => {

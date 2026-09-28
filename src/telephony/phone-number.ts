@@ -4,6 +4,7 @@ import twilio from 'twilio';
 
 import { HttpError } from '../errors.js';
 import type { MessagingProvider } from '../messaging/provider.js';
+import type { VerificationMessagingProvider } from '../messaging/provider.js';
 import { createAuditEventId, createPhoneNumberId, E164, type PhoneNumber } from '../tenancy/model.js';
 import { PhoneNumberTakenError, type TenancyStore } from '../tenancy/store.js';
 
@@ -183,13 +184,16 @@ export class PhoneNumberService {
     private readonly client: PhoneNumberClient,
     private readonly publicBaseUrl: string,
     private readonly messaging: MessagingProvider | undefined,
-    private readonly options: { allowPurchase?: boolean; allowSmsVerification?: boolean; country?: string; now?: () => number } = {},
+    private readonly options: {
+      allowPurchase?: boolean; allowSmsVerification?: boolean; country?: string; now?: () => number;
+      verificationMessaging?: VerificationMessagingProvider;
+    } = {},
   ) {}
 
   verificationChannels(): Array<'call' | 'sms'> {
     return [
       ...(this.client.callVerificationCode ? ['call' as const] : []),
-      ...(this.messaging && this.options.allowSmsVerification !== false ? ['sms' as const] : []),
+      ...((this.options.verificationMessaging || this.messaging) && this.options.allowSmsVerification !== false ? ['sms' as const] : []),
     ];
   }
 
@@ -346,12 +350,11 @@ export class PhoneNumberService {
     const number = `${trimmed.startsWith('+') ? '+' : ''}${trimmed.replace(/\D/g, '')}`;
     if (!E164.test(number)) throw new HttpError(400, 'Enter your number in international format, e.g. +15551234567.');
     const from = await this.assistantLine(accountId);
-    if (!from) throw new HttpError(409, 'Get your assistant line first; the code is texted from it.', 'no_assistant_line');
     if (number === from || await this.store.findAssistantLine(number)) throw new HttpError(400, 'That’s an assistant line, not your personal number.');
-    if (channel === 'sms' && (!this.messaging || this.options.allowSmsVerification === false)) {
+    if (channel === 'sms' && (!(this.options.verificationMessaging || (this.messaging && from)) || this.options.allowSmsVerification === false)) {
       throw new HttpError(503, 'Text verification is not available yet. Choose Call Me With a Code.', 'sms_verification_unavailable');
     }
-    if (channel === 'call' && !this.client.callVerificationCode) {
+    if (channel === 'call' && (!from || !this.client.callVerificationCode)) {
       throw new HttpError(503, 'Call verification isn’t available right now.', 'call_verification_unavailable');
     }
     const { personal, pending } = await this.numbers(accountId);
@@ -376,11 +379,12 @@ export class PhoneNumberService {
       };
       await this.store.insertPhoneNumber(record);
     }
-    if (channel === 'call') await this.client.callVerificationCode!({ from, to: number, code });
-    else await this.messaging!.sendMessage({
-      from, to: number, body: `Your Text Me code is ${code}. It expires in 10 minutes.`,
-      idempotencyKey: `verify:${record.id}:${code}`,
+    if (channel === 'call') await this.client.callVerificationCode!({ from: from!, to: number, code });
+    else if (this.options.verificationMessaging) await this.options.verificationMessaging.sendVerification({
+      to: number, body: `Your Text Me code is ${code}. It expires in 10 minutes.`, idempotencyKey: `verify:${record.id}:${code}`,
     });
+    else await this.messaging!.sendMessage({ from: from!, to: number,
+      body: `Your Text Me code is ${code}. It expires in 10 minutes.`, idempotencyKey: `verify:${record.id}:${code}` });
     await this.audit(accountId, 'phone.verification_sent', { phoneNumberId: record.id, channel }, userId);
     return record;
   }

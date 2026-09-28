@@ -15,6 +15,11 @@ export interface MessagingProvider {
   sendMessage(input: MessagingInput): Promise<MessagingResult>;
 }
 
+/** A platform-wide registered sender used only for opt-in onboarding verification. */
+export interface VerificationMessagingProvider {
+  sendVerification(input: Omit<MessagingInput, 'from'>): Promise<MessagingResult>;
+}
+
 /** Sends as an account: resolves that account's assistant line for every message. */
 export interface AccountMessaging {
   send(accountId: string, input: Omit<MessagingInput, 'from'>): Promise<MessagingResult>;
