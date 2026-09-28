@@ -762,7 +762,33 @@ export function createApp(options: AppOptions): express.Express {
       let prompt = "I didn't hear anything. What can I help you with?";
       if (speech) {
         const callbackId = `${callSid}:gather:${turn}`;
-        const updated = await engine.respond(conversationId, { callbackId, audio: speech });
+        let updated;
+        try {
+          updated = await engine.respond(conversationId, { callbackId, audio: speech });
+        } catch (error) {
+          // Twilio treats a 500 from a voice webhook as an application error and
+          // plays its own recording. Always give the caller a useful, valid
+          // TwiML response even when the AI provider or its billing is down.
+          console.error(`[voice turn ${conversationId}] assistant unavailable`, error);
+          await service.raiseAttention(conversationId, {
+            type: 'error',
+            title: (name) => `Assistant couldn't answer ${name}`,
+            body: `The caller said: “${speech.slice(0, 180)}”`,
+            dedupeKey: `voice-assistant-failed:${callbackId}`,
+            priority: 'interrupt',
+            actions: ['open', 'take_over'],
+            metadata: { callbackId, channel: 'voice' },
+          });
+          const configuration = await ownerConfiguration.get(conversation.accountId).catch(() => undefined);
+          const ownerName = configuration?.assistant.ownerName.trim();
+          const twiml = new twilio.twiml.VoiceResponse();
+          twiml.say(ownerName
+            ? `I'm sorry, I'm having trouble helping right now. I'll let ${ownerName} know you called. Goodbye.`
+            : "I'm sorry, I'm having trouble helping right now. I'll let the account owner know you called. Goodbye.");
+          twiml.hangup();
+          response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+          return;
+        }
         const reply = [...updated.events].reverse().find((event) =>
           event.type === 'ai.response' && event.payload.callbackId === callbackId);
         prompt = typeof reply?.payload.text === 'string' && reply.payload.text.trim()

@@ -106,6 +106,37 @@ test('HTTPS voice turns keep a spoken assistant call working without a WebSocket
   ]);
 });
 
+test('a text-model outage ends a live call cleanly and alerts the owner instead of returning a Twilio application error', async () => {
+  const { app, auth, owner } = await ownedApp({
+    providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
+    conversationModel: {
+      name: 'unavailable',
+      respond: async () => { throw new Error('gateway credits unavailable'); },
+    },
+  });
+  await request(app)
+    .post('/webhooks/twilio/voice')
+    .type('form')
+    .send({ CallSid: 'CA-MODEL-DOWN', From: '+15555550123', To: owner.line });
+  const [conversation] = (await request(app).get('/conversations').set(auth)).body;
+
+  const turn = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=1`)
+    .type('form')
+    .send({ CallSid: 'CA-MODEL-DOWN', SpeechResult: 'Please ask Randy to call me.' });
+
+  assert.equal(turn.status, 200, turn.text);
+  assert.match(turn.headers['content-type'], /text\/xml/);
+  assert.match(turn.text, /having trouble helping right now/);
+  assert.match(turn.text, /let Randy know you called/);
+  assert.match(turn.text, /<Hangup/);
+
+  const details = await request(app).get(`/conversations/${conversation.id}`).set(auth);
+  assert.equal(details.body.messages.at(-1).body, 'Please ask Randy to call me.');
+  const audit = await request(app).get(`/conversations/${conversation.id}/audit`).set(auth);
+  assert.ok(audit.body.timeline.some((event: { type: string }) => event.type === 'assistant.failed'));
+});
+
 test('an outbound test call never lets voicemail impersonate the caller', async () => {
   const { app, auth, owner } = await ownedApp({
     providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],

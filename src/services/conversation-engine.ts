@@ -79,7 +79,25 @@ export class ConversationEngine {
       new Date(),
     );
     await this.runtime?.noteAiStarted(conversationId, input.callbackId);
-    const text = await this.model.respond(history, await this.options.contextFor?.(conversationId, 'voice'));
+    let text: string;
+    try {
+      text = await this.model.respond(history, await this.options.contextFor?.(conversationId, 'voice'));
+    } catch (error) {
+      await this.repository.appendEvent(
+        conversationId,
+        'assistant.failed',
+        {
+          callbackId: input.callbackId,
+          channel: 'voice',
+          reason: 'assistant_unavailable',
+        },
+        new Date(),
+      );
+      // Do not leave the owner UI stuck on “Assistant thinking” when the model
+      // provider rejects a request or is temporarily unavailable.
+      await this.runtime?.noteVoiceStopped(conversationId, input.callbackId);
+      throw error;
+    }
     const currentConversation = await this.requireConversation(conversationId);
     if (currentConversation.state === 'text_active' || currentConversation.events.some(
       (event) => event.type === 'conversation.channel_transitioned',
