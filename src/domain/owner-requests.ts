@@ -9,6 +9,10 @@ export interface OwnerRequest {
 
 /** The assistant's latest request for the owner, if the owner hasn't answered it yet. */
 export function openOwnerRequest(conversation: Conversation): OwnerRequest | null {
+  // A voice-only request cannot remain actionable after the caller is gone.
+  // Any follow-up after completion must be a new owner action, not a stale
+  // "caller is on hold" card.
+  if (conversation.status === 'completed') return null;
   const request = [...conversation.events].reverse().find((event) => event.type === 'owner.attention.requested');
   if (!request) return null;
   const answered = conversation.events.some((event) => event.type === 'owner.message' &&

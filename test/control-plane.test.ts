@@ -417,3 +417,10 @@ test('owner surfaces do not replace visible screens on polling timers', async ()
   assert.doesNotMatch(html, /setInterval\(\(\) => \{ if \(state\.selectedId\) loadDetail/);
   assert.doesNotMatch(html, /Keep device status current while Settings is on screen/);
 });
+
+test('completed calls do not offer Restart or other live-call controls', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const html = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+  assert.match(html, /const ended = detail\.status === 'completed' \|\| stopped;/);
+  assert.match(html, /quick\.hidden = ended;/);
+});

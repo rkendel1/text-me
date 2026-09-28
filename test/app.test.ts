@@ -696,6 +696,58 @@ test('Stop terminates the provider call and an in-flight voice turn cannot conti
   assert.doesNotMatch(lateTurn.text, /<Gather/);
 });
 
+test('a callback decision confirms the number and ends instead of reopening appointment intake', async () => {
+  const { app, auth, owner, repository } = await ownedApp({
+    providers: [new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' })],
+    conversationModel: {
+      name: 'unavailable',
+      respond: async () => { throw new Error('gateway unavailable'); },
+    },
+  });
+  await request(app).post('/webhooks/twilio/voice').type('form')
+    .send({ CallSid: 'CA-CALLBACK-CLOSE', From: '+15555550123', To: owner.line });
+  const [conversation] = await repository.list(owner.accountId);
+  await repository.appendEvent(conversation.id, 'owner.attention.requested', {
+    requestId: 'req_callback', question: 'A caller wants an appointment.', suggestedReplies: ["I'll call them back"], source: 'voice',
+  }, new Date());
+  await request(app).post(`/conversations/${conversation.id}/messages`).set(auth)
+    .send({ body: "I'll call them back", idempotencyKey: 'web-callback' });
+  const relayed = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=3`)
+    .type('form').send({ CallSid: 'CA-CALLBACK-CLOSE', SpeechResult: '' });
+  assert.match(relayed.text, /best number to use/i);
+
+  const confirmed = await request(app)
+    .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=4`)
+    .type('form').send({ CallSid: 'CA-CALLBACK-CLOSE', SpeechResult: 'Yes.' });
+  assert.equal(confirmed.status, 200, confirmed.text);
+  assert.match(confirmed.text, /Randy will call you back\. Goodbye/i);
+  assert.match(confirmed.text, /<Hangup\/>/);
+  assert.doesNotMatch(confirmed.text, /<Gather/);
+
+  const detail = await request(app).get(`/conversations/${conversation.id}`).set(auth);
+  assert.equal(detail.body.runtime.state, 'stopped');
+  assert.equal(detail.body.ownerRequest, null);
+  assert.equal(detail.body.messages.at(-1).body, 'Thank you. Randy will call you back. Goodbye.');
+  assert.equal(detail.body.eventLog.filter((event: { type: string }) => event.type === 'owner.attention.requested').length, 1);
+});
+
+test('completed calls never expose a stale owner request', async () => {
+  const { app, auth, owner, repository } = await ownedApp();
+  await request(app).post('/webhooks/fake/voice')
+    .send({ callId: 'completed-owner-request', callerPhone: '+15555550123', to: owner.line });
+  const [conversation] = await repository.list(owner.accountId);
+  await repository.appendEvent(conversation.id, 'owner.attention.requested', {
+    requestId: 'stale', question: 'Caller is waiting', suggestedReplies: ['Reply'], source: 'voice',
+  }, new Date());
+  await request(app).post('/webhooks/fake/status')
+    .send({ callId: 'completed-owner-request', status: 'completed', durationSeconds: 20 });
+  const detail = await request(app).get(`/conversations/${conversation.id}`).set(auth);
+  assert.equal(detail.body.status, 'completed');
+  assert.equal(detail.body.ownerRequest, null);
+  assert.equal(detail.body.needsOwner, false);
+});
+
 async function answeredConversation(repository: InMemoryConversationRepository, accountId: string, callId: string) {
   return (await repository.createIfAbsent({
     provider: 'fake', providerCallId: callId, callerPhone: '+15555550123', status: 'answered', startedAt: new Date(), accountId,

@@ -844,6 +844,66 @@ export function createApp(options: AppOptions): express.Express {
         return;
       }
 
+      // "I'll call them back" is a terminal owner decision. Once the caller
+      // confirms the return number (or supplies a different one), acknowledge
+      // it and end the call instead of feeding "yes" back into appointment
+      // intake and asking the owner the same question again.
+      const callbackRelay = [...conversation.events].reverse().find((event) =>
+        event.type === 'owner.message.relayed' && typeof event.payload.instruction === 'string' &&
+        /call (?:them|you) back/i.test(String(event.payload.instruction)));
+      const callbackClosed = callbackRelay && conversation.events.some((event) =>
+        event.type === 'assistant.activity' && event.payload.activity === 'callback_confirmed' &&
+        event.occurredAt.getTime() >= callbackRelay.occurredAt.getTime());
+      if (callbackRelay && !callbackClosed && speech) {
+        const speechCallbackId = `${callSid}:gather:${turn}`;
+        const sequence = conversation.events.reduce((highest, event) => {
+          const value = Number(event.payload.sequence);
+          return Number.isFinite(value) ? Math.max(highest, value) : highest;
+        }, 0) + 1;
+        if (!conversation.events.some((event) =>
+          event.type === 'speech.transcript' && event.payload.callbackId === speechCallbackId)) {
+          await service.recordEvent(conversationId, 'speech.started', { callbackId: speechCallbackId, sequence });
+          await runtime.noteSpeechStarted(conversationId, speechCallbackId);
+          await service.recordEvent(conversationId, 'speech.transcript', {
+            callbackId: speechCallbackId, speaker: 'caller', text: speech, sequence,
+          });
+          await runtime.noteTranscript(conversationId, speechCallbackId, speech);
+        }
+
+        const askedForDifferentNumber = conversation.events.some((event) =>
+          event.type === 'ai.response' && event.payload.source === 'owner_callback_number' &&
+          event.occurredAt.getTime() >= callbackRelay.occurredAt.getTime());
+        if (/^(?:no|nope|not that one)\b/i.test(speech) && !askedForDifferentNumber) {
+          const prompt = 'What number should they use to call you back?';
+          await service.recordEvent(conversationId, 'ai.response', {
+            callbackId: `${callSid}:callback-number:${turn}`, speaker: 'assistant', text: prompt,
+            source: 'owner_callback_number', sequence: sequence + 1,
+          });
+          const providerResponse = twilioProvider.turn(conversationId, prompt, turn + 1);
+          response.status(200).type(providerResponse.contentType).send(providerResponse.body);
+          return;
+        }
+
+        const configuration = await ownerConfiguration.get(conversation.accountId);
+        const ownerName = configuration.assistant.ownerName.trim() || 'The account owner';
+        const prompt = `Thank you. ${ownerName} will call you back. Goodbye.`;
+        const callbackId = `${callSid}:callback-confirmed:${turn}`;
+        await service.recordEvent(conversationId, 'ai.response', {
+          callbackId, speaker: 'assistant', text: prompt,
+          source: 'owner_callback_complete', sequence: sequence + 1,
+        });
+        await service.recordEvent(conversationId, 'assistant.activity', {
+          activity: 'callback_confirmed', source: 'owner_relay', instruction: callbackRelay.payload.instruction,
+        });
+        await runtime.noteAiCompleted(conversationId, callbackId, prompt);
+        await runtime.stop(conversationId, conversation.accountId, { commandId: `callback-complete:${callbackId}` });
+        const twiml = new twilio.twiml.VoiceResponse();
+        twiml.say(prompt);
+        twiml.hangup();
+        response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
+        return;
+      }
+
       let prompt = "I didn't hear anything. What can I help you with?";
       if (speech) {
         const callbackId = `${callSid}:gather:${turn}`;

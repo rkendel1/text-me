@@ -1395,7 +1395,8 @@ function renderIsland(detail) {
   const mode = runtime.aiMode === 'owner_only' ? 'You’re in control' : runtime.aiMode === 'owner_assist' ? 'Asking you before decisions' : 'Assistant is handling it';
   $('#islandTitle').textContent = ended ? (runtime.state === 'text_active' ? 'Texting' : 'Call Ended')
     : runtime.state === 'text_active' ? 'Texting' : live ? 'On Call' : detail.primaryChannel === 'voice' ? 'Voice' : 'Conversation';
-  $('#islandSub').textContent = detail.ownerRequest ? 'Waiting for your answer · caller is on hold with the assistant'
+  $('#islandSub').textContent = ended ? 'This call is complete'
+    : detail.ownerRequest ? 'Waiting for your answer · caller is on hold with the assistant'
     : runtime.currentActivity ? `${runtime.currentActivity} · ${mode}` : mode;
   $('#islandPill').textContent = meta.label;
   tickTimer();
@@ -1451,6 +1452,7 @@ function renderStrip(detail) {
 function renderQuick(detail) {
   const runtime = detail.runtime || {};
   const stopped = runtime.state === 'stopped';
+  const ended = detail.status === 'completed' || stopped;
   const paused = runtime.state === 'paused';
   const ownerMode = runtime.aiMode === 'owner_only';
   const textAvailable = runtime.smsTransitionEnabled && !['text_active', 'transferring'].includes(runtime.state);
@@ -1463,6 +1465,8 @@ function renderQuick(detail) {
     { id: 'stop', label: 'Stop', icon: 'phoneDown', cls: 'red', disabled: stopped },
   ];
   const quick = $('#quick');
+  quick.hidden = ended;
+  if (ended) { replaceHTML(quick, ''); return; }
   const html = buttons.map((button) => `<button class="qa ${button.cls || ''}" data-cmd="${button.id}" ${button.disabled ? 'disabled' : ''} aria-label="${esc(button.label)}"><span class="circle">${I[button.icon]}</span>${esc(button.label)}</button>`).join('');
   if (!replaceHTML(quick, html)) return;
   quick.querySelectorAll('[data-cmd]').forEach((node) => node.onclick = () => { haptic(); onQuick(node.dataset.cmd); });
