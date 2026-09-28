@@ -44,6 +44,8 @@ export interface AppConfig {
   twilioAuthToken: string;
   /** Let accounts buy a new assistant line when the platform's pool of numbers is empty. */
   allowNumberPurchase: boolean;
+  /** Enable SMS verification only after the sending numbers are registered for local messaging rules. */
+  allowSmsVerification: boolean;
   /** Present when calls should be answered by the AI Gateway realtime voice agent. */
   realtimeVoice?: RealtimeVoiceConfig;
   /** Temporary test account that may activate without contacting Stripe. */
@@ -173,6 +175,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAccountSid: env.TWILIO_ACCOUNT_SID!.trim(),
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
+    allowSmsVerification: env.TELEPHONY_SMS_VERIFICATION === 'on',
     realtimeVoice: resolveRealtimeVoice(env),
     billingBypassAccountId: env.BILLING_BYPASS_ACCOUNT_ID?.trim() || undefined,
     stripe: env.STRIPE_SECRET_KEY && env.STRIPE_PRODUCT_ID ? {

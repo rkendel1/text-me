@@ -201,6 +201,23 @@ test('onboarding offers existing number, new number, and calling-later paths', a
   assert.equal(withLine.body.next, 'application');
 });
 
+test('existing-number onboarding can verify by voice call and accepts friendly formatting', async () => {
+  const { app, numbers } = saas({ pool: ['+15550000000'], purchasable: false });
+  const owner = await signUp(app, { name: 'Voice' });
+  await request(app).post('/account/onboarding/identity').set(owner.headers).send({ name: 'Voice' });
+  await request(app).post('/account/onboarding/phone-choice').set(owner.headers).send({ choice: 'existing' });
+  await request(app).post('/account/phone/line').set(owner.headers);
+  const started = await request(app).post('/account/phone/personal').set(owner.headers)
+    .send({ number: '  +1 (401) 484-2831  ', channel: 'call' });
+  assert.equal(started.status, 202, JSON.stringify(started.body));
+  assert.deepEqual(numbers.verificationCalls.map(({ from, to }) => ({ from, to })),
+    [{ from: '+15550000000', to: '+14014842831' }]);
+  const code = numbers.verificationCalls[0].code;
+  const verified = await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code });
+  assert.equal(verified.status, 200);
+  assert.equal(verified.body.ownerNumber, '+14014842831');
+});
+
 test('phone number lifecycle: codes expire, attempts are limited, and a verified number belongs to one account', async () => {
   const { app, messaging } = saas();
   const a = await onboardTenant(app, messaging, { personal: '+15553330001' });
@@ -217,10 +234,12 @@ test('phone number lifecycle: codes expire, attempts are limited, and a verified
 
   // Wrong codes are counted; after the limit, a new code is needed.
   await request(app).post('/account/phone/personal').set(b.headers).send({ number: '+15553330002' });
+  const realCode = lastCode(messaging, '+15553330002');
+  const wrongCode = realCode === '000000' ? '111111' : '000000';
   for (let attempt = 0; attempt < MAX_VERIFICATION_ATTEMPTS; attempt += 1) {
-    assert.equal((await request(app).post('/account/phone/personal/verify').set(b.headers).send({ code: '000000' })).body.code, 'verification_mismatch');
+    assert.equal((await request(app).post('/account/phone/personal/verify').set(b.headers).send({ code: wrongCode })).body.code, 'verification_mismatch');
   }
-  const locked = await request(app).post('/account/phone/personal/verify').set(b.headers).send({ code: lastCode(messaging, '+15553330002') });
+  const locked = await request(app).post('/account/phone/personal/verify').set(b.headers).send({ code: realCode });
   assert.equal(locked.status, 429);
   await request(app).post('/account/phone/personal').set(b.headers).send({ number: '+15553330002' });
   assert.equal((await request(app).post('/account/phone/personal/verify').set(b.headers).send({ code: lastCode(messaging, '+15553330002') })).status, 200);

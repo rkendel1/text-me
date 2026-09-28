@@ -111,7 +111,7 @@ export function buildServerWithPool(
     platform.phoneNumberClient ?? new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
     config.publicBaseUrl,
     messagingProvider,
-    { allowPurchase: config.allowNumberPurchase },
+    { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification },
   );
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 

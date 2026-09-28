@@ -1646,6 +1646,7 @@ export function createApp(options: AppOptions): express.Express {
       found: Boolean(status.assistantLine),
       connected: status.connected,
       forwarding: status.forwarding,
+      verificationChannels: phoneNumbers.verificationChannels(),
       ...(status.error ? { error: status.error } : {}),
       numbers: { assistantLine: presentPhone(status.assistantLine), personal: presentPhone(status.personal) },
       forwardingSeen: forwarded.length > 0,
@@ -1690,7 +1691,8 @@ export function createApp(options: AppOptions): express.Express {
     try {
       const context = tenantOf(request);
       const number = typeof request.body?.number === 'string' ? request.body.number : '';
-      const record = await phoneNumbers.startPersonalVerification(context.accountId, number, context.userId);
+      const channel = request.body?.channel === 'call' ? 'call' : 'sms';
+      const record = await phoneNumbers.startPersonalVerification(context.accountId, number, context.userId, channel);
       response.status(202).json({ personal: presentPhone(record) });
     } catch (error) {
       next(error);

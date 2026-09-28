@@ -24,6 +24,8 @@ export interface PhoneNumberClient {
   update(ref: string, urls: { voiceUrl: string; smsUrl: string; statusCallback: string }): Promise<ProviderNumber>;
   /** Buy a new number into the platform account (optional; only when the platform allows it). */
   purchase?(options: { country: string; areaCode?: string }): Promise<ProviderNumber>;
+  /** Place an automated verification call when SMS registration is unavailable. */
+  callVerificationCode?(options: { from: string; to: string; code: string }): Promise<void>;
 }
 
 const fromTwilio = (number: { sid: string; phoneNumber: string; voiceUrl?: string | null; smsUrl?: string | null; statusCallback?: string | null }): ProviderNumber => ({
@@ -64,11 +66,19 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
     if (!available) throw new Error('No numbers are available to buy right now.');
     return fromTwilio(await this.client.incomingPhoneNumbers.create({ phoneNumber: available.phoneNumber }));
   }
+
+  async callVerificationCode(options: { from: string; to: string; code: string }): Promise<void> {
+    const response = new twilio.twiml.VoiceResponse();
+    const spoken = options.code.split('').join(', ');
+    response.say(`Your Text Me verification code is ${spoken}. Again, ${spoken}.`);
+    await this.client.calls.create({ from: options.from, to: options.to, twiml: response.toString() });
+  }
 }
 
 /** A provider stand-in for local development and tests: a pool of numbers, plus "buying" new ones. */
 export class FakePhoneNumberClient implements PhoneNumberClient {
   readonly provider = 'fake';
+  readonly verificationCalls: Array<{ from: string; to: string; code: string }> = [];
   private readonly numbers = new Map<string, ProviderNumber>();
 
   constructor(pool: string[] = [], private readonly purchasable = true) {
@@ -94,6 +104,10 @@ export class FakePhoneNumberClient implements PhoneNumberClient {
     if (!number) throw new Error('Unknown number');
     Object.assign(number, urls);
     return structuredClone(number);
+  }
+
+  async callVerificationCode(options: { from: string; to: string; code: string }): Promise<void> {
+    this.verificationCalls.push(structuredClone(options));
   }
 
   get purchase(): PhoneNumberClient['purchase'] {
@@ -169,8 +183,15 @@ export class PhoneNumberService {
     private readonly client: PhoneNumberClient,
     private readonly publicBaseUrl: string,
     private readonly messaging: MessagingProvider | undefined,
-    private readonly options: { allowPurchase?: boolean; country?: string; now?: () => number } = {},
+    private readonly options: { allowPurchase?: boolean; allowSmsVerification?: boolean; country?: string; now?: () => number } = {},
   ) {}
+
+  verificationChannels(): Array<'call' | 'sms'> {
+    return [
+      ...(this.client.callVerificationCode ? ['call' as const] : []),
+      ...(this.messaging && this.options.allowSmsVerification !== false ? ['sms' as const] : []),
+    ];
+  }
 
   private now(): Date {
     return new Date(this.options.now?.() ?? Date.now());
@@ -320,13 +341,19 @@ export class PhoneNumberService {
   }
 
   /** Text a one-time code to the owner's number from the account's own assistant line. */
-  async startPersonalVerification(accountId: string, rawNumber: string, userId?: string): Promise<PhoneNumber> {
-    const number = rawNumber.replace(/[\s().-]/g, '');
+  async startPersonalVerification(accountId: string, rawNumber: string, userId?: string, channel: 'sms' | 'call' = 'sms'): Promise<PhoneNumber> {
+    const trimmed = rawNumber.trim();
+    const number = `${trimmed.startsWith('+') ? '+' : ''}${trimmed.replace(/\D/g, '')}`;
     if (!E164.test(number)) throw new HttpError(400, 'Enter your number in international format, e.g. +15551234567.');
     const from = await this.assistantLine(accountId);
     if (!from) throw new HttpError(409, 'Get your assistant line first; the code is texted from it.', 'no_assistant_line');
     if (number === from || await this.store.findAssistantLine(number)) throw new HttpError(400, 'That’s an assistant line, not your personal number.');
-    if (!this.messaging) throw new HttpError(503, 'Texting isn’t available right now.');
+    if (channel === 'sms' && (!this.messaging || this.options.allowSmsVerification === false)) {
+      throw new HttpError(503, 'Text verification is not available yet. Choose Call Me With a Code.', 'sms_verification_unavailable');
+    }
+    if (channel === 'call' && !this.client.callVerificationCode) {
+      throw new HttpError(503, 'Call verification isn’t available right now.', 'call_verification_unavailable');
+    }
     const { personal, pending } = await this.numbers(accountId);
     if (personal && (personal.status === 'verified' || personal.status === 'active') && personal.number === number) return personal;
     const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
@@ -349,11 +376,12 @@ export class PhoneNumberService {
       };
       await this.store.insertPhoneNumber(record);
     }
-    await this.messaging.sendMessage({
+    if (channel === 'call') await this.client.callVerificationCode!({ from, to: number, code });
+    else await this.messaging!.sendMessage({
       from, to: number, body: `Your Text Me code is ${code}. It expires in 10 minutes.`,
       idempotencyKey: `verify:${record.id}:${code}`,
     });
-    await this.audit(accountId, 'phone.verification_sent', { phoneNumberId: record.id }, userId);
+    await this.audit(accountId, 'phone.verification_sent', { phoneNumberId: record.id, channel }, userId);
     return record;
   }
 

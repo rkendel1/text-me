@@ -364,6 +364,7 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .feature b { display: block; font-size: 17px; }
 .feature span { color: var(--label-2); font-size: 15px; }
 .onboard .grow { flex: 1; min-height: 20px; }
+.onboard-back { align-self: flex-start; width: auto; border: 0; background: transparent; color: var(--blue); font: inherit; font-size: 17px; padding: 4px 0 22px; cursor: pointer; }
 .hook { background: var(--bg-elevated); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
 .hook .k { font-size: 13px; color: var(--label-2); }
 .hook .v { display: flex; align-items: center; gap: 8px; margin-top: 3px; }
@@ -2179,11 +2180,12 @@ async function setupStep(step) {
     };
     const chooseAgain = () => renderChoices();
     const renderChoices = () => {
-      node.innerHTML = `<div class="inner">${heading('How do you want to use calling?', 'Choose what fits now. You can change this later in Settings.')}
+      node.innerHTML = `<div class="inner"><button class="onboard-back" id="obBack">‹ Back</button>${heading('How do you want to use calling?', 'Choose what fits now. You can change this later in Settings.')}
         <button class="big-choice" data-phone-choice="existing"><b>Keep my existing number</b><span>People keep calling your current number. Missed calls forward privately to your assistant.</span></button>
         <button class="big-choice" data-phone-choice="new"><b>Use a new Text Me number</b><span>Get a dedicated number that callers dial directly.</span></button>
         <button class="big-choice" data-phone-choice="later"><b>Set up calling later</b><span>Continue setting up your assistant without connecting a phone yet.</span></button>
         <div class="err" id="obError"></div></div>`;
+      $('#obBack').onclick = showSetup;
       node.querySelector('[data-phone-choice="existing"]').onclick = async () => {
         try { await saveChoice('existing'); renderExisting(); } catch (error) { setupError(error); }
       };
@@ -2196,21 +2198,55 @@ async function setupStep(step) {
     };
     const renderExisting = () => {
       const pending = phone.numbers && phone.numbers.personal && phone.numbers.personal.status === 'pending_verification' ? phone.numbers.personal : null;
-      node.innerHTML = `<div class="inner">${heading('Connect your existing number', 'Keep your current mobile number. Your plan uses private routing so your assistant can receive calls you miss.')}
-        <div class="group-header" style="padding-left:4px">Your mobile number</div>
-        <input class="field" id="obNumber" type="tel" autocomplete="tel" placeholder="+1 555 123 4567" value="${esc(pending ? pending.number : '')}">
-        <button class="btn tinted" id="obSend">${pending ? 'Send a New Code' : 'Connect My Number'}</button>
+      const countries = [
+        ['1', '🇺🇸', 'United States', '(401) 555-0123'], ['1', '🇨🇦', 'Canada', '(416) 555-0123'],
+        ['44', '🇬🇧', 'United Kingdom', '7700 900123'], ['61', '🇦🇺', 'Australia', '412 345 678'],
+        ['64', '🇳🇿', 'New Zealand', '21 123 4567'], ['353', '🇮🇪', 'Ireland', '85 123 4567'],
+        ['33', '🇫🇷', 'France', '6 12 34 56 78'], ['49', '🇩🇪', 'Germany', '1512 3456789'],
+        ['34', '🇪🇸', 'Spain', '612 34 56 78'], ['39', '🇮🇹', 'Italy', '312 345 6789'],
+        ['52', '🇲🇽', 'Mexico', '55 1234 5678'], ['55', '🇧🇷', 'Brazil', '11 91234 5678'],
+        ['91', '🇮🇳', 'India', '98765 43210'], ['81', '🇯🇵', 'Japan', '90 1234 5678'],
+        ['65', '🇸🇬', 'Singapore', '8123 4567'], ['27', '🇿🇦', 'South Africa', '82 123 4567'],
+      ];
+      const pendingNational = pending && pending.number.startsWith('+1') ? pending.number.slice(2) : pending ? pending.number : '';
+      node.innerHTML = `<div class="inner"><button class="onboard-back" id="obBack">‹ Back</button>${heading('Connect your existing number', 'Keep your current mobile number. Your plan uses private routing so your assistant can receive calls you miss.')}
+        <div class="group-header" style="padding-left:4px">Country or region</div>
+        <select class="field" id="obCountry">${countries.map(([code, flag, name], index) => `<option value="${code}" ${index === 0 ? 'selected' : ''}>${flag} ${name} (+${code})</option>`).join('')}</select>
+        <div class="group-header" style="padding-left:4px">Mobile number</div>
+        <input class="field" id="obNumber" type="tel" inputmode="tel" autocomplete="tel-national" placeholder="(401) 555-0123" value="${esc(pendingNational)}">
+        <button class="btn tinted" id="obCall">${pending ? 'Call Again With a Code' : 'Call Me With a Code'}</button>
+        ${(phone.verificationChannels || []).includes('sms') ? `<button class="btn" style="color:var(--blue);margin-top:6px" id="obText">${pending ? 'Text a New Code' : 'Text Me a Code'}</button>` : '<p class="group-footer" style="padding-left:4px">Text verification will be available after carrier registration. Call verification works now.</p>'}
         <input class="field" id="obCode" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" style="margin-top:12px" ${pending ? '' : 'hidden'}>
         <div class="err" id="obError"></div><div class="grow"></div>
-        <button class="btn filled" id="obVerify" ${pending ? '' : 'hidden'}>Verify</button>
-        <button class="btn" style="color:var(--blue);margin-top:6px" id="obChooseAgain">Choose Another Option</button></div>`;
-      $('#obChooseAgain').onclick = chooseAgain;
-      $('#obSend').onclick = async () => {
+        <button class="btn filled" id="obVerify" ${pending ? '' : 'hidden'}>Verify</button></div>`;
+      $('#obBack').onclick = chooseAgain;
+      const nationalNumber = () => {
+        const input = $('#obNumber').value.trim();
+        if (input.startsWith('+')) return `+${input.replace(/\D/g, '')}`;
+        let digits = input.replace(/\D/g, '');
+        const code = $('#obCountry').value;
+        if (code === '1' && digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+        return `+${code}${digits}`;
+      };
+      const requestCode = async (channel) => {
         try {
           if (!phone.assistantLine) phone = await api('/account/phone/line', { method: 'POST' });
-          await api('/account/phone/personal', { method: 'POST', body: { number: $('#obNumber').value } });
-          $('#obCode').hidden = false; $('#obVerify').hidden = false; $('#obCode').focus(); toast('Code sent', 'message', 'var(--green)');
+          await api('/account/phone/personal', { method: 'POST', body: { number: nationalNumber(), channel } });
+          $('#obCode').hidden = false; $('#obVerify').hidden = false; $('#obCode').focus();
+          toast(channel === 'call' ? 'Calling you now' : 'Code sent', channel === 'call' ? 'phone' : 'message', 'var(--green)');
         } catch (error) { setupError(error); }
+      };
+      $('#obCall').onclick = () => requestCode('call');
+      if ($('#obText')) $('#obText').onclick = () => requestCode('sms');
+      $('#obNumber').oninput = () => {
+        if ($('#obCountry').value !== '1' || $('#obNumber').value.trim().startsWith('+')) return;
+        const digits = $('#obNumber').value.replace(/\D/g, '').replace(/^1(?=\d{10})/, '').slice(0, 10);
+        $('#obNumber').value = digits.length > 6 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+          : digits.length > 3 ? `(${digits.slice(0, 3)}) ${digits.slice(3)}` : digits.length ? `(${digits}` : '';
+      };
+      $('#obCountry').onchange = () => {
+        const selected = $('#obCountry').selectedIndex;
+        $('#obNumber').placeholder = countries[selected][3];
       };
       $('#obVerify').onclick = async () => {
         try {
@@ -2225,12 +2261,11 @@ async function setupStep(step) {
     };
     const renderNew = () => {
       const hasLine = Boolean(phone.assistantLine);
-      node.innerHTML = `<div class="inner">${heading('Use a new Text Me number', 'This dedicated number goes directly to your assistant. Share it anywhere you want to receive calls.')}
+      node.innerHTML = `<div class="inner"><button class="onboard-back" id="obBack">‹ Back</button>${heading('Use a new Text Me number', 'This dedicated number goes directly to your assistant. Share it anywhere you want to receive calls.')}
         ${hasLine ? `<div class="group"><div class="row"><span class="row-body"><span class="row-title">Your Text Me number</span><div class="row-sub">${esc(formatPhone(phone.assistantLine))}</div></span></div></div>` : ''}
         <div class="err" id="obError"></div><div class="grow"></div>
-        <button class="btn filled" id="obNewLine">${hasLine ? 'Continue' : 'Get My Text Me Number'}</button>
-        <button class="btn" style="color:var(--blue);margin-top:6px" id="obChooseAgain">Choose Another Option</button></div>`;
-      $('#obChooseAgain').onclick = chooseAgain;
+        <button class="btn filled" id="obNewLine">${hasLine ? 'Continue' : 'Get My Text Me Number'}</button></div>`;
+      $('#obBack').onclick = chooseAgain;
       $('#obNewLine').onclick = async () => {
         try {
           if (!phone.assistantLine) { phone = await api('/account/phone/line', { method: 'POST' }); renderNew(); }
