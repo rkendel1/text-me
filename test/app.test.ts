@@ -613,6 +613,29 @@ test('authenticated owner inbox authorizes and mediates web messages', async () 
     message.role === 'owner' && message.body === 'Friday at 2 works.'), true);
 });
 
+test('an owner can resolve a voice-call request after hangup without caller SMS consent', async () => {
+  const { app, auth, owner, repository, messaging } = await ownedApp();
+  await request(app).post('/webhooks/fake/voice')
+    .send({ callId: 'voice-owner-reply', callerPhone: '+15555550123', to: owner.line });
+  const [conversation] = await repository.list(owner.accountId);
+  await repository.appendEvent(conversation.id, 'owner.attention.requested', {
+    requestId: 'req_after_call', question: 'A caller wants an appointment. What should I do?',
+    suggestedReplies: ["I'll call them back"], source: 'voice',
+  }, new Date());
+  await request(app).post('/webhooks/fake/status')
+    .send({ callId: 'voice-owner-reply', status: 'completed', durationSeconds: 20 });
+
+  const reply = await request(app).post(`/conversations/${conversation.id}/messages`).set(auth)
+    .send({ body: "I'll call them back", idempotencyKey: 'web-after-call' });
+
+  assert.equal(reply.status, 200, JSON.stringify(reply.body));
+  assert.equal(reply.body.ownerReply.delivery, 'recorded_after_call');
+  assert.equal(reply.body.ownerRequest, null);
+  assert.equal(messaging.sentMessages.length, 0, 'an owner decision must not text a caller without consent');
+  assert.ok(reply.body.messages.some((message: { role: string; body: string; channel: string }) =>
+    message.role === 'owner' && message.body === "I'll call them back" && message.channel === 'internal'));
+});
+
 async function answeredConversation(repository: InMemoryConversationRepository, accountId: string, callId: string) {
   return (await repository.createIfAbsent({
     provider: 'fake', providerCallId: callId, callerPhone: '+15555550123', status: 'answered', startedAt: new Date(), accountId,

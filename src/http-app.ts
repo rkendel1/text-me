@@ -2289,7 +2289,7 @@ export function createApp(options: AppOptions): express.Express {
     try {
       const body = typeof request.body?.body === 'string' ? request.body.body.trim() : '';
       if (!body || body.length > 2000) throw new HttpError(400, 'Message body must be between 1 and 2000 characters');
-      await service.requireOwnedConversation(String(request.params.id), accountOf(request));
+      const before = await service.requireOwnedConversation(String(request.params.id), accountOf(request));
       const key = typeof request.body?.idempotencyKey === 'string' && request.body.idempotencyKey.trim()
         ? request.body.idempotencyKey.trim()
         : `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
@@ -2304,6 +2304,11 @@ export function createApp(options: AppOptions): express.Express {
         ...presentConversation(conversation),
         runtime: presentRuntime(await runtime.getRuntimeForConversation(conversation), conversation),
         voice: presentVoice(conversation),
+        ownerReply: {
+          delivery: realtimeVoiceStatus(before).live ? 'spoken'
+            : before.events.some((event) => event.type === 'sms.consent.granted') ? 'texted'
+            : before.status === 'completed' ? 'recorded_after_call' : 'queued_for_voice',
+        },
       });
     } catch (error) {
       next(error);

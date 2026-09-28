@@ -1296,7 +1296,12 @@ async function answerOwner(conversationId, text, button) {
     const key = `web:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const detail = await api(`/conversations/${encodeURIComponent(conversationId)}/messages`, { method: 'POST', body: { body: text, idempotencyKey: key } });
     const name = firstName(detail);
-    toast(detail.voice && detail.voice.live ? `Telling ${name} now` : `Sent to ${name}`, 'check');
+    const delivery = detail.ownerReply && detail.ownerReply.delivery;
+    const confirmation = delivery === 'spoken' ? `Telling ${name} now`
+      : delivery === 'texted' ? `Texted ${name}`
+      : delivery === 'queued_for_voice' ? 'Answer queued for the assistant'
+      : 'Saved — the call has ended';
+    toast(confirmation, 'check');
     if (state.selectedId === conversationId) { state.detail = { ...state.detail, ...detail }; renderDetail(); }
     loadList();
   } catch (error) {
