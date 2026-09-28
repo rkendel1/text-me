@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import { HttpError } from '../errors.js';
 import type { AssistantBehavior, OwnerConfigurationService } from '../owner/configuration.js';
 import type { PhoneNumberService } from '../telephony/phone-number.js';
@@ -93,6 +95,39 @@ export class TenancyService {
     // verifyPassword does the same work for unknown emails, so timing doesn't reveal who has an account.
     const ok = await verifyPassword(typeof password === 'string' ? password : '', found?.passwordHash);
     return ok && found ? found.user : null;
+  }
+
+  /**
+   * Finish a sign-in performed by a trusted external identity provider. Existing
+   * password accounts are linked by their verified, normalized email; first-time
+   * users receive the same account and onboarding state as every other signup.
+   */
+  async signInExternal(input: { email: unknown; name?: unknown }): Promise<{ user: User; account: Account }> {
+    const email = typeof input.email === 'string' ? normalizeEmail(input.email) : '';
+    if (!isValidEmail(email)) throw new HttpError(401, 'Your sign-in provider did not return a valid email.', 'invalid_identity');
+    let found = await this.store.findUserByEmail(email);
+    if (!found) {
+      const now = this.now();
+      const user: User = { id: createUserId(), name: cleanName(input.name), email, createdAt: now, updatedAt: now };
+      try {
+        // External-only users cannot use an unknown password to bypass their provider.
+        await this.store.createUser(user, await hashPassword(randomBytes(48).toString('base64url')));
+        found = { user, passwordHash: '' };
+      } catch (error) {
+        // Two callback requests can race; the unique email constraint chooses the winner.
+        if (!(error instanceof EmailTakenError)) throw error;
+        found = await this.store.findUserByEmail(email);
+      }
+    }
+    if (!found) throw new HttpError(503, 'Could not finish creating your account. Try again.', 'identity_unavailable');
+    if (!found.user.name && cleanName(input.name)) {
+      found.user = (await this.store.updateUser(found.user.id, { name: cleanName(input.name) })) ?? found.user;
+    }
+    const memberships = await this.memberships(found.user.id);
+    const account = memberships[0] ? await this.store.getAccount(memberships[0].accountId) : null;
+    if (account) return { user: found.user, account };
+    const created = await this.createAccount(found.user.id, found.user.name);
+    return { user: found.user, account: created.account };
   }
 
   /** A user can own several accounts; each is its own tenant with its own line, devices and data. */

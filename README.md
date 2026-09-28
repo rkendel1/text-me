@@ -95,9 +95,11 @@ and the audit checklist.
 
 ```bash
 npm install
-cp .env.example .env   # set DATABASE_URL and the platform's Twilio values
+cp .env.example .env.local   # set DATABASE_URL and the platform's Twilio values
 npm run dev
 ```
+
+The dev command loads `.env.local` without affecting Vercel's environment.
 
 Without an AI Gateway key, calls use the local fake voice pipeline and fake
 providers; `POST /webhooks/fake/voice` and `/webhooks/fake/status` simulate

@@ -2,6 +2,11 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import { rateLimit } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { toDataURL } from 'qrcode';
+import {
+  DEFAULT_AUTH_SKIP_ROUTES,
+  handleAuthProxyRequest,
+  processAuthMiddleware,
+} from '@neondatabase/auth/server';
 
 import { HttpError } from './errors.js';
 import { presentConversation, presentConversationSummary } from './http/presenters.js';
@@ -112,6 +117,8 @@ export interface AppOptions {
   autoReplyToCallerTexts?: boolean;
   /** User sign-in sessions (web and iOS share them). */
   authSessionStore?: AuthSessionStore;
+  /** Managed Neon Auth (Google/Apple); omitted in local/test environments that use password auth only. */
+  neonAuth?: { baseUrl: string; cookieSecret: string };
   /**
    * Production composition: every authoritative store and the AI model must be
    * supplied, and fake provider routes must be off. Missing pieces fail startup
@@ -518,7 +525,7 @@ export function createApp(options: AppOptions): express.Express {
 
   if (options.beforeRequest) {
     // The app shell loads even while the database is unavailable; API calls then get a clear 503.
-    const shell = /^\/(?:$|sw\.js$|manifest\.webmanifest$|icon[\w.-]*$|conversations\/[^/]+\/live$|\.well-known\/)/;
+    const shell = /^\/(?:$|sw\.js$|manifest\.webmanifest$|icon[\w.-]*$|conversations\/[^/]+\/live$|api\/auth(?:\/|$)|auth\/callback$|\.well-known\/)/;
     app.use((request, _response, next) => {
       if (request.method === 'GET' && shell.test(request.path)) return next();
       ensureReady().then(() => next(), (error) => {
@@ -538,6 +545,89 @@ export function createApp(options: AppOptions): express.Express {
     expired: 'Your session expired. Sign in again.', revoked: 'This device was signed out. Sign in again.',
   } as const;
   type AuthedRequest = Request & { authSession?: AuthSession; tenant?: TenantContext };
+
+  const neonWebRequest = (request: Request): globalThis.Request => {
+    const forwardedProto = (request.header('X-Forwarded-Proto') ?? request.protocol).split(',')[0].trim();
+    const requestOrigin = options.publicBaseUrl ?? `${forwardedProto}://${request.get('host')}`;
+    const headers = new Headers();
+    for (const [name, value] of Object.entries(request.headers)) {
+      if (Array.isArray(value)) value.forEach((item) => headers.append(name, item));
+      else if (value !== undefined) headers.set(name, value);
+    }
+    headers.set('origin', requestOrigin);
+    const method = request.method.toUpperCase();
+    const rawBody = (request as Request & { rawBody?: string }).rawBody;
+    return new globalThis.Request(new URL(request.originalUrl, requestOrigin), {
+      method,
+      headers,
+      ...(!['GET', 'HEAD'].includes(method) ? { body: rawBody ?? JSON.stringify(request.body ?? {}) } : {}),
+    });
+  };
+  const copyNeonCookies = (upstream: globalThis.Response, response: Response): void => {
+    const cookies = upstream.headers.getSetCookie();
+    if (cookies.length) response.setHeader('Set-Cookie', cookies);
+  };
+  const sendNeonResponse = async (upstream: globalThis.Response, response: Response): Promise<void> => {
+    copyNeonCookies(upstream, response);
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) response.setHeader('Content-Type', contentType);
+    response.status(upstream.status).send(Buffer.from(await upstream.arrayBuffer()));
+  };
+
+  if (options.neonAuth) {
+    const neon = options.neonAuth;
+    app.get('/auth/providers', async (_request, response, next) => {
+      try { response.json({ providers: await tenancyStore.authProviders?.() ?? ['google', 'apple'] }); }
+      catch (error) { next(error); }
+    });
+    app.all(/^\/api\/auth\/(.+)$/, async (request, response, next) => {
+      try {
+        const path = request.path.slice('/api/auth/'.length);
+        const upstream = await handleAuthProxyRequest({
+          request: neonWebRequest(request), path, baseUrl: neon.baseUrl,
+          cookieSecret: neon.cookieSecret, sameSite: 'lax',
+        });
+        await sendNeonResponse(upstream, response);
+      } catch (error) { next(error); }
+    });
+    app.get('/auth/callback', async (request, response, next) => {
+      try {
+        if (typeof request.query.error === 'string') {
+          response.redirect(302, `/signin?auth_error=${encodeURIComponent(request.query.error)}`);
+          return;
+        }
+        const result = await processAuthMiddleware({
+          request: neonWebRequest(request), pathname: request.path,
+          skipRoutes: DEFAULT_AUTH_SKIP_ROUTES, loginUrl: '/signin',
+          baseUrl: neon.baseUrl, cookieSecret: neon.cookieSecret, sameSite: 'lax',
+        });
+        if (result.action === 'redirect_oauth') {
+          if (result.cookies.length) response.setHeader('Set-Cookie', result.cookies);
+          response.redirect(302, '/?auth=complete');
+          return;
+        }
+        response.redirect(302, '/signin?auth_error=oauth_callback_failed');
+      } catch (error) { next(error); }
+    });
+    app.post('/auth/neon/session', async (request, response, next) => {
+      try {
+        const upstream = await handleAuthProxyRequest({
+          request: neonWebRequest(request), path: 'get-session', baseUrl: neon.baseUrl,
+          cookieSecret: neon.cookieSecret, sameSite: 'lax',
+        });
+        copyNeonCookies(upstream, response);
+        const identity = await upstream.json() as { user?: { email?: string; name?: string; emailVerified?: boolean }; session?: unknown };
+        if (!upstream.ok || !identity.session || !identity.user?.email || identity.user.emailVerified !== true) {
+          throw new HttpError(401, 'Your provider session could not be verified. Please try again.', 'oauth_session_invalid');
+        }
+        const { user, account } = await tenancy.signInExternal({ email: identity.user.email, name: identity.user.name });
+        const created = await auth.createSession(user.id, account.id, { platform: 'web', label: 'Browser' });
+        response.status(201).json({ token: created.token });
+      } catch (error) { next(error); }
+    });
+  } else {
+    app.get('/auth/providers', (_request, response) => response.json({ providers: [] }));
+  }
   /** The authenticated principal: a live, unexpired, unrevoked session. Nothing about an account yet. */
   const principal = (request: Request, _response: Response, next: NextFunction): void => {
     // EventSource can't set headers, so live streams (and only they) accept ?token=.

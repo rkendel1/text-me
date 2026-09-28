@@ -156,6 +156,7 @@ export function buildServerWithPool(
     autoReplyToCallerTexts: Boolean(textAgent),
     beforeRequest: ensureReady,
     authSessionStore: authSessions,
+    neonAuth: config.neonAuth,
     apnsSender: config.apns ? new HttpApnsSender(config.apns) : undefined,
     appleTeamId: config.appleTeamId,
     production: config.production,

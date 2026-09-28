@@ -62,6 +62,49 @@ test('rate-limited auth accepts Vercel forwarded client addresses', async () => 
   assert.equal(response.status, 201, JSON.stringify(response.body));
 });
 
+test('a verified Neon social identity creates or resumes one app account and session', async (t) => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.match(String(input), /\/get-session(?:\?|$)/);
+    return Response.json({
+      user: {
+        id: 'neon-user-1', email: 'Social@Example.test', name: 'Social Owner', emailVerified: true,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      },
+      session: {
+        id: 'neon-session-1', userId: 'neon-user-1', token: 'verified',
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      },
+    }, { headers: { 'Set-Cookie': '__Secure-neon-auth.session_token=verified; Path=/; HttpOnly; Secure; SameSite=Lax' } });
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const messaging = new FakeMessagingProvider();
+  const tenancyStore = new InMemoryTenancyStore();
+  const app = createApp({
+    repository: new InMemoryConversationRepository(), messagingProvider: messaging, tenancyStore,
+    neonAuth: { baseUrl: 'https://auth.example.test', cookieSecret: 'x'.repeat(32) },
+    publicBaseUrl: 'https://text-me.vercel.app',
+  });
+
+  const callback = await request(app).get('/auth/callback?neon_auth_session_verifier=proof')
+    .set('Cookie', '__Secure-neon-auth.session_challenge=challenge');
+  assert.equal(callback.status, 302);
+  assert.equal(callback.headers.location, '/?auth=complete');
+  assert.match(String(callback.headers['set-cookie']), /__Secure-neon-auth\.session_token=verified/);
+
+  const first = await request(app).post('/auth/neon/session').send({});
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  assert.match(first.body.token, /^ses_/);
+  const me = await request(app).get('/me').set('Authorization', `Bearer ${first.body.token}`);
+  assert.equal(me.body.user.email, 'social@example.test');
+  assert.equal(me.body.memberships.length, 1);
+
+  const second = await request(app).post('/auth/neon/session').send({});
+  const resumed = await request(app).get('/me').set('Authorization', `Bearer ${second.body.token}`);
+  assert.equal(resumed.body.activeAccountId, me.body.activeAccountId, 'the provider callback never creates duplicate accounts');
+});
+
 test('onboarding is a state machine derived from durable facts, and the UI can show what is left', async () => {
   const { app, messaging } = saas();
   const { headers } = await signUp(app, { name: 'Sam' });

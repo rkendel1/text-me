@@ -1,3 +1,4 @@
-// Development builds talk to the same production API unless you point them at a preview deployment.
+// Simulator development uses the server started by `npm run dev` on the Mac.
 #include "Release.xcconfig"
+ATTN_BASE_URL = http:/$()/localhost:3000
 APS_ENVIRONMENT = development

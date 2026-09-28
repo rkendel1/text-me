@@ -63,6 +63,19 @@ const PHONE_COLUMNS: Record<keyof PhoneNumberPatch, string> = {
 export class PostgresTenancyStore implements TenancyStore {
   constructor(private readonly pool: Pool) {}
 
+  async authProviders(): Promise<string[]> {
+    const result = await this.pool.query<{ id: string | null }>(`
+      SELECT provider->>'id' AS id
+      FROM neon_auth.project_config,
+      LATERAL jsonb_array_elements(COALESCE(social_providers, '[]'::jsonb)) AS provider
+    `).catch((error: unknown) => {
+      // Older/local databases may not have Neon Auth installed.
+      if ((error as { code?: string }).code === '42P01' || (error as { code?: string }).code === '3F000') return { rows: [] };
+      throw error;
+    });
+    return result.rows.map((row) => row.id).filter((id): id is string => Boolean(id));
+  }
+
   async initialize(): Promise<void> {
     await migrate(this.pool, async (db) => {
       await db.query(`

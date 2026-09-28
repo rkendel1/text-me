@@ -27,6 +27,8 @@ export type PhoneNumberPatch = Partial<Pick<PhoneNumber,
  * *establish* scope (a session's user, a called number's account).
  */
 export interface TenancyStore {
+  /** Social providers enabled in the managed Neon Auth project, when available. */
+  authProviders?(): Promise<string[]>;
   createUser(user: User, passwordHash: string): Promise<void>;
   getUser(id: string): Promise<User | null>;
   findUserByEmail(email: string): Promise<{ user: User; passwordHash: string } | null>;
@@ -92,6 +94,8 @@ export class InMemoryTenancyStore implements TenancyStore {
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly providers = new Map<string, ProviderConfiguration>();
   private readonly audit: AuditEvent[] = [];
+
+  async authProviders(): Promise<string[]> { return []; }
 
   async createUser(user: User, passwordHash: string): Promise<void> {
     if ([...this.users.values()].some((entry) => entry.user.email === user.email)) throw new EmailTakenError();

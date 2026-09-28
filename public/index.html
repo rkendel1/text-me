@@ -435,7 +435,7 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .badge { position: absolute; top: 2px; left: calc(50% + 6px); min-width: 18px; height: 18px; border-radius: 9px; background: var(--red); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; padding: 0 5px; }
 
 /* ---------- Sign in ---------- */
-.signin { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; }
+.signin { position: fixed; inset: 0; z-index: 90; background: var(--bg); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; overflow-y: auto; }
 .signin .app-icon { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 10px 30px rgba(0,122,255,.3); margin-bottom: 22px; }
 .signin h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: .36px; }
 .signin p { color: var(--label-2); margin: 8px 0 28px; font-size: 17px; max-width: 330px; }
@@ -453,6 +453,15 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
 .btn-primary:active { opacity: .7; }
 .btn-primary:disabled { opacity: .4; }
 .signin .err { color: var(--red); font-size: 15px; min-height: 20px; margin-top: 12px; }
+.social-auth { width: 100%; max-width: 360px; display: grid; gap: 10px; }
+.social-auth[hidden] { display: none; }
+.social-btn { height: 48px; border: 1px solid var(--separator); border-radius: 12px; background: var(--bg-elevated); color: var(--label); font-size: 16px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 10px; }
+.social-btn:active { background: var(--fill); }
+.social-btn:disabled { opacity: .45; }
+.social-btn svg { width: 20px; height: 20px; flex: none; }
+.auth-divider { width: 100%; max-width: 360px; display: flex; align-items: center; gap: 12px; color: var(--label-3); font-size: 13px; margin: 14px 0; }
+.auth-divider::before, .auth-divider::after { content: ''; height: .5px; background: var(--separator); flex: 1; }
+.signin-back { color: var(--blue); margin-top: 2px; }
 .shake { animation: shake .4s; }
 @keyframes shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
 
@@ -572,6 +581,11 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   <p>Your own intelligent number that keeps you informed and lets you take control when you need to.</p>
   <p style="font-size:20px;font-weight:600;margin:12px 0 22px">$19.99/month <span style="font-size:14px;font-weight:400;color:var(--label-2)">· one simple plan</span></p>
   <p style="color:var(--label-2);max-width:420px;margin:0 auto 22px">Your assistant answers your number, keeps you updated, and brings you in when it matters. No setup call required.</p>
+  <div class="social-auth" data-social-auth>
+    <button class="social-btn" type="button" data-oauth="google"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.6h3.3c1.9-1.8 2.9-4.4 2.9-7.5Z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.7-2.3l-3.3-2.6c-.9.6-2.1 1-3.4 1a5.9 5.9 0 0 1-5.5-4.1H3.1v2.7A10 10 0 0 0 12 22Z"/><path fill="#FBBC05" d="M6.5 14a6 6 0 0 1 0-3.9V7.4H3.1a10 10 0 0 0 0 9.3L6.5 14Z"/><path fill="#EA4335" d="M12 6.1c1.5 0 2.8.5 3.8 1.5l2.9-2.8A9.7 9.7 0 0 0 12 2a10 10 0 0 0-8.9 5.4l3.4 2.7A5.9 5.9 0 0 1 12 6.1Z"/></svg>Continue with Google</button>
+    <button class="social-btn" type="button" data-oauth="apple"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.1 12.5c0-2.8 2.3-4.1 2.4-4.2A5.2 5.2 0 0 0 15.4 6c-1.7-.2-3.4 1-4.3 1s-2.3-1-3.8-1c-2 0-3.9 1.2-4.9 3-2.1 3.6-.5 9 1.5 11.9 1 1.4 2.1 3 3.7 2.9 1.5-.1 2.1-1 3.9-1s2.3 1 3.9 1c1.6 0 2.6-1.4 3.6-2.9 1.1-1.7 1.6-3.3 1.6-3.4-.1 0-3.5-1.3-3.5-5.9ZM14.3 4.2A5.2 5.2 0 0 0 15.5.5a5.3 5.3 0 0 0-3.5 1.8 4.9 4.9 0 0 0-1.2 3.5 4.4 4.4 0 0 0 3.5-1.6Z"/></svg>Continue with Apple</button>
+  </div>
+  <div class="auth-divider" data-auth-divider>or</div>
   <button class="btn-primary" type="button" id="landingStart">Create Account</button>
   <button class="btn" type="button" id="landingSignIn" style="color:var(--blue);margin-top:4px">Already have an account? Sign in</button>
 </div>
@@ -583,6 +597,11 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
   <p style="font-size:20px;font-weight:600;margin:12px 0 22px">$19.99/month <span style="font-size:14px;font-weight:400;color:var(--label-2)">· one simple plan</span></p>
   <p style="color:var(--label-2);max-width:420px;margin:0 auto 22px">Your assistant answers your number, keeps you updated, and brings you in when it matters. No setup call required.</p>
   <form id="signinForm" autocomplete="on">
+    <div class="social-auth" data-social-auth>
+      <button class="social-btn" type="button" data-oauth="google">Continue with Google</button>
+      <button class="social-btn" type="button" data-oauth="apple">Continue with Apple</button>
+    </div>
+    <div class="auth-divider" data-auth-divider>or use email</div>
     <div class="group">
       <label class="row" id="nameRow" hidden><span class="sr">Your name</span>
         <input id="nameInput" type="text" name="name" autocomplete="name" placeholder="Your Name">
@@ -597,6 +616,7 @@ button.row:active, .row.tappable:active { background: var(--fill-3); }
     <button class="btn-primary" type="submit" id="signinButton">Sign In</button>
     <div class="err" id="signinError" role="alert"></div>
     <button class="btn" type="button" id="signinSwitch" style="color:var(--blue);margin-top:4px">New here? Create an account</button>
+    <button class="btn signin-back" type="button" id="signinBack">Back</button>
   </form>
 </div>
 
@@ -839,6 +859,7 @@ function resetToSignedOut() {
   postNative({ type: 'signedOut' });
   location.replace('/');
 }
+let startupAuthError = '';
 const sessionReady = (async () => {
   // Retired: access keys in the URL or storage from the single-owner version are ignored and removed.
   const url = new URL(location.href);
@@ -847,6 +868,26 @@ const sessionReady = (async () => {
   // The iOS app hands over its Keychain session.
   const handedOver = window.__ATTN_SESSION__;
   if (handedOver) { state.token = handedOver; store.set('ownerSession', handedOver); }
+  if (url.searchParams.get('auth') === 'complete') {
+    url.searchParams.delete('auth');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+    try {
+      const response = await fetch('/auth/neon/session', {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform: PLATFORM, label: NATIVE ? 'iPhone app' : isIOS() ? 'iPhone (Safari)' : 'Browser' }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.token) throw new Error(data.error || 'Could not finish signing in.');
+      setSession(data.token);
+    } catch (error) {
+      startupAuthError = error.message || 'Could not finish signing in. Please try again.';
+    }
+  }
+  if (url.searchParams.has('auth_error')) {
+    startupAuthError = 'That sign-in could not be completed. Please try again.';
+    url.searchParams.delete('auth_error');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
 })();
 
 async function api(path, { method = 'GET', body } = {}) {
@@ -1044,6 +1085,36 @@ function setSigninMode(mode) {
   $('#signinError').textContent = '';
 }
 $('#signinSwitch').onclick = () => setSigninMode(signinMode === 'signin' ? 'signup' : 'signin');
+$('#signinBack').onclick = showLanding;
+
+async function startOAuth(provider, button) {
+  const buttons = [...document.querySelectorAll('[data-oauth]')];
+  buttons.forEach((item) => { item.disabled = true; });
+  $('#signinError').textContent = '';
+  try {
+    const response = await fetch('/api/auth/sign-in/social', {
+      method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, callbackURL: `${location.origin}/auth/callback` }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.url) throw new Error(data.message || data.error || `${provider === 'apple' ? 'Apple' : 'Google'} sign-in is not available yet.`);
+    location.assign(data.url);
+  } catch (error) {
+    showSignIn(error.message || 'Could not start sign-in. Please try again.');
+    buttons.forEach((item) => { item.disabled = false; });
+    button.focus();
+  }
+}
+document.querySelectorAll('[data-oauth]').forEach((button) => {
+  button.onclick = () => startOAuth(button.dataset.oauth, button);
+});
+fetch('/auth/providers').then((response) => response.json()).then(({ providers = [] }) => {
+  document.querySelectorAll('[data-oauth]').forEach((button) => { button.hidden = !providers.includes(button.dataset.oauth); });
+  const any = providers.length > 0;
+  document.querySelectorAll('[data-social-auth], [data-auth-divider]').forEach((element) => { element.hidden = !any; });
+}).catch(() => {
+  document.querySelectorAll('[data-social-auth], [data-auth-divider]').forEach((element) => { element.hidden = true; });
+});
 function showSignIn(message) {
   // Keep the first reason shown (expired / signed out); later unauthenticated requests don't erase it.
   if (message || $('#signin').hidden) $('#signinError').textContent = message || '';
@@ -2347,8 +2418,9 @@ let booted = false;
 async function boot() {
   await sessionReady;
   if (!state.token) {
-    if (location.pathname === '/signup') { setSigninMode('signup'); showSignIn(); } 
-    else if (location.pathname === '/signin') showSignIn();
+    if (location.pathname === '/signup') { setSigninMode('signup'); showSignIn(startupAuthError); }
+    else if (location.pathname === '/signin') showSignIn(startupAuthError);
+    else if (startupAuthError) showSignIn(startupAuthError);
     else showLanding();
     return;
   }

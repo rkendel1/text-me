@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export interface RealtimeVoiceConfig {
   modelId: string;
   /** Model for text messages (SMS replies, relaying the owner's answers). */
@@ -27,6 +29,8 @@ export interface AppConfig {
   /** Native iOS push; optional (the web app uses Web Push). */
   apns?: ApnsConfig;
   appleTeamId?: string;
+  /** Managed Neon Auth endpoint injected by the Vercel/Neon integration. */
+  neonAuth?: { baseUrl: string; cookieSecret: string };
   /** The text model for SMS and relays; required in production. */
   aiGateway?: AiGatewayConfig;
   databaseUrl: string;
@@ -153,6 +157,12 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     aiGateway,
     apns: apnsConfigFromEnv(env),
     appleTeamId: env.APNS_TEAM_ID || undefined,
+    ...((env.NEON_AUTH_BASE_URL || env.VITE_NEON_AUTH_URL) ? { neonAuth: {
+      baseUrl: (env.NEON_AUTH_BASE_URL || env.VITE_NEON_AUTH_URL)!.replace(/\/+$/, ''),
+      // This signs only the short-lived local session cache. Deriving it from the
+      // database credential avoids another deployment secret while retaining high entropy.
+      cookieSecret: createHash('sha256').update(`text-me/neon-auth-cookie/v1\0${databaseUrl!}`).digest('base64url'),
+    } } : {}),
     databaseUrl: databaseUrl!,
     databaseListenUrl: env.DATABASE_URL_UNPOOLED ?? env.POSTGRES_URL_NON_POOLING ?? databaseUrl!,
     enableFakeProviderRoutes: !production,

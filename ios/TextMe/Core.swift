@@ -5,8 +5,18 @@ import Security
 enum AppConfig {
     static let baseURL: URL = {
         guard let value = Bundle.main.object(forInfoDictionaryKey: "ATTNBaseURL") as? String,
-              let url = URL(string: value), url.scheme == "https" else {
-            fatalError("ATTNBaseURL must be an https URL (set ATTN_HOST in Config/Release.xcconfig)")
+              let url = URL(string: value) else {
+            fatalError("ATTNBaseURL is invalid (set it in Config/Debug.xcconfig or Config/Release.xcconfig)")
+        }
+
+        #if DEBUG
+        let localDevelopment = url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(url.host ?? "")
+        #else
+        let localDevelopment = false
+        #endif
+
+        guard url.scheme == "https" || localDevelopment else {
+            fatalError("ATTNBaseURL must use https outside local Debug builds")
         }
         return url
     }()

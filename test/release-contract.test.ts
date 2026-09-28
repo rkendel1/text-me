@@ -370,6 +370,9 @@ test('production never falls back to in-memory state, fake providers or a fake m
   assert.deepEqual(vercel.release, { environment: 'production', commit: 'abc123' });
   assert.equal(getConfig({ ...env, REALTIME_VOICE: 'off', AI_GATEWAY_API_KEY: 'k' }).aiGateway?.textModelId, 'anthropic/claude-haiku-4.5',
     'turning realtime voice off keeps the real text model');
+  const withAuth = getConfig({ ...env, NEON_AUTH_BASE_URL: 'https://auth.example.test/' });
+  assert.equal(withAuth.neonAuth?.baseUrl, 'https://auth.example.test');
+  assert.ok((withAuth.neonAuth?.cookieSecret.length ?? 0) >= 32);
 });
 
 test('environment variables are platform configuration only: customer identity there refuses to start', () => {
