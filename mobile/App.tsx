@@ -129,19 +129,29 @@ export default function App() {
 
   useEffect(() => {
     void (async () => {
-      session.current = await SecureStore.getItemAsync(SESSION_KEY);
-      await Notifications.setNotificationCategoryAsync(ATTENTION_CATEGORY, [
-        {
-          identifier: REPLY_ACTION,
-          buttonTitle: 'Reply',
-          textInput: { submitButtonTitle: 'Send', placeholder: 'Your answer' },
-        },
-        {
-          identifier: TAKE_OVER_ACTION,
-          buttonTitle: 'Take Over',
-          options: { opensAppToForeground: true },
-        },
-      ]);
+      try {
+        session.current = await SecureStore.getItemAsync(SESSION_KEY);
+      } catch {
+        // Unsigned simulator builds do not have a Keychain access group. A signed
+        // development or release build persists the session normally.
+        session.current = null;
+      }
+      try {
+        await Notifications.setNotificationCategoryAsync(ATTENTION_CATEGORY, [
+          {
+            identifier: REPLY_ACTION,
+            buttonTitle: 'Reply',
+            textInput: { submitButtonTitle: 'Send', placeholder: 'Your answer' },
+          },
+          {
+            identifier: TAKE_OVER_ACTION,
+            buttonTitle: 'Take Over',
+            options: { opensAppToForeground: true },
+          },
+        ]);
+      } catch {
+        // Notification actions are unavailable in unsigned simulator builds.
+      }
       setReady(true);
       const initialUrl = await Linking.getInitialURL();
       if (initialUrl) openInPage(initialUrl);
@@ -179,12 +189,17 @@ export default function App() {
     try { message = JSON.parse(event.nativeEvent.data) as NativeMessage; } catch { return; }
     if (message.type === 'session') {
       session.current = message.token || null;
-      if (message.token) void SecureStore.setItemAsync(SESSION_KEY, message.token, { keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY });
-      else void SecureStore.deleteItemAsync(SESSION_KEY);
+      if (message.token) {
+        void SecureStore.setItemAsync(SESSION_KEY, message.token, {
+          keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY,
+        }).catch(() => undefined);
+      } else {
+        void SecureStore.deleteItemAsync(SESSION_KEY).catch(() => undefined);
+      }
       void registerPush(false);
     } else if (message.type === 'signedOut') {
       session.current = null;
-      void SecureStore.deleteItemAsync(SESSION_KEY);
+      void SecureStore.deleteItemAsync(SESSION_KEY).catch(() => undefined);
     } else if (message.type === 'enablePush') {
       void registerPush(true);
     } else if (message.type === 'accountReady') {
