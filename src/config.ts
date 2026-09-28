@@ -48,6 +48,8 @@ export interface AppConfig {
   allowSmsVerification: boolean;
   /** A2P-registered sender pool used for every onboarding verification text. */
   twilioMessagingServiceSid?: string;
+  /** Twilio Verify service used for managed onboarding OTP delivery and checks. */
+  twilioVerifyServiceSid?: string;
   /** Present when calls should be answered by the AI Gateway realtime voice agent. */
   realtimeVoice?: RealtimeVoiceConfig;
   /** Temporary test account that may activate without contacting Stripe. */
@@ -179,6 +181,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     allowSmsVerification: env.TELEPHONY_SMS_VERIFICATION === 'on',
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID?.trim() || undefined,
+    twilioVerifyServiceSid: env.TWILIO_VERIFY_SERVICE_SID?.trim() || undefined,
     realtimeVoice: resolveRealtimeVoice(env),
     billingBypassAccountId: env.BILLING_BYPASS_ACCOUNT_ID?.trim() || undefined,
     stripe: env.STRIPE_SECRET_KEY && env.STRIPE_PRODUCT_ID ? {

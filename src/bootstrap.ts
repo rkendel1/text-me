@@ -35,6 +35,7 @@ import { PostgresAuthSessionStore } from './auth/sessions.js';
 import { PostgresTenancyStore } from './tenancy/postgres.js';
 import { HttpApnsSender } from './attention/apns.js';
 import { PhoneNumberService, TwilioPhoneNumberClient, type PhoneNumberClient } from './telephony/phone-number.js';
+import { TwilioVerifyProvider } from './telephony/verification.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
@@ -109,12 +110,15 @@ export function buildServerWithPool(
   const verificationMessaging = !platform.messagingProvider && config.twilioMessagingServiceSid
     ? new TwilioMessagingServiceProvider(config.twilioAccountSid, config.twilioAuthToken, config.twilioMessagingServiceSid)
     : undefined;
+  const verification = !platform.messagingProvider && config.twilioVerifyServiceSid
+    ? new TwilioVerifyProvider(config.twilioAccountSid, config.twilioAuthToken, config.twilioVerifyServiceSid)
+    : undefined;
   const phoneNumbers = new PhoneNumberService(
     tenancyStore,
     platform.phoneNumberClient ?? new TwilioPhoneNumberClient(config.twilioAccountSid, config.twilioAuthToken),
     config.publicBaseUrl,
     messagingProvider,
-    { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification, verificationMessaging },
+    { allowPurchase: config.allowNumberPurchase, allowSmsVerification: config.allowSmsVerification, verificationMessaging, verification },
   );
   const mediaStreamUrl = `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 

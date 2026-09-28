@@ -89,7 +89,9 @@ and the audit checklist.
    `npm run migrate:legacy` once first ([`docs/saas-migration.md`](docs/saas-migration.md)).
 7. **Run the acceptance journey** against the deployment:
    `ACCEPTANCE_PASSWORD=… npm run acceptance -- --url https://<project>.vercel.app --email <account email>`.
-8. *Optional:* the native iOS app is in [`ios/`](ios/README.md).
+8. *Optional:* the Expo iOS app is in [`mobile/`](mobile/README.md). The
+   previous Swift shell remains in [`ios/`](ios/README.md) only until Expo
+   device acceptance testing is complete.
 
 ## Run locally
 

@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Text Me",
+    "slug": "text-me",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "textme",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "app.textme.owner",
+      "associatedDomains": ["applinks:text-me-five.vercel.app"],
+      "config": {
+        "usesNonExemptEncryption": false
+      },
+      "entitlements": {
+        "com.apple.developer.usernotifications.time-sensitive": true
+      }
+    },
+    "android": {
+      "package": "app.textme.owner"
+    },
+    "plugins": [
+      ["expo-notifications", { "enableBackgroundRemoteNotifications": true }],
+      "expo-secure-store"
+    ],
+    "extra": {
+      "apiBaseUrl": "https://text-me-five.vercel.app"
+    }
+  }
+}

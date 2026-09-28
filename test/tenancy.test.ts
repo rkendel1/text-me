@@ -243,6 +243,44 @@ test('a registered platform Messaging Service can text every onboarding code bef
   assert.equal((await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code })).status, 200);
 });
 
+test('Twilio Verify can verify an existing number before an account has an assistant line', async () => {
+  const messaging = new FakeMessagingProvider();
+  const tenancyStore = new InMemoryTenancyStore();
+  const numbers = new FakePhoneNumberClient([], false);
+  const started: string[] = [];
+  const checked: Array<{ to: string; code: string }> = [];
+  const phoneNumbers = new PhoneNumberService(tenancyStore, numbers, 'https://text-me.vercel.app', messaging, {
+    allowSmsVerification: false,
+    verification: {
+      async start(to) { started.push(to); },
+      async check(to, code) {
+        checked.push({ to, code });
+        return code === '654321';
+      },
+    },
+  });
+  const app = createApp({ repository: new InMemoryConversationRepository(), messagingProvider: messaging, tenancyStore, phoneNumbers });
+  const owner = await signUp(app, { name: 'Verified' });
+
+  const status = await request(app).get('/account/phone').set(owner.headers);
+  assert.deepEqual(status.body.verificationChannels, ['call', 'sms']);
+  const challenge = await request(app).post('/account/phone/personal').set(owner.headers)
+    .send({ number: '+1 (401) 484-2831', channel: 'sms' });
+  assert.equal(challenge.status, 202, JSON.stringify(challenge.body));
+  assert.deepEqual(started, ['+14014842831']);
+  assert.equal(messaging.sentMessages.length, 0, 'Verify owns delivery; the relay sender is not used');
+
+  const wrong = await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code: '000000' });
+  assert.equal(wrong.status, 400);
+  const approved = await request(app).post('/account/phone/personal/verify').set(owner.headers).send({ code: '654321' });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  assert.deepEqual(checked, [
+    { to: '+14014842831', code: '000000' },
+    { to: '+14014842831', code: '654321' },
+  ]);
+  assert.equal(approved.body.numbers.personal.status, 'verified', 'the number waits for a relay line before becoming active');
+});
+
 test('phone number lifecycle: codes expire, attempts are limited, and a verified number belongs to one account', async () => {
   const { app, messaging } = saas();
   const a = await onboardTenant(app, messaging, { personal: '+15553330001' });

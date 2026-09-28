@@ -5,6 +5,7 @@ import twilio from 'twilio';
 import { HttpError } from '../errors.js';
 import type { MessagingProvider } from '../messaging/provider.js';
 import type { VerificationMessagingProvider } from '../messaging/provider.js';
+import type { PhoneVerificationProvider } from './verification.js';
 import { createAuditEventId, createPhoneNumberId, E164, type PhoneNumber } from '../tenancy/model.js';
 import { PhoneNumberTakenError, type TenancyStore } from '../tenancy/store.js';
 
@@ -187,13 +188,15 @@ export class PhoneNumberService {
     private readonly options: {
       allowPurchase?: boolean; allowSmsVerification?: boolean; country?: string; now?: () => number;
       verificationMessaging?: VerificationMessagingProvider;
+      verification?: PhoneVerificationProvider;
     } = {},
   ) {}
 
   verificationChannels(): Array<'call' | 'sms'> {
     return [
       ...(this.client.callVerificationCode ? ['call' as const] : []),
-      ...((this.options.verificationMessaging || this.messaging) && this.options.allowSmsVerification !== false ? ['sms' as const] : []),
+      ...(this.options.verification || ((this.options.verificationMessaging || this.messaging) && this.options.allowSmsVerification !== false)
+        ? ['sms' as const] : []),
     ];
   }
 
@@ -351,7 +354,8 @@ export class PhoneNumberService {
     if (!E164.test(number)) throw new HttpError(400, 'Enter your number in international format, e.g. +15551234567.');
     const from = await this.assistantLine(accountId);
     if (number === from || await this.store.findAssistantLine(number)) throw new HttpError(400, 'That’s an assistant line, not your personal number.');
-    if (channel === 'sms' && (!(this.options.verificationMessaging || (this.messaging && from)) || this.options.allowSmsVerification === false)) {
+    if (channel === 'sms' && !this.options.verification &&
+        (!(this.options.verificationMessaging || (this.messaging && from)) || this.options.allowSmsVerification === false)) {
       throw new HttpError(503, 'Text verification is not available yet. Choose Call Me With a Code.', 'sms_verification_unavailable');
     }
     if (channel === 'call' && (!from || !this.client.callVerificationCode)) {
@@ -359,7 +363,8 @@ export class PhoneNumberService {
     }
     const { personal, pending } = await this.numbers(accountId);
     if (personal && (personal.status === 'verified' || personal.status === 'active') && personal.number === number) return personal;
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const managed = channel === 'sms' ? this.options.verification : undefined;
+    const code = managed ? undefined : String(randomInt(0, 1_000_000)).padStart(6, '0');
     const now = this.now();
     const expiresAt = new Date(now.getTime() + VERIFICATION_TTL_MS);
     let record: PhoneNumber;
@@ -367,19 +372,20 @@ export class PhoneNumberService {
       // A resend or a corrected number reuses the pending record; attempts start over with a new code.
       record = (await this.store.updatePhoneNumber(accountId, pending.id, {
         number, verificationStatus: 'code_sent', verificationAttempts: 0,
-        verificationCodeHash: codeHash(pending.id, code), verificationExpiresAt: expiresAt,
+        verificationCodeHash: code ? codeHash(pending.id, code) : undefined, verificationExpiresAt: expiresAt,
       }))!;
     } else {
       // Changing a verified number: the old one stays the owner's until the new one is verified.
       const id = createPhoneNumberId();
       record = {
         id, accountId, kind: 'personal', number, status: 'pending_verification', provider: 'carrier',
-        verificationStatus: 'code_sent', verificationAttempts: 0, verificationCodeHash: codeHash(id, code),
+        verificationStatus: 'code_sent', verificationAttempts: 0, ...(code ? { verificationCodeHash: codeHash(id, code) } : {}),
         verificationExpiresAt: expiresAt, createdAt: now, updatedAt: now,
       };
       await this.store.insertPhoneNumber(record);
     }
-    if (channel === 'call') await this.client.callVerificationCode!({ from: from!, to: number, code });
+    if (managed) await managed.start(number, 'sms');
+    else if (channel === 'call') await this.client.callVerificationCode!({ from: from!, to: number, code: code! });
     else if (this.options.verificationMessaging) await this.options.verificationMessaging.sendVerification({
       to: number, body: `Your Text Me code is ${code}. It expires in 10 minutes.`, idempotencyKey: `verify:${record.id}:${code}`,
     });
@@ -393,12 +399,16 @@ export class PhoneNumberService {
     const pending = (await this.store.listPhoneNumbers(accountId))
       .filter((number) => number.kind === 'personal' && number.status === 'pending_verification')
       .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
-    if (!pending?.verificationCodeHash) throw new HttpError(409, 'Ask for a new code first.', 'no_pending_verification');
+    if (!pending) throw new HttpError(409, 'Ask for a new code first.', 'no_pending_verification');
     if (pending.verificationAttempts >= MAX_VERIFICATION_ATTEMPTS) throw new HttpError(429, 'Too many tries. Ask for a new code.', 'verification_locked');
     if (!pending.verificationExpiresAt || pending.verificationExpiresAt.getTime() <= this.now().getTime()) {
       throw new HttpError(410, 'That code expired. Ask for a new one.', 'verification_expired');
     }
-    if (codeHash(pending.id, String(code).trim()) !== pending.verificationCodeHash) {
+    const supplied = String(code).trim();
+    const approved = pending.verificationCodeHash
+      ? codeHash(pending.id, supplied) === pending.verificationCodeHash
+      : this.options.verification ? await this.options.verification.check(pending.number, supplied) : false;
+    if (!approved) {
       await this.store.updatePhoneNumber(accountId, pending.id, { verificationAttempts: pending.verificationAttempts + 1 });
       throw new HttpError(400, 'That code isn’t right.', 'verification_mismatch');
     }

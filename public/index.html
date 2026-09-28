@@ -819,9 +819,13 @@ const displayName = (conversation) => callerName(conversation) || formatPhone(co
 
 /* ---------------- API ---------------- */
 // Inside the iOS app this page runs in a native frame; the native side owns push and the Keychain.
-const NATIVE = (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.attn) || null;
+const WEBKIT_NATIVE = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.attn;
+const REACT_NATIVE = window.ReactNativeWebView && {
+  postMessage(message) { window.ReactNativeWebView.postMessage(JSON.stringify(message)); },
+};
+const NATIVE = WEBKIT_NATIVE || REACT_NATIVE || null;
 const postNative = (message) => { try { NATIVE && NATIVE.postMessage(message); } catch {} };
-const PLATFORM = NATIVE ? 'ios' : 'web';
+const PLATFORM = NATIVE ? (window.__ATTN_PLATFORM__ || 'ios') : 'web';
 const state = {
   token: store.get('ownerSession') || '',
   me: null,
