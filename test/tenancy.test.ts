@@ -218,6 +218,28 @@ test('existing-number onboarding can verify by voice call and accepts friendly f
   assert.equal(verified.body.ownerNumber, '+14014842831');
 });
 
+test('the owner can test the real assistant by having its line call their verified phone', async () => {
+  const { app, messaging, numbers } = saas({ pool: ['+15550000000'], purchasable: false });
+  const owner = await onboardTenant(app, messaging, { name: 'Test Caller', personal: '+14014842831' });
+
+  const started = await request(app).post('/owner/phone/test-call').set(owner.headers);
+  assert.equal(started.status, 202, JSON.stringify(started.body));
+  assert.deepEqual({ from: started.body.from, to: started.body.to }, { from: owner.line, to: owner.personal });
+  assert.equal(numbers.testCalls.length, 1);
+  assert.equal(numbers.testCalls[0].url,
+    'https://text-me.vercel.app/webhooks/twilio/voice/test?assistantLine=%2B15550000000');
+
+  const answered = await request(app)
+    .post('/webhooks/twilio/voice/test?assistantLine=%2B15550000000')
+    .type('form')
+    .send({ CallSid: started.body.id, From: owner.line, To: owner.personal, CallStatus: 'in-progress' });
+  assert.equal(answered.status, 200, answered.text);
+  assert.match(answered.type, /xml/);
+  const conversations = await request(app).get('/conversations').set(owner.headers);
+  assert.equal(conversations.body.length, 1);
+  assert.equal(conversations.body[0].participant.phoneNumber, owner.personal);
+});
+
 test('a registered platform Messaging Service can text every onboarding code before an account has a line', async () => {
   const messaging = new FakeMessagingProvider();
   const tenancyStore = new InMemoryTenancyStore();

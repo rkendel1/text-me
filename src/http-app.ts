@@ -15,7 +15,7 @@ import { openOwnerRequest } from './domain/owner-requests.js';
 import type { ConversationRepository } from './repositories/conversation-repository.js';
 import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
-import type { TelephonyProvider } from './telephony/provider.js';
+import type { IncomingCall, TelephonyProvider } from './telephony/provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
 import { FakeConversationModel } from './conversation/fake-model.js';
 import type { ConversationModel } from './conversation/model.js';
@@ -197,10 +197,12 @@ function registerIncomingCallRoute(
   service: ConversationService,
   configuration: OwnerConfigurationService,
   phoneNumbers: PhoneNumberService,
+  transform?: (request: Request, call: IncomingCall) => IncomingCall,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
-      const incomingCall = provider.parseIncomingCall(request.body);
+      const parsed = provider.parseIncomingCall(request.body);
+      const incomingCall = transform ? transform(request, parsed) : parsed;
       // The called number is the only thing that says whose call this is. Unknown line: fail closed.
       const line = incomingCall.calledNumber ? await phoneNumbers.resolveLine(incomingCall.calledNumber) : null;
       if (!line) {
@@ -709,6 +711,13 @@ export function createApp(options: AppOptions): express.Express {
   }
 
   registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, phoneNumbers);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice/test', twilioProvider, service, ownerConfiguration, phoneNumbers, (request, call) => {
+    const assistantLine = typeof request.query.assistantLine === 'string' ? request.query.assistantLine : '';
+    if (!assistantLine) throw new HttpError(400, 'assistantLine is required');
+    // An outbound test rings the owner's phone. Treat the destination as the caller and the
+    // signed query parameter as the account line so the rest is the exact inbound call path.
+    return { ...call, callerPhone: call.calledNumber ?? call.callerPhone, calledNumber: assistantLine };
+  });
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
 
   // A caller left a voicemail (only offered when the owner turned off answering calls).
@@ -1682,6 +1691,17 @@ export function createApp(options: AppOptions): express.Express {
       response.json(result);
     } catch (error) {
       next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t connect your number'));
+    }
+  });
+
+  const testCallLimit = rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false });
+  app.post(['/account/phone/test-call', '/owner/phone/test-call'], testCallLimit, tenant('phone.manage'), async (request, response, next) => {
+    try {
+      const context = tenantOf(request);
+      const call = await phoneNumbers.placeTestCall(context.accountId, context.userId);
+      response.status(202).json(call);
+    } catch (error) {
+      next(error instanceof HttpError ? error : new HttpError(502, error instanceof Error ? error.message : 'Couldn’t place the test call'));
     }
   });
 

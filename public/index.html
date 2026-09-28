@@ -1969,6 +1969,7 @@ function renderSettings() {
     <div class="group">
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--indigo, #5856d6)">${I.person}</span><span class="row-body"><span class="row-title">${esc((state.me && state.me.account && state.me.account.name) || 'Your account')}</span><div class="row-sub">${esc(state.me ? `${state.me.user.email} · ${state.me.account ? state.me.account.role : ''}` : '')}</div></span></div>
       <div class="row" style="--inset:57px"><span class="tile" style="background:var(--blue)">${I.phone}</span><span class="row-body"><span class="row-title" id="phoneNumber">Your number</span><div class="row-sub" id="phoneStatus">Checking…</div></span><button class="btn tinted" id="phoneConnect" style="width:auto;min-height:32px;padding:4px 14px;font-size:15px" hidden>Connect</button></div>
+      <button class="row action" id="phoneTest" style="--inset:57px" hidden><span class="tile" style="background:var(--green)">${I.phone}</span><span class="row-body"><span class="row-title">Call Me for a Test</span><div class="row-sub">Talk to your assistant from this phone</div></span></button>
       ${(state.me && state.me.memberships.length > 1) ? '<button class="row action" id="switchAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">' + I.person + '</span><span class="row-body">Switch Account…</span></button>' : ''}
       <button class="row action" id="newAccount" style="--inset:57px"><span class="tile" style="background:var(--gray)">${I.person}</span><span class="row-body">Create Another Account…<div class="row-sub" style="font-size:13px">Its own line, devices and conversations</div></span></button>
     </div>
@@ -2069,6 +2070,11 @@ async function refreshPhoneRow() {
     $('#phoneConnect').hidden = !phone.available;
     $('#phoneConnect').textContent = phone.forwardingSeen ? 'Details' : 'Set Up';
     $('#phoneConnect').onclick = () => phone.assistantLine ? forwardingSheet() : setupStep('phone');
+    const test = $('#phoneTest');
+    if (test) {
+      test.hidden = !(phone.connected && phone.ownerNumber);
+      test.onclick = placeTestCall;
+    }
   } catch { if ($('#phoneStatus')) $('#phoneStatus').textContent = 'Couldn’t check right now'; }
 }
 
@@ -2083,7 +2089,16 @@ function forwardingHTML(phone) {
     <div class="group-footer">Open the Phone app, paste the code into the keypad, and tap Call. Your carrier confirms on screen. Test it: call your number from another phone and don’t answer.</div>
     <div class="group"><div class="row"><span class="row-body"><span class="row-title">Assistant line</span><div class="row-sub">${esc(phone.assistantLine ? formatPhone(phone.assistantLine) : phone.error || '—')} · texts to callers come from this number</div></span>
       <span class="value" style="color:${phone.connected ? 'var(--green)' : 'var(--orange)'}">${phone.connected ? 'Connected' : 'Not connected'}</span></div></div>
+    ${phone.connected && phone.ownerNumber ? `<div class="group"><button class="row action" data-test-call><span class="tile" style="background:var(--green)">${I.phone}</span><span class="row-body"><span class="row-title">Call Me for a Test</span><div class="row-sub">Your phone rings; answer to talk to your assistant</div></span></button></div>` : ''}
     <div class="group-footer" id="forwardSeen">${phone.forwardingSeen ? `✓ Forwarded calls are arriving (last ${esc(relTime(phone.lastForwardedAt))}).` : 'Waiting for the first forwarded call.'}</div>`;
+}
+
+async function placeTestCall() {
+  haptic();
+  try {
+    await api('/owner/phone/test-call', { method: 'POST' });
+    toast('Calling your phone now — answer it to test your assistant', 'phone', 'var(--green)');
+  } catch (error) { errorToast(error); }
 }
 
 async function forwardingSheet() {
@@ -2106,6 +2121,8 @@ function bindForwardingCopy(root, phone) {
     try { await navigator.clipboard.writeText(code); toast('Copied — paste it in the Phone keypad'); }
     catch { toast(code, 'info', 'var(--blue)'); }
   });
+  const test = root.querySelector('[data-test-call]');
+  if (test) test.onclick = placeTestCall;
 }
 
 /* ---------------- Account setup: the server's onboarding state machine, step by step ---------------- */

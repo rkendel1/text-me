@@ -28,6 +28,8 @@ export interface PhoneNumberClient {
   purchase?(options: { country: string; areaCode?: string }): Promise<ProviderNumber>;
   /** Place an automated verification call when SMS registration is unavailable. */
   callVerificationCode?(options: { from: string; to: string; code: string }): Promise<void>;
+  /** Call the owner and connect the answered call to the real assistant webhook. */
+  placeTestCall?(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }>;
 }
 
 const fromTwilio = (number: { sid: string; phoneNumber: string; voiceUrl?: string | null; smsUrl?: string | null; statusCallback?: string | null }): ProviderNumber => ({
@@ -75,12 +77,26 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
     response.say(`Your Text Me verification code is ${spoken}. Again, ${spoken}.`);
     await this.client.calls.create({ from: options.from, to: options.to, twiml: response.toString() });
   }
+
+  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }> {
+    const call = await this.client.calls.create({
+      from: options.from,
+      to: options.to,
+      url: options.url,
+      method: 'POST',
+      statusCallback: options.statusCallback,
+      statusCallbackMethod: 'POST',
+      statusCallbackEvent: ['completed'],
+    });
+    return { id: call.sid };
+  }
 }
 
 /** A provider stand-in for local development and tests: a pool of numbers, plus "buying" new ones. */
 export class FakePhoneNumberClient implements PhoneNumberClient {
   readonly provider = 'fake';
   readonly verificationCalls: Array<{ from: string; to: string; code: string }> = [];
+  readonly testCalls: Array<{ id: string; from: string; to: string; url: string; statusCallback: string }> = [];
   private readonly numbers = new Map<string, ProviderNumber>();
 
   constructor(pool: string[] = [], private readonly purchasable = true) {
@@ -110,6 +126,12 @@ export class FakePhoneNumberClient implements PhoneNumberClient {
 
   async callVerificationCode(options: { from: string; to: string; code: string }): Promise<void> {
     this.verificationCalls.push(structuredClone(options));
+  }
+
+  async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string }): Promise<{ id: string }> {
+    const call = { id: `CA${String(this.testCalls.length + 1).padStart(32, '0')}`, ...structuredClone(options) };
+    this.testCalls.push(call);
+    return { id: call.id };
   }
 
   get purchase(): PhoneNumberClient['purchase'] {
@@ -345,6 +367,24 @@ export class PhoneNumberService {
     if (!line) throw new HttpError(409, 'This account doesn’t have an assistant line yet', 'no_assistant_line');
     const active = await this.activateLine(accountId, line);
     return { phoneNumber: active.number, connected: true };
+  }
+
+  /** Ring the owner's verified phone and run the answered call through the production assistant flow. */
+  async placeTestCall(accountId: string, userId?: string): Promise<{ id: string; from: string; to: string }> {
+    if (!this.client.placeTestCall) throw new HttpError(503, 'Test calls are not available with this phone provider.', 'test_call_unavailable');
+    const { line, personal } = await this.numbers(accountId);
+    if (!line || line.status !== 'active') throw new HttpError(409, 'Connect your assistant line before placing a test call.', 'no_assistant_line');
+    if (!personal || personal.status !== 'active') throw new HttpError(409, 'Verify your mobile number before placing a test call.', 'no_personal_number');
+    const url = new URL('/webhooks/twilio/voice/test', this.publicBaseUrl);
+    url.searchParams.set('assistantLine', line.number);
+    const call = await this.client.placeTestCall({
+      from: line.number,
+      to: personal.number,
+      url: url.toString(),
+      statusCallback: this.urls().statusCallback,
+    });
+    await this.audit(accountId, 'phone.test_call_started', { providerCallId: call.id, from: line.number, to: personal.number }, userId);
+    return { id: call.id, from: line.number, to: personal.number };
   }
 
   /** Text a one-time code to the owner's number from the account's own assistant line. */
