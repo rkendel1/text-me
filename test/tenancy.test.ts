@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import request from 'supertest';
+import { FakeCallProvider } from '../src/calls/provider.js';
 
 import { createApp } from '../src/http-app.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
@@ -13,14 +14,15 @@ import { InMemoryConversationRepository } from './support/in-memory-repository.j
 import { lastCode, onboardTenant, PASSWORD, signIn, signUp } from './support/tenant.js';
 
 function saas(options: { pool?: string[]; purchasable?: boolean } = {}) {
+  const callProvider = new FakeCallProvider();
   const messaging = new FakeMessagingProvider();
   const tenancyStore = new InMemoryTenancyStore();
   const numbers = new FakePhoneNumberClient(options.pool ?? [], options.purchasable ?? true);
   const app = createApp({
     repository: new InMemoryConversationRepository(), messagingProvider: messaging, tenancyStore, phoneNumberClient: numbers,
-    publicBaseUrl: 'https://text-me.vercel.app',
+    publicBaseUrl: 'https://text-me.vercel.app', callProvider,
   });
-  return { app, messaging, tenancyStore, numbers };
+  return { app, messaging, tenancyStore, numbers, callProvider };
 }
 
 test('anyone can sign up: a user, an account with an opaque id, an owner membership, and a session', async () => {
@@ -219,16 +221,19 @@ test('existing-number onboarding can verify by voice call and accepts friendly f
 });
 
 test('the owner can test the real assistant by having its line call their verified phone', async () => {
-  const { app, messaging, numbers } = saas({ pool: ['+15550000000'], purchasable: false });
+  const { app, messaging, callProvider } = saas({ pool: ['+15550000000'], purchasable: false });
   const owner = await onboardTenant(app, messaging, { name: 'Test Caller', personal: '+14014842831' });
 
   const started = await request(app).post('/owner/phone/test-call').set(owner.headers);
   assert.equal(started.status, 202, JSON.stringify(started.body));
   assert.deepEqual({ from: started.body.from, to: started.body.to }, { from: owner.line, to: owner.personal });
-  assert.equal(numbers.testCalls.length, 1);
-  assert.equal(numbers.testCalls[0].humanOnly, true);
-  assert.equal(numbers.testCalls[0].url,
-    'https://text-me.vercel.app/webhooks/twilio/voice/test?assistantLine=%2B15550000000');
+  // One provider call, placed from the account's own line to the owner's verified phone, through the CallSession path.
+  assert.equal(callProvider.created.length, 1);
+  assert.deepEqual({ from: callProvider.created[0].from, to: callProvider.created[0].to }, { from: owner.line, to: owner.personal });
+  assert.match(callProvider.created[0].answerUrl!,
+    /^https:\/\/text-me\.vercel\.app\/webhooks\/twilio\/voice\/test\?assistantLine=%2B15550000000&callId=call_[0-9a-f]{32}$/);
+  assert.match(callProvider.created[0].statusUrl!, /^https:\/\/text-me\.vercel\.app\/webhooks\/twilio\/status\?callId=call_[0-9a-f]{32}$/);
+  assert.match(started.body.callId, /^call_/);
 
   const prompt = await request(app)
     .post('/webhooks/twilio/voice/test?assistantLine=%2B15550000000')

@@ -10,10 +10,12 @@ import {
   type CallSessionRecord,
   type CallSessionStatus,
 } from './model.js';
-import { consoleCallLogger, maskPhone, type CallLogger } from './log.js';
-import type { CallProvider } from './provider.js';
+import { consoleCallLogger, maskPhone, safeError, type CallLogger } from './log.js';
+import { denyAllOutboundPolicy, type OutboundOrigin, type OutboundPolicy } from './outbound-policy.js';
+import { normalizeDialableNumber } from './phone.js';
+import { CallProviderRejectedError, type CallProvider } from './provider.js';
 import type { CallSessionStore } from './store.js';
-import { claimCallEnd, releaseEndClaim, transitionCallSession, type TransitionOutcome, type TransitionResult } from './transition.js';
+import { claimCallEnd, claimOutboundDial, releaseEndClaim, transitionCallSession, type TransitionOutcome, type TransitionResult } from './transition.js';
 
 export class CallNotFoundError extends Error {
   constructor() {
@@ -23,7 +25,14 @@ export class CallNotFoundError extends Error {
 
 /** The caller asked for something the contract does not allow (bad input, missing line…). */
 export class CallRequestError extends Error {
-  constructor(readonly code: 'invalid_input' | 'no_assistant_line' | 'not_permitted', message: string) {
+  constructor(readonly code: 'invalid_input' | 'no_assistant_line' | 'not_permitted' | 'idempotency_key_required', message: string) {
+    super(message);
+  }
+}
+
+/** The outbound policy refused the call. Nothing was created and the provider was never contacted. */
+export class CallPolicyDeniedError extends Error {
+  constructor(readonly reason: string, message: string) {
     super(message);
   }
 }
@@ -62,6 +71,16 @@ export interface CreateCallInput {
   providerCallId?: string | null;
   /** The owner-facing conversation this call belongs to. Requires `canIngest`. */
   conversationId?: string | null;
+  /** Outbound: what the call is for. A description of the goal, never authority to act. */
+  objective?: string | null;
+}
+
+export const MAX_OBJECTIVE_LENGTH = 500;
+
+/** Where the provider should send the callee's instructions request and the call's lifecycle events. Built by the application, never from input. */
+export interface DialUrls {
+  answerUrl: string;
+  statusUrl: string;
 }
 
 export interface ListCallsInput {
@@ -93,6 +112,12 @@ export type ProviderEventOutcome = TransitionOutcome | 'unmapped' | 'unknown_cal
 
 export interface CallSessionServiceOptions {
   provider?: CallProvider;
+  /** Decides whether an outbound call may be placed, and from which number. With none, nothing is allowed. */
+  policy?: OutboundPolicy;
+  /** The URLs the provider is given for an outbound call. */
+  dialUrls?: (session: CallSessionRecord, origin: OutboundOrigin) => DialUrls;
+  /** How long to wait for the provider to answer a create-call request before treating its outcome as unconfirmed. */
+  dialTimeoutMs?: number;
   /** The account's own assistant line, used as `from` for an outbound call that names none. */
   assistantLine?: (accountId: string) => Promise<string | null>;
   logger?: CallLogger;
@@ -114,8 +139,17 @@ function decodeCursor(cursor: string): { createdAt: Date; id: string } {
   }
 }
 
-const fingerprint = (direction: CallDirection, from: string | null, to: string | null, providerCallId: string | null): string =>
-  createHash('sha256').update([direction, from ?? '', to ?? '', providerCallId ?? ''].join('|')).digest('hex');
+const fingerprint = (direction: CallDirection, from: string | null, to: string | null, providerCallId: string | null, objective: string | null = null): string =>
+  // An absent objective leaves the hash exactly as it was before objectives existed, so older rows still match.
+  createHash('sha256').update([direction, from ?? '', to ?? '', providerCallId ?? ''].join('|') + (objective ? `|objective:${objective}` : '')).digest('hex');
+
+const DEFAULT_DIAL_TIMEOUT_MS = 20_000;
+
+class DialTimeout extends Error {
+  constructor() {
+    super('The provider did not answer the create-call request in time.');
+  }
+}
 
 /**
  * The application's CallSession operations. Every read and write is scoped to an account, and the
@@ -158,6 +192,8 @@ export class CallSessionService {
     if ((providerCallId || conversationId) && !actor.canIngest) {
       throw new CallRequestError('not_permitted', 'Only the telephony webhook may attach a provider call or a conversation.');
     }
+    const objective = this.objective(input.objective);
+    if (objective && direction !== 'outbound') throw new CallRequestError('invalid_input', 'Only an outbound call has an objective.');
     // The telephony webhook reports what the carrier sent, which is not always E.164 (anonymous callers, SIP
     // identifiers): it is recorded when valid and left null otherwise, never a reason to drop a real call.
     let from = this.phone(input.from, 'from', actor.canIngest);
@@ -172,18 +208,40 @@ export class CallSessionService {
         if (!from) throw new CallRequestError('no_assistant_line', 'This account has no assistant line to call from yet.');
       }
     }
+    const { session } = await this.persist(actor, {
+      direction, from, to, providerCallId, conversationId, objective,
+      provider: actor.canIngest && input.provider ? input.provider : this.providerName,
+      fingerprint: fingerprint(direction, from, to, providerCallId, objective),
+    });
+    // An inbound call is already at the provider. Resuming this step on a replay heals a crash between insert and transition.
+    if (direction === 'inbound' && session.status === 'created') {
+      return (await this.transition(session.id, 'ringing', { mode: 'lenient' })).session ?? session;
+    }
+    return session;
+  }
 
+  /** Inserts the session, or finds the one this same request already made. The one place a session is created. */
+  private async persist(actor: CallActor, fields: {
+    direction: CallDirection;
+    provider: string;
+    from: string | null;
+    to: string | null;
+    providerCallId: string | null;
+    conversationId: string | null;
+    objective: string | null;
+    fingerprint: string;
+  }): Promise<{ session: CallSessionRecord; replayed: boolean }> {
     const now = this.now();
     const record: CallSessionRecord = {
       id: this.newId(),
       accountId: actor.accountId,
-      direction,
+      direction: fields.direction,
       status: 'created',
-      provider: actor.canIngest && input.provider ? input.provider : this.providerName,
-      providerCallId,
-      from,
-      to,
-      conversationId,
+      provider: fields.provider,
+      providerCallId: fields.providerCallId,
+      from: fields.from,
+      to: fields.to,
+      conversationId: fields.conversationId,
       startedAt: null,
       answeredAt: null,
       endedAt: null,
@@ -194,31 +252,41 @@ export class CallSessionService {
       requestedBy: actor.principalId ?? (actor.canIngest ? 'system' : null),
       traceId: actor.traceId ?? null,
       idempotencyKey: actor.idempotencyKey ?? null,
-      requestFingerprint: fingerprint(direction, from, to, providerCallId),
+      requestFingerprint: fields.fingerprint,
       endClaimedAt: null,
       lastProviderStatus: null,
+      objective: fields.objective,
+      dialClaimedAt: null,
+      dialOutcome: null,
     };
-
     const inserted = await this.store.insert(record);
-    let session = inserted.session;
-    if (!inserted.created) {
-      // A replay. It must be ours, and it must be the same request.
-      if (session.accountId !== actor.accountId) throw new CallConflictError('provider_call_taken');
-      if (actor.idempotencyKey && session.idempotencyKey === actor.idempotencyKey && session.requestFingerprint !== record.requestFingerprint) {
-        throw new CallConflictError('idempotency_key_reused');
-      }
-      this.log('info', 'call.create.replayed', session, { traceId: actor.traceId });
-    } else {
-      this.log('info', 'call.created', session, {
-        traceId: actor.traceId, direction, from: maskPhone(from), to: maskPhone(to), idempotent: Boolean(actor.idempotencyKey),
+    if (inserted.created) {
+      this.log('info', 'call.created', inserted.session, {
+        traceId: actor.traceId, direction: fields.direction, from: maskPhone(fields.from), to: maskPhone(fields.to), idempotent: Boolean(actor.idempotencyKey),
       });
+      return { session: inserted.session, replayed: false };
     }
+    // A replay. It must be ours, and it must be the same request.
+    this.assertSameRequest(inserted.session, actor, fields.fingerprint);
+    this.log('info', 'call.create.replayed', inserted.session, { traceId: actor.traceId });
+    return { session: inserted.session, replayed: true };
+  }
 
-    // An inbound call is already at the provider. Resuming this step on a replay heals a crash between insert and transition.
-    if (direction === 'inbound' && session.status === 'created') {
-      session = (await this.transition(session.id, 'ringing', { mode: 'lenient' })).session ?? session;
+  private assertSameRequest(existing: CallSessionRecord, actor: CallActor, fingerprintOfRequest: string): void {
+    if (existing.accountId !== actor.accountId) throw new CallConflictError('provider_call_taken');
+    if (actor.idempotencyKey && existing.idempotencyKey === actor.idempotencyKey && existing.requestFingerprint !== fingerprintOfRequest) {
+      throw new CallConflictError('idempotency_key_reused');
     }
-    return session;
+  }
+
+  private objective(value: string | null | undefined): string | null {
+    if (value === undefined || value === null) return null;
+    // One line of plain text: whitespace collapsed, no control characters. It is context for the conversation, never a command channel.
+    const text = value.replace(/\s+/g, ' ').trim();
+    if (!text) return null;
+    if (text.length > MAX_OBJECTIVE_LENGTH) throw new CallRequestError('invalid_input', `objective must be at most ${MAX_OBJECTIVE_LENGTH} characters.`);
+    if (/[\u0000-\u001f\u007f]/.test(text)) throw new CallRequestError('invalid_input', 'objective must be plain text.');
+    return text;
   }
 
   private phone(value: string | null | undefined, field: string, lenient = false): string | null {
@@ -272,6 +340,7 @@ export class CallSessionService {
       conversationId: conversation.id, startedAt: null, answeredAt: null, endedAt: null, endReason: null,
       createdAt: conversation.startedAt, updatedAt: now, version: 1, requestedBy: 'system', traceId: null,
       idempotencyKey: null, requestFingerprint: null, endClaimedAt: null, lastProviderStatus: null,
+      objective: null, dialClaimedAt: null, dialOutcome: null,
     };
     const { session } = await this.store.insert(record);
     // Mirror where the conversation already is, through the same transition mechanism.
@@ -301,6 +370,11 @@ export class CallSessionService {
     const session = await this.store.get(accountId, id);
     if (!session) throw new CallNotFoundError();
     return session;
+  }
+
+  /** A session by our own id, for a webhook whose URL we built. Not tenant-scoped: the caller must check `accountId`. */
+  async findSession(id: string): Promise<CallSessionRecord | null> {
+    return this.store.findById(id);
   }
 
   async findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null> {
@@ -366,22 +440,213 @@ export class CallSessionService {
     return result?.session ?? null;
   }
 
+  // ----- Outbound execution -----
+
   /**
-   * The owner-initiated test call is the only call the application dials today (`call.create` never
-   * dials). Its lifecycle goes through the same transitions: dialing, then the provider's id, or failure.
+   * Places an outbound call: validate, recognise a retry, ask the policy, create the durable session, then
+   * execute it. It returns as soon as the provider has accepted (or refused) the request: the caller
+   * observes the call afterwards with `get`. It never waits for anyone to pick up.
+   *
+   * The invariant: one logical request (one idempotency key) produces at most one provider call. The
+   * session is unique per (account, key); the right to call the provider is a durable claim
+   * (`claimOutboundDial`); and a provider outcome we cannot confirm is recorded, never retried.
    */
-  async beginDial(id: string): Promise<void> {
-    await this.transition(id, 'initiating', { mode: 'strict' });
+  async placeOutbound(actor: CallActor, input: CreateCallInput, options: { origin: OutboundOrigin }): Promise<CallSessionRecord> {
+    const { origin } = options;
+    this.log('info', 'call.outbound.requested', null, {
+      traceId: actor.traceId, origin, principal: actor.principalId ?? null, to: maskPhone(typeof input.to === 'string' ? input.to : null),
+    });
+    const refuse = (reason: string, error: Error): never => {
+      this.log('warn', 'call.outbound.denied', null, { traceId: actor.traceId, origin, reason, to: maskPhone(typeof input.to === 'string' ? input.to : null) });
+      throw error;
+    };
+
+    if (input.direction !== 'outbound') return refuse('not_outbound', new CallRequestError('invalid_input', 'Only an outbound call can be placed.'));
+    if (input.providerCallId || input.conversationId) return refuse('ingest_fields', new CallRequestError('not_permitted', 'An outbound call gets its provider call when it is dialed.'));
+    const to = normalizeDialableNumber(input.to);
+    if (!to) return refuse('invalid_destination', new CallRequestError('invalid_input', 'to must be a dialable phone number in international format, such as +15551234567.'));
+    const from = input.from ? normalizeDialableNumber(input.from) : undefined;
+    if (input.from && !from) return refuse('invalid_caller_id', new CallRequestError('invalid_input', 'from must be a phone number in international format.'));
+    let objective: string | null;
+    try {
+      objective = this.objective(input.objective);
+    } catch (error) {
+      return refuse('invalid_objective', error as Error);
+    }
+    // An externally observable side effect: the request must be identifiable, or a retry would dial again.
+    if (origin === 'agent' && !actor.idempotencyKey) {
+      return refuse('idempotency_key_required', new CallRequestError('idempotency_key_required', 'Placing a call requires an idempotency key, so a retry cannot dial twice.'));
+    }
+    const requestFingerprint = fingerprint('outbound', from ?? null, to, null, objective);
+
+    // A retry of a request already accepted: the decision was made once. Same call, no second dial.
+    if (actor.idempotencyKey) {
+      const existing = await this.store.findByIdempotencyKey(actor.accountId, actor.idempotencyKey);
+      if (existing) {
+        this.assertSameRequest(existing, actor, requestFingerprint);
+        this.log('info', 'call.create.replayed', existing, { traceId: actor.traceId });
+        return this.executeOutbound(actor, existing);
+      }
+    }
+
+    const decision = await (this.options.policy ?? denyAllOutboundPolicy).evaluate({
+      accountId: actor.accountId, ...(actor.principalId ? { principalId: actor.principalId } : {}), origin, to, ...(from ? { from } : {}),
+    });
+    if (!decision.allowed) {
+      // A concurrent twin of this very request may have been recorded between the replay check and the policy (whose
+      // duplicate-destination rule then sees that twin). That is a retry, not a second call: never refuse it as one.
+      if (actor.idempotencyKey) {
+        const twin = await this.store.findByIdempotencyKey(actor.accountId, actor.idempotencyKey);
+        if (twin) {
+          this.assertSameRequest(twin, actor, requestFingerprint);
+          this.log('info', 'call.create.replayed', twin, { traceId: actor.traceId });
+          return this.executeOutbound(actor, twin, origin);
+        }
+      }
+      return refuse(decision.reason, new CallPolicyDeniedError(decision.reason, decision.message));
+    }
+    this.log('info', 'call.outbound.allowed', null, { traceId: actor.traceId, origin, to: maskPhone(to), from: maskPhone(decision.callerId) });
+
+    const { session } = await this.persist(actor, {
+      direction: 'outbound', provider: this.providerName, from: decision.callerId, to,
+      providerCallId: null, conversationId: null, objective, fingerprint: requestFingerprint,
+    });
+    return this.executeOutbound(actor, session, origin);
   }
 
-  async recordDialed(id: string, providerCallId: string, traceId?: string): Promise<void> {
-    const attached = await this.attachProviderCall(id, providerCallId);
-    this.log('info', 'call.dialed', attached, { traceId });
+  /**
+   * Asks the provider to place a `created` outbound call, at most once.
+   *
+   * Failure model, made explicit:
+   * - The database write and the provider request are two steps, never one transaction. Between them a
+   *   process can die; the durable claim (`initiating`, `dialClaimedAt`) is what says "someone is on it".
+   * - The provider refused (a 4xx): definitively no call. The session is `failed` (`provider_rejected`).
+   * - The provider timed out, dropped the connection or errored (5xx): a call may exist. The session stays
+   *   `initiating`, marked `unconfirmed`. It is not failed and it is never dialed again. A callback or the
+   *   answer request, which carry our `callId`, attach the provider id and the session converges; if none
+   *   ever arrives, `reconcileUnconfirmedDials` closes it, and the callee's answer is met with a hang-up.
+   * - The provider accepted: its id is recorded. Callbacks may arrive before, during or after this, in any
+   *   order; they attach the id themselves, so the order never matters.
+   */
+  private async executeOutbound(actor: CallActor, session: CallSessionRecord, origin: OutboundOrigin = 'agent'): Promise<CallSessionRecord> {
+    if (session.direction !== 'outbound' || session.status !== 'created') return session;
+    const claim = await claimOutboundDial(this.store, session.id, { now: this.now() });
+    if (!claim.claimed || !claim.session) {
+      // Another request, instance or process owns the dial, or it is already over. Observe, do not dial.
+      this.log('info', 'call.outbound.not_dialed', claim.session ?? session, { traceId: actor.traceId, outcome: claim.outcome });
+      return claim.session ?? session;
+    }
+    const claimed = claim.session;
+    this.log('info', 'call.outbound.initiating', claimed, { traceId: actor.traceId, to: maskPhone(claimed.to), from: maskPhone(claimed.from) });
+
+    const provider = this.options.provider;
+    const urls = this.options.dialUrls?.(claimed, origin);
+    if (!provider || !urls || !claimed.from || !claimed.to) {
+      return this.failDial(claimed, actor, 'provider_unavailable', 'rejected', 'No telephony provider is configured for outbound calls.');
+    }
+
+    const attempt = provider.createCall({ from: claimed.from, to: claimed.to, answerUrl: urls.answerUrl, statusUrl: urls.statusUrl });
+    try {
+      const { providerCallId } = await this.withDialTimeout(attempt);
+      return await this.recordAccepted(actor, claimed.id, providerCallId);
+    } catch (error) {
+      if (error instanceof CallProviderRejectedError) {
+        return this.failDial(claimed, actor, 'provider_rejected', 'rejected', error.message, error.code);
+      }
+      // Unknown outcome: a call may exist. Record that, do not fail it, never redial.
+      const marked = await this.store.mutate(claimed.id, (current) => (current.providerCallId ? { patch: null } : { patch: { dialOutcome: 'unconfirmed' as const } }));
+      this.log('error', 'call.outbound.failed', marked?.session ?? claimed, { traceId: actor.traceId, unconfirmed: true, error: safeError(error) });
+      if (error instanceof DialTimeout) {
+        // The request is still in flight. If it lands after all, its id is recorded and the call converges.
+        void attempt.then(({ providerCallId }) => this.recordAccepted(actor, claimed.id, providerCallId)).catch(() => undefined);
+      }
+      return marked?.session ?? claimed;
+    }
   }
 
-  async recordDialFailed(id: string, traceId?: string, error?: unknown): Promise<void> {
-    const result = await this.transition(id, 'failed', { mode: 'lenient', reason: 'dial_failed' });
-    this.log('error', 'call.dial.failed', result.session, { traceId, error: error instanceof Error ? error.message : 'unknown' });
+  private async failDial(
+    session: CallSessionRecord, actor: CallActor, reason: string, outcome: 'rejected', message: string, code?: string | number,
+  ): Promise<CallSessionRecord> {
+    const result = await transitionCallSession(this.store, session.id, 'failed', { mode: 'lenient', reason, also: { dialOutcome: outcome }, now: this.now() });
+    this.log('error', 'call.outbound.failed', result.session ?? session, { traceId: actor.traceId, unconfirmed: false, reason, code: code ?? null, error: safeError(message) });
+    return result.session ?? session;
+  }
+
+  private withDialTimeout<T>(attempt: Promise<T>): Promise<T> {
+    const limit = this.options.dialTimeoutMs ?? DEFAULT_DIAL_TIMEOUT_MS;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new DialTimeout()), limit); });
+    return Promise.race([attempt, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * Records the provider's id for a dialed call. Safe in any order with callbacks that already attached it.
+   * If the call was ended or failed while the request was in flight, the call that nevertheless got created is cancelled.
+   */
+  private async recordAccepted(actor: CallActor, id: string, providerCallId: string): Promise<CallSessionRecord> {
+    let conflicting = false;
+    const result = await this.store.mutate(id, (current) => {
+      if (current.providerCallId && current.providerCallId !== providerCallId) {
+        conflicting = true;
+        return { patch: null };
+      }
+      return { patch: { ...(current.providerCallId ? {} : { providerCallId }), ...(current.dialOutcome === 'accepted' ? {} : { dialOutcome: 'accepted' as const }) } };
+    });
+    if (!result) throw new CallNotFoundError();
+    if (conflicting) {
+      this.log('error', 'call.outbound.provider_id_conflict', result.session, { traceId: actor.traceId });
+      return result.session;
+    }
+    this.log('info', 'call.outbound.provider_created', result.session, { traceId: actor.traceId });
+    if (isTerminal(result.session.status)) {
+      // Ended (or failed) while the request was in flight, yet the provider created the call: do not let it ring.
+      await this.options.provider?.endCall(providerCallId, { mode: 'cancel' }).catch((error) =>
+        this.log('error', 'call.outbound.cancel_after_dial_failed', result.session, { traceId: actor.traceId, error: safeError(error) }));
+      this.log('info', 'call.outbound.cancelled_after_dial', result.session, { traceId: actor.traceId });
+    }
+    return result.session;
+  }
+
+  /**
+   * A webhook carrying the `callId` we put in its URL proves which session a provider call belongs to, even
+   * if our own request to create the call has not come back (or never will). It attaches the provider id.
+   */
+  async adoptDialedCall(callId: string, providerCallId: string): Promise<CallSessionRecord | null> {
+    const session = await this.store.findById(callId);
+    if (!session || session.direction !== 'outbound') return null;
+    if (session.providerCallId && session.providerCallId !== providerCallId) {
+      this.log('error', 'call.outbound.provider_id_conflict', session, { providerCallId });
+      return null;
+    }
+    if (session.providerCallId) return session;
+    const result = await this.store.mutate(callId, (current) =>
+      current.providerCallId ? { patch: null } : { patch: { providerCallId, dialOutcome: 'accepted' as const } });
+    if (result?.changed) this.log('info', 'call.outbound.provider_created', result.session, { via: 'callback' });
+    return result?.session ?? null;
+  }
+
+  /**
+   * Closes outbound calls whose provider request never resolved: claimed a while ago, no provider id.
+   * Not scheduled here (there is no scheduler yet); safe to run from a job or by hand, and safe to repeat.
+   * A call that does exist at the provider is met with a hang-up when answered, because the session is over.
+   */
+  async reconcileUnconfirmedDials(options: { olderThanMs?: number; limit?: number } = {}): Promise<number> {
+    const before = new Date(this.now().getTime() - (options.olderThanMs ?? 10 * 60_000));
+    const stale = await this.store.listUnconfirmedDials(before, options.limit ?? 50);
+    let closed = 0;
+    for (const session of stale) {
+      const result = await this.transition(session.id, 'failed', { mode: 'lenient', reason: 'dial_unconfirmed' });
+      if (result.outcome === 'applied') closed += 1;
+    }
+    return closed;
+  }
+
+  /** Where an account's outbound calls still in progress are going (for the duplicate-destination rule). */
+  async activeOutboundDestinations(accountId: string): Promise<string[]> {
+    const active = await this.store.list(accountId, {
+      direction: 'outbound', status: ['created', 'initiating', 'ringing', 'answered', 'in_progress', 'ending'], limit: MAX_LIST_LIMIT,
+    });
+    return active.flatMap((session) => (session.to ? [session.to] : []));
   }
 
   /**
@@ -415,7 +680,7 @@ export class CallSessionService {
     } catch (error) {
       // Release the claim so a retry can ask again; the call is `ending` and stays observable.
       await releaseEndClaim(this.store, id);
-      this.log('error', 'call.end.provider_failed', claim.session, { traceId: actor.traceId, error: error instanceof Error ? error.message : 'unknown' });
+      this.log('error', 'call.end.provider_failed', claim.session, { traceId: actor.traceId, error: safeError(error) });
       throw new CallProviderError('The call could not be ended at the provider.', { cause: error });
     }
     this.log('info', 'call.end.requested', claim.session, { traceId: actor.traceId, reason });

@@ -1,36 +1,59 @@
 import twilio from 'twilio';
 
-import type { CallProvider, CallProviderCreateInput } from '../calls/provider.js';
+import { CallProviderRejectedError, CallProviderUnconfirmedError, type CallProvider, type CallProviderCreateInput } from '../calls/provider.js';
 
 /**
  * The only place the application places or ends Twilio calls (`client.calls.create` / `.update`).
  * The CallSession domain depends on `CallProvider`, never on the Twilio SDK.
  */
+/** The slice of the Twilio SDK this adapter uses. Injectable so the adapter's own behavior can be tested without the network. */
+export type TwilioCallsClient = Pick<ReturnType<typeof twilio>, 'calls'>;
+
 export class TwilioCallProvider implements CallProvider {
   readonly name = 'twilio';
-  private readonly client: ReturnType<typeof twilio>;
+  private readonly client: TwilioCallsClient;
 
-  constructor(accountSid: string, authToken: string) {
-    this.client = twilio(accountSid, authToken);
+  constructor(accountSid: string, authToken: string, options: { timeoutMs?: number; client?: TwilioCallsClient } = {}) {
+    // A bounded request: an outbound call must not hang a serverless invocation waiting on the network.
+    this.client = options.client ?? twilio(accountSid, authToken, { timeout: options.timeoutMs ?? 15_000 });
   }
 
   async createCall(input: CallProviderCreateInput): Promise<{ providerCallId: string }> {
-    if (!input.answerUrl && !input.inlineInstructions) throw new Error('A call needs an answer URL or inline instructions.');
-    const call = await this.client.calls.create({
-      from: input.from,
-      to: input.to,
-      ...(input.answerUrl ? { url: input.answerUrl, method: 'POST' } : { twiml: input.inlineInstructions }),
-      ...(input.statusUrl ? {
-        statusCallback: input.statusUrl,
-        statusCallbackMethod: 'POST',
-        // Every lifecycle event, so a ringing, answered or unanswered call is visible as it happens.
-        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      } : {}),
-    });
-    return { providerCallId: call.sid };
+    if (!input.answerUrl && !input.inlineInstructions) throw new CallProviderRejectedError('A call needs an answer URL or inline instructions.');
+    try {
+      const call = await this.client.calls.create({
+        from: input.from,
+        to: input.to,
+        ...(input.answerUrl ? { url: input.answerUrl, method: 'POST' } : { twiml: input.inlineInstructions }),
+        ...(input.statusUrl ? {
+          statusCallback: input.statusUrl,
+          statusCallbackMethod: 'POST',
+          // Every lifecycle event, so a ringing, answered or unanswered call is visible as it happens.
+          statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        } : {}),
+      });
+      return { providerCallId: call.sid };
+    } catch (error) {
+      throw classifyCreateFailure(error);
+    }
   }
 
   async endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void> {
     await this.client.calls(providerCallId).update({ status: options.mode === 'cancel' ? 'canceled' : 'completed' });
   }
+}
+
+/**
+ * Twilio answered with an HTTP 4xx: it looked at the request and refused it, so no call exists (an invalid
+ * number, a permissions or authentication problem, a rate limit). Anything else (a timeout, a dropped
+ * connection, a 5xx) says nothing about whether the call was created, so it is reported as unconfirmed and the
+ * application must not assume either way. (408 is a timeout, not a verdict.)
+ */
+function classifyCreateFailure(error: unknown): Error {
+  const { status, code, message } = (error ?? {}) as { status?: unknown; code?: unknown; message?: unknown };
+  const text = typeof message === 'string' ? message : 'The call could not be created.';
+  if (typeof status === 'number' && status >= 400 && status < 500 && status !== 408) {
+    return new CallProviderRejectedError(text, typeof code === 'string' || typeof code === 'number' ? code : status);
+  }
+  return new CallProviderUnconfirmedError(text, { cause: error });
 }

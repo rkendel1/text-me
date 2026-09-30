@@ -6,8 +6,10 @@ import { can, type TenantContext } from '../tenancy/authorization.js';
 export const CALL_APPLICATION_ID = 'app.justtextme.calls';
 
 export const CALL_PERMISSIONS = {
-  /** Start a call (outbound). Account admins and owners. */
+  /** Create a call. Account admins and owners. */
   create: 'call.create',
+  /** Have an outbound call actually placed. Account admins and owners. The telephony webhook's session never holds it. */
+  dial: 'call.dial',
   /** See calls. Every member. */
   read: 'call.read',
   /** End a call. Every member who may control conversations. */
@@ -27,7 +29,7 @@ export function appPortSessionFor(tenant: TenantContext): Session {
   const permissions: string[] = [];
   if (can(tenant.role, 'conversation.read')) permissions.push(CALL_PERMISSIONS.read);
   if (can(tenant.role, 'conversation.control')) permissions.push(CALL_PERMISSIONS.control);
-  if (can(tenant.role, 'phone.manage')) permissions.push(CALL_PERMISSIONS.create);
+  if (can(tenant.role, 'phone.manage')) permissions.push(CALL_PERMISSIONS.create, CALL_PERMISSIONS.dial);
   return {
     id: tenant.sessionId,
     applicationId: CALL_APPLICATION_ID,

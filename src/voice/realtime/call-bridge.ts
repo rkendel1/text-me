@@ -11,7 +11,7 @@ import type {
   RealtimeServerEvent,
 } from './connector.js';
 import type { OwnerConfiguration } from '../../owner/configuration.js';
-import { buildSessionConfig, relayInstructions, type CallToolName } from './session-config.js';
+import { buildSessionConfig, outboundOpeningInstruction, relayInstructions, type CallContext, type CallToolName } from './session-config.js';
 
 export interface CallBridgeServices {
   repository: ConversationRepository;
@@ -50,6 +50,8 @@ export class RealtimeCallBridge {
   private accountId?: string;
   /** Set only once the session is confirmed to be this conversation's. The stream never decides lifecycle; it reports it. */
   private callSessionId?: string;
+  /** What the verified CallSession says about this call: outbound calls are told so, and why. */
+  private callContext?: CallContext;
   private paused = false;
   private closing = false;
   private hangupWhenIdle = false;
@@ -94,7 +96,7 @@ export class RealtimeCallBridge {
     this.paused = runtime.state === 'paused' || runtime.state === 'stopped' || !runtime.assistantEnabled;
     this.sequence = conversation.events.length + 1000;
     this.connection = await this.connector.connect(
-      await buildSessionConfig(runtime, configuration, this.options.voice),
+      await buildSessionConfig(runtime, configuration, this.options.voice, this.callContext),
       {
         onEvent: (event) => this.onModelEvent(event),
         onClose: (reason) => this.onModelClosed(reason),
@@ -107,7 +109,9 @@ export class RealtimeCallBridge {
       ...(callSid ? { callSid } : {}),
     }, new Date());
     if (!this.paused && runtime.aiMode !== 'owner_only') {
-      await this.requestResponse(`Greet the caller now with: "${configuration.assistant.greeting}"`);
+      await this.requestResponse(this.callContext?.direction === 'outbound'
+        ? outboundOpeningInstruction(configuration.assistant.ownerName)
+        : `Greet the caller now with: "${configuration.assistant.greeting}"`);
     }
   }
 
@@ -122,6 +126,7 @@ export class RealtimeCallBridge {
       return;
     }
     this.callSessionId = session.id;
+    this.callContext = { direction: session.direction, objective: session.objective };
     await calls.markInProgress(session.id);
   }
 
@@ -230,7 +235,7 @@ export class RealtimeCallBridge {
     this.configuration = configuration;
     await this.connection.send({
       type: 'session-update',
-      config: await buildSessionConfig(runtime, configuration, this.options.voice),
+      config: await buildSessionConfig(runtime, configuration, this.options.voice, this.callContext),
     });
   }
 

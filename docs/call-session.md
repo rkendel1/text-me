@@ -9,7 +9,7 @@ This document describes what is built. Where something is deliberately not built
 4. **AppPort exposes the capabilities** (`call.create`, `call.get`, `call.list`, `call.end`).
 5. **MCP projects AppPort.** It is an adapter over the same capabilities, never a source of truth.
 6. **The voice runtime operates against the CallSession.** The media stream reports into it; it never decides lifecycle.
-7. **Autonomous outbound dialing is intentionally not part of this.** See [Not built](#not-built).
+7. **Autonomous outbound dialing is disabled by default.** `call.create` can place one outbound call through Twilio, only when `OUTBOUND_AGENT_CALLS=on`. See [Outbound execution](#outbound-execution) and [Not built](#not-built).
 
 ```mermaid
 flowchart LR
@@ -24,7 +24,7 @@ flowchart LR
   APP["AppPort application<br/>call.create / get / list / end"] --> SVC[CallSessionService]
   SVC --> TR["transitionCallSession()<br/>the only writer of status"]
   TR --> DB[("call_sessions<br/>call_provider_events")]
-  SVC -->|end| CP[CallProvider]
+  SVC -->|dial / end| CP[CallProvider]
   CP --> TW[TwilioCallProvider]
   TWH[Twilio webhooks] --> ADAPT["TwilioProvider<br/>status mapping"] --> SVC
   TWH --> VR
@@ -110,7 +110,7 @@ Twilio callback → TwilioProvider.parseStatusUpdate → mapTwilioCallStatus() �
 
 | Capability | Permission | Notes |
 |---|---|---|
-| `call.create@1` | `call.create` (admins/owners) | Establishes the domain object, returns `{callId, status}`. **Outbound: created, never dialed.** Inbound: requires `call.ingest` (the telephony webhook only) and a provider call; it is recorded as `ringing`. Idempotent |
+| `call.create@1` | `call.create` (admins/owners) | Establishes the domain object, returns `{callId, status}`. **Outbound: requires `call.dial`, passes the outbound policy, is persisted, then dialed through Twilio; returns at `initiating` without waiting for the callee** (see [Outbound execution](#outbound-execution)). Inbound: requires `call.ingest` (the telephony webhook only) and a provider call; it is recorded as `ringing`. Idempotent |
 | `call.get@1` | `call.read` | The canonical state. `waitSeconds` (clamped to 20, and never past the request's deadline) and `sinceVersion` make `create → get → wait → get` work without push |
 | `call.list@1` | `call.read` | `status[]`, `direction`, `createdAfter/Before`, `limit` (≤100), opaque `cursor`; newest first; inbound and outbound |
 | `call.end@1` | `call.control` | Idempotent. A terminal call is returned as is; otherwise exactly one request claims the hang-up and asks the provider. Keyed concurrency on `callId` |
@@ -141,7 +141,61 @@ ships no server or transport (it says "wire `listTools`/`callTool` into an MCP s
 > `input`, so an idempotency key, timeout and trace id **cannot be carried over MCP** with the published package. The fix is small and is
 > prepared as [`upstream/appport-mcp-request-metadata.patch`](upstream/appport-mcp-request-metadata.patch) against
 > `rkendel1/appport` (`callTool(name, args, meta?)`, with a test that fails without it). Until it is released and adopted, **do not expose
-> outbound dialing over MCP** (this PR does not dial from `call.create`, so nothing is at risk today).
+> outbound dialing over MCP**. This is enforced, not just documented: only the `in-process` transport may place a call; a request arriving with
+> `transport: mcp` (or anything else) is refused by the outbound policy (`transport_not_supported`) before anything is persisted or dialed.
+> The patch is prepared as a separate change and is not released.
+
+## Outbound execution
+
+```mermaid
+flowchart LR
+  A["AppPort call.create<br/>(validate, authorize call.dial)"] --> P["OutboundPolicy<br/>evaluateOutbound"]
+  P -- denied --> X["CALL_POLICY_DENIED<br/>nothing persisted, Twilio never called"]
+  P -- allowed --> S[("CallSession created<br/>durable, idempotent")]
+  S --> C["claimOutboundDial<br/>(Postgres row lock, once)"]
+  C --> CP["CallProvider.createCall"] --> TW[Twilio]
+  TW -- "status callbacks ?callId=" --> L["transitionCallSession<br/>ringing, answered, in_progress, completed"]
+  TW -- "answer webhook /voice/outbound" --> VR["existing voice runtime<br/>(same conversation and media stream path)"]
+  VR --> L
+```
+
+1. **Validate.** `to` must be E.164 after stripping spaces, dots, dashes and parentheses; a leading `+` is required and nothing is guessed. `from` is optional and, if given, must be owned. `objective` (optional, 500 chars) is a domain field. No URLs, credentials or Twilio parameters are accepted.
+2. **Authorize.** `call.dial` (held by `phone.manage` roles), in addition to `call.create`.
+3. **Policy** (`src/calls/outbound-policy.ts`, before any provider call). Denies: a non-`in-process` transport; the platform gate off; no caller ID or a caller ID the account does not own (resolved from its own assistant line, never from input); a destination that is the account's own line; for agent calls, a second call to a destination that still has an unfinished call. The gate is **off by default** (`OUTBOUND_AGENT_CALLS=on` enables it). The owner-confirmed test call is a separate origin (`owner_test`) and is not subject to the agent gate. There is no consent model here and none is faked.
+4. **Persist.** The CallSession is created (unique per account and idempotency key, with a request fingerprint). An agent call **requires** an idempotency key.
+5. **Claim.** `claimOutboundDial` atomically moves `created` to `initiating` and stamps `dial_claimed_at`; exactly one caller wins. Two instances, a retried request and a crashed request cannot produce two Twilio calls.
+6. **Provider.** `TwilioCallProvider.createCall` sends only `from`, `to`, the answer URL, the status callback URL and the four status events, all built by the server with a `callId` hint. It is the only place `calls.create` is used.
+7. **Callbacks and lifecycle.** Twilio's callbacks drive `ringing`, `answered`, `in_progress`, `completed` (or `busy`, `no_answer`, `failed`, `canceled`) through `transitionCallSession`. A callback that arrives before the provider response is persisted is matched by the `callId` hint and adopts the provider id, so ordering does not matter.
+8. **Voice.** When the callee answers, `/webhooks/twilio/voice/outbound` verifies the session (known, outbound, not over or ending, line belongs to the account) and enters the existing runtime. The assistant speaks first, is told it placed the call for its owner, and is given the objective **quoted as data, not as authority**: it grants no permission to disclose or do anything.
+
+### Why `call.create` is asynchronous
+
+A phone call takes seconds to tens of seconds to connect and minutes to finish; an AppPort request has a deadline and a serverless function has a time limit.
+Holding the request open would tie the result to a transport timeout, make a retry indistinguishable from a second call, and lose the call when the
+connection drops. So `call.create` returns the `callId` at `initiating` once the durable record exists and the dial has been attempted, and the
+caller observes the rest with `call.get` (`waitSeconds`/`sinceVersion`) as Twilio's callbacks arrive. Creation is separated from provider execution
+so each can fail independently and be reasoned about.
+
+### Failure model
+
+| Situation | Result |
+|---|---|
+| Twilio **rejects** (4xx other than 408) | `failed`, reason `provider_rejected`, `dial_outcome=rejected`; no provider id is invented |
+| Twilio **times out** or the response is lost (5xx, 408, network) | The call may exist. `dial_outcome=unconfirmed`; **never redialed**. Status callbacks carrying the `callId` hint attach it; `reconcileUnconfirmedDials` lists the stragglers. It is not scheduled, because the repository has no scheduler |
+| Row persisted, process dies before dialing | The session stays `created`; nothing was sent; a retry with the same key finds it and executes the claim |
+| Twilio accepts, process dies before recording | Callbacks adopt the provider id |
+| `call.end` while the request is in flight | The call is cancelled once the provider id is known |
+
+There is no retry loop. A second attempt needs a new, explicit request.
+
+### Owner test call
+
+`PhoneNumberService.placeTestCall` now goes through the same service (origin `owner_test`): one call path, one CallSession, one Twilio adapter.
+
+### Schema
+
+`call_sessions` gains `objective`, `dial_claimed_at` and `dial_outcome` (CHECK: `pending|accepted|rejected|unconfirmed`), added with `ADD COLUMN IF NOT EXISTS`,
+and the partial index `idx_call_sessions_unconfirmed_dial` for reconciliation.
 
 ## Provider boundary
 
@@ -153,7 +207,8 @@ Twilio's acceptance of `canceled` for a ringing call was not exercised against T
 ## Where calls come from
 
 - **Inbound.** `POST /webhooks/twilio/voice` → the conversation as before → `CallSessionService.openProviderCall` (idempotent on the provider call) → `ringing` → after the existing TwiML decision, `answered`. The media stream (`<Parameter callSessionId>`) or, without a stream host, the first spoken turn moves it to `in_progress`; the stream's claim is **verified** (the session must be this conversation's, in this account) and ignored otherwise. A stream that ends records `ending`; one that fails records `failed`; the provider's callbacks complete it. **If the CallSession cannot be recorded, the call is still answered** (logged, not dropped).
-- **Owner test call** (existing, human-confirmed). `CallSessionService.create` (the operation `call.create` exposes) → `created` → `initiating` → Twilio's id attached → status callbacks (`initiated/ringing/answered/completed` are now requested) → the owner presses 1 and Twilio requests instructions on the *same* call, which is linked to its new conversation.
+- **Outbound agent call.** `call.create` with `direction: outbound`; see [Outbound execution](#outbound-execution).
+- **Owner test call** (existing, human-confirmed). `CallSessionService.placeOutbound` (origin `owner_test`) → `created` → `initiating` → Twilio's id attached → status callbacks (`initiated/ringing/answered/completed` are now requested) → the owner presses 1 and Twilio requests instructions on the *same* call, which is linked to its new conversation.
 
 ## Persistence
 
@@ -171,6 +226,6 @@ for webhooks and the AppPort request's trace id for capabilities.
 
 ## Not built
 
-Deliberately left for later PRs: autonomous/scheduled/bulk outbound dialing; answering-machine detection; AI-disclosure, consent, calling-window and
-recording-consent policy; retries and voicemail strategy; contact lists and campaigns; an MCP server transport; `call.answer`/`call.handoff`; an `operations.*`
+Deliberately left for later PRs: bulk, scheduled or campaign dialing, automated retries, caller-ID rotation, contact lists; a scheduler for `reconcileUnconfirmedDials`; answering-machine detection; AI-disclosure, consent, calling-window and
+recording-consent policy; voicemail strategy; an MCP server transport; `call.answer`/`call.handoff`; an `operations.*`
 view of calls (core's operation reader has no per-tenant ownership hook, so calls are read through `call.get`).

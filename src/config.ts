@@ -44,6 +44,11 @@ export interface AppConfig {
   twilioAuthToken: string;
   /** Let accounts buy a new assistant line when the platform's pool of numbers is empty. */
   allowNumberPurchase: boolean;
+  /**
+   * Let agents place outbound calls through the `call.create` capability. Off unless OUTBOUND_AGENT_CALLS=on. It does not
+   * affect the owner's own "test call", and it is not a consent or compliance system (see docs/call-session.md).
+   */
+  outboundAgentCalls: boolean;
   /** Enable SMS verification only after the sending numbers are registered for local messaging rules. */
   allowSmsVerification: boolean;
   /** A2P-registered sender pool used for every onboarding verification text. */
@@ -180,6 +185,7 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     allowSmsVerification: env.TELEPHONY_SMS_VERIFICATION === 'on',
+    outboundAgentCalls: env.OUTBOUND_AGENT_CALLS === 'on',
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID?.trim() || undefined,
     twilioVerifyServiceSid: env.TWILIO_VERIFY_SERVICE_SID?.trim() || undefined,
     realtimeVoice: resolveRealtimeVoice(env),

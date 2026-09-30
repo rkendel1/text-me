@@ -61,7 +61,7 @@ import {
   type OwnerSurfaceDeviceStore,
 } from './attention/stores.js';
 import { realtimeVoiceStatus, type RealtimeVoiceService } from './voice/realtime/realtime-voice.js';
-import { buildInstructions } from './voice/realtime/session-config.js';
+import { buildInstructions, outboundGreeting } from './voice/realtime/session-config.js';
 import { OwnerReplyService } from './services/owner-reply.js';
 import type { ApnsSender } from './attention/apns.js';
 import { AuthService, InMemoryAuthSessionStore, type AuthSession, type AuthSessionStore } from './auth/sessions.js';
@@ -74,6 +74,7 @@ import { createCallApplication } from './appport/call-application.js';
 import { CallCapabilityClient } from './appport/call-client.js';
 import { appPortSessionFor } from './appport/session.js';
 import { isTerminal } from './calls/model.js';
+import { DefaultOutboundPolicy, type OutboundPolicy } from './calls/outbound-policy.js';
 import { FakeCallProvider, type CallProvider } from './calls/provider.js';
 import { CallSessionService } from './calls/service.js';
 import { InMemoryCallSessionStore, type CallSessionStore } from './calls/store.js';
@@ -112,6 +113,10 @@ export interface AppOptions {
   callSessionStore?: CallSessionStore;
   /** Places and ends calls at the telephony provider (Twilio in production). */
   callProvider?: CallProvider;
+  /** Let agents place outbound calls through `call.create`. Off unless a deployment turns it on. */
+  outboundAgentCalls?: boolean;
+  /** Replaces the default outbound policy (tests, or a stricter deployment). */
+  outboundPolicy?: OutboundPolicy;
   /** Account phone numbers (assistant lines and verified personal numbers). */
   phoneNumbers?: PhoneNumberService;
   /** The platform's number provider, when `phoneNumbers` isn't given (tests and local development use a fake pool). */
@@ -259,18 +264,20 @@ function registerIncomingCallRoute(
   configuration: OwnerConfigurationService,
   phoneNumbers: PhoneNumberService,
   calls: CallSessionService,
-  transform?: (request: Request, call: IncomingCall) => IncomingCall,
-  reject?: (request: Request) => ProviderResponse | undefined,
+  transform?: (request: Request, call: IncomingCall) => IncomingCall | Promise<IncomingCall>,
+  reject?: (request: Request) => ProviderResponse | undefined | Promise<ProviderResponse | undefined>,
+  /** The call was placed by the application for an agent: the owner's "answer incoming calls" setting and the inbound greeting do not apply. */
+  agentOutbound = false,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
-      const rejected = reject?.(request);
+      const rejected = await reject?.(request);
       if (rejected) {
         response.status(200).type(rejected.contentType).send(rejected.body);
         return;
       }
       const parsed = provider.parseIncomingCall(request.body);
-      const incomingCall = transform ? transform(request, parsed) : parsed;
+      const incomingCall = transform ? await transform(request, parsed) : parsed;
       // The called number is the only thing that says whose call this is. Unknown line: fail closed.
       const line = incomingCall.calledNumber ? await phoneNumbers.resolveLine(incomingCall.calledNumber) : null;
       if (!line) {
@@ -280,6 +287,10 @@ function registerIncomingCallRoute(
       }
       const conversation = await service.incomingCall(incomingCall, line.accountId);
       const traceId = requestTraceId(request);
+      // A call we placed carries our own id in the URL we gave the provider. If our request to create the call never
+      // came back, this is what ties the provider's call to its session.
+      const hint = typeof request.query.callId === 'string' ? request.query.callId : '';
+      if (hint) await calls.adoptDialedCall(hint, incomingCall.providerCallId).catch(() => null);
       // The durable CallSession is the record of this call; a failure to keep it must never drop the call itself.
       const callSession = await openCallSession(calls, provider.name, line.accountId, incomingCall, conversation.id, traceId);
       // Callers dialed the owner's real number; their carrier forwarded the call here.
@@ -288,7 +299,7 @@ function registerIncomingCallRoute(
         await service.recordEvent(conversation.id, 'call.forwarded', { from: forwardedFrom });
       }
       const settings = await configuration.get(conversation.accountId);
-      if (!settings.calls.answerCalls) {
+      if (!settings.calls.answerCalls && !agentOutbound) {
         // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
         const twiml = new twilio.twiml.VoiceResponse();
         const owner = settings.assistant.ownerName || 'The person you called';
@@ -308,7 +319,10 @@ function registerIncomingCallRoute(
         response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
         return;
       }
-      const providerResponse = provider.answerCall(conversation, { greeting: settings.assistant.greeting, ...(callSession ? { callSessionId: callSession.id } : {}) });
+      const providerResponse = provider.answerCall(conversation, {
+        greeting: agentOutbound ? outboundGreeting(settings.assistant.ownerName) : settings.assistant.greeting,
+        ...(callSession ? { callSessionId: callSession.id } : {}),
+      });
       await service.answerCall(conversation.id, incomingCall.payload);
       if (callSession) await calls.transition(callSession.id, 'answered', { mode: 'lenient' }).catch(() => undefined);
       if (providerResponse.spokenGreeting && !conversation.events.some((event) =>
@@ -324,8 +338,8 @@ function registerIncomingCallRoute(
       // Passive by default: the owner is only interrupted if they opted in to call-start notifications.
       await service.raiseAttention(conversation.id, {
         type: 'conversation_started',
-        title: (name) => `${name} is calling`,
-        body: 'Your assistant is answering',
+        title: (name) => agentOutbound ? `Your assistant is calling ${name}` : `${name} is calling`,
+        body: agentOutbound ? 'An outbound call is in progress' : 'Your assistant is answering',
         dedupeKey: `started:${conversation.id}`,
       });
       response
@@ -349,8 +363,11 @@ function registerStatusRoute(
     try {
       const update = provider.parseStatusUpdate(request.body);
       const traceId = requestTraceId(request);
-      const conversation = await service.findByProviderCall(update.provider, update.providerCallId);
       let session = await calls.findByProviderCall(update.providerCallId, update.provider);
+      // A callback that beat our own record of the provider's id: the `callId` in the URL we gave the provider says whose it is.
+      const hint = typeof request.query.callId === 'string' ? request.query.callId : '';
+      if (!session && hint) session = await calls.adoptDialedCall(hint, update.providerCallId).catch(() => null);
+      const conversation = await service.findByProviderCall(update.provider, update.providerCallId);
       // A call that predates CallSessions, or whose first callback beat its own registration.
       if (!session && conversation) session = await calls.adoptConversation(conversation).catch(() => null);
 
@@ -506,12 +523,28 @@ export function createApp(options: AppOptions): express.Express {
   const accountMessaging = new AccountMessenger(messaging, phoneNumbers);
   // CallSessions: the durable record of every call. One AppPort application exposes the operations on it; the
   // voice runtime and the control plane reach it in-process, and the MCP projection (src/appport/mcp.ts) reaches the same one.
-  const callSessions = new CallSessionService(options.callSessionStore ?? new InMemoryCallSessionStore(), {
+  const publicOrigin = options.publicBaseUrl ?? 'http://localhost:3000';
+  const callSessions: CallSessionService = new CallSessionService(options.callSessionStore ?? new InMemoryCallSessionStore(), {
     provider: options.callProvider ?? new FakeCallProvider(),
     assistantLine: (accountId) => phoneNumbers.assistantLine(accountId),
+    // Whether and from where an outbound call may be placed: decided before anything is created or dialed.
+    policy: options.outboundPolicy ?? new DefaultOutboundPolicy({
+      agentCallsEnabled: options.outboundAgentCalls ?? false,
+      ownedCallerIds: (accountId) => phoneNumbers.ownedCallerIds(accountId),
+      activeOutboundDestinations: (accountId) => callSessions.activeOutboundDestinations(accountId),
+    }),
+    // The URLs the provider is given are built here from our own configuration and the session's id; a request never supplies one.
+    dialUrls: (session, origin) => ({
+      answerUrl: origin === 'owner_test'
+        ? `${publicOrigin}/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(session.from ?? '')}&callId=${encodeURIComponent(session.id)}`
+        : `${publicOrigin}/webhooks/twilio/voice/outbound?callId=${encodeURIComponent(session.id)}`,
+      statusUrl: `${publicOrigin}/webhooks/twilio/status?callId=${encodeURIComponent(session.id)}`,
+    }),
   });
   phoneNumbers.bindCallSessions(callSessions);
   const callApplication = createCallApplication({ calls: callSessions });
+  // In-process access to the call capabilities (no HTTP round trip) for code that owns the app: the voice runtime, the control plane, tests.
+  app.locals.appport = { calls: callApplication };
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
   const runtime = options.runtimeControlService ?? new RuntimeControlService(
     options.repository,
@@ -593,8 +626,9 @@ export function createApp(options: AppOptions): express.Express {
         if (!conversation) return {};
         const configuration = await ownerConfiguration.get(conversation.accountId);
         const snapshot = await runtime.getRuntimeForConversation(conversation);
+        const callSession = channel === 'voice' ? await callSessions.findByConversation(conversation.accountId, conversation.id).catch(() => null) : null;
         return {
-          instructions: buildInstructions(snapshot, configuration, channel),
+          instructions: buildInstructions(snapshot, configuration, channel, callSession ? { direction: callSession.direction, objective: callSession.objective } : undefined),
           ownerName: configuration.assistant.ownerName,
           tools: {
             askOwner: async (question, suggestedReplies) => {
@@ -879,7 +913,7 @@ export function createApp(options: AppOptions): express.Express {
         numDigits: 1,
         timeout: 10,
         method: 'POST',
-        action: `/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(assistantLine)}&confirmed=1`,
+        action: `/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(assistantLine)}&confirmed=1${typeof request.query.callId === 'string' ? `&callId=${encodeURIComponent(request.query.callId)}` : ''}`,
       });
       gather.say('Press 1 to talk to your assistant.');
     }
@@ -888,6 +922,34 @@ export function createApp(options: AppOptions): express.Express {
     twiml.hangup();
     return { body: twiml.toString(), contentType: 'text/xml; charset=utf-8' };
   });
+  // The callee answered a call the application placed for an agent. Twilio asks here for instructions; the call then
+  // enters the same voice runtime as any other (conversation, CallSession, realtime stream or turn-based speech).
+  // The session is named by the `callId` we put in this URL (signed by Twilio). If it is gone, over, or not this
+  // account's, nothing starts: the callee hears silence and the call ends.
+  const outboundSessions = new WeakMap<Request, { from: string | null; to: string | null }>();
+  const hangUp = (): ProviderResponse => {
+    const twiml = new twilio.twiml.VoiceResponse();
+    twiml.hangup();
+    return { body: twiml.toString(), contentType: 'text/xml; charset=utf-8' };
+  };
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice/outbound', twilioProvider, service, ownerConfiguration, phoneNumbers, callSessions, (request, call) => {
+    const known = outboundSessions.get(request);
+    // The session's numbers, not the request's: the callee is the "caller" of the conversation, the account's line is the line.
+    return { ...call, callerPhone: known?.to ?? call.calledNumber ?? call.callerPhone, calledNumber: known?.from ?? call.callerPhone, direction: 'outbound' };
+  }, async (request) => {
+    const callId = typeof request.query.callId === 'string' ? request.query.callId : '';
+    const sid = typeof request.body?.CallSid === 'string' ? request.body.CallSid : '';
+    const session = callId ? await callSessions.findSession(callId) : null;
+    if (!session || session.direction !== 'outbound' || !sid || isTerminal(session.status) || session.status === 'ending') {
+      console.warn('[call] outbound answer for a call that is unknown or over', JSON.stringify({ callId: callId || null, providerCallId: sid || null, status: session?.status ?? null, traceId: requestTraceId(request) ?? null }));
+      return hangUp();
+    }
+    const attached = await callSessions.adoptDialedCall(callId, sid);
+    const line = session.from ? await phoneNumbers.resolveLine(session.from) : null;
+    if (!attached || !line || line.accountId !== session.accountId) return hangUp();
+    outboundSessions.set(request, { from: session.from, to: session.to });
+    return undefined;
+  }, true);
   app.post('/webhooks/twilio/voice/turn', async (request, response, next) => {
     try {
       const conversationId = typeof request.query.conversationId === 'string' ? request.query.conversationId : '';

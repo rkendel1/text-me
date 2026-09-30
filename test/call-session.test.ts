@@ -34,6 +34,12 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 let counter = 0;
 const uniq = (prefix: string) => `${prefix}_${Date.now().toString(36)}${(counter++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
+/** Puts an outbound session where a dial leaves it: `initiating`, with the provider's id. */
+async function dialled(h: { calls: CallSessionService }, id: string, providerCallId: string): Promise<void> {
+  await h.calls.transition(id, 'initiating');
+  await h.calls.attachProviderCall(id, providerCallId);
+}
+
 interface Harness {
   calls: CallSessionService;
   store: CallSessionStore;
@@ -204,8 +210,7 @@ function storeContract(name: string, make: () => Promise<CallSessionStore> | Cal
     assert.equal(call.startedAt, null);
 
     const dialed = uniq('CAdial');
-    await h.calls.beginDial(call.id);
-    await h.calls.recordDialed(call.id, dialed);
+    await dialled(h, call.id, dialed);
     let session = await h.calls.get(h.accountA, call.id);
     assert.equal(session.status, 'initiating');
     assert.equal(session.providerCallId, dialed);
@@ -293,8 +298,7 @@ function storeContract(name: string, make: () => Promise<CallSessionStore> | Cal
     for (const [raw, expected] of [['no-answer', 'no_answer'], ['busy', 'busy'], ['failed', 'failed']] as const) {
       const call = await h.calls.create({ accountId: h.accountA }, { direction: 'outbound', to: '+15551230000' });
       const sid = uniq('CA');
-      await h.calls.beginDial(call.id);
-      await h.calls.recordDialed(call.id, sid);
+      await dialled(h, call.id, sid);
       await h.calls.applyProviderEvent({ provider: 'twilio', providerCallId: sid, eventId: `${sid}:ringing`, rawStatus: 'ringing', status: 'ringing' });
       const result = await h.calls.applyProviderEvent({ provider: 'twilio', providerCallId: sid, eventId: `${sid}:${raw}`, rawStatus: raw, status: expected });
       assert.equal(result.outcome, 'applied');
@@ -342,8 +346,7 @@ function storeContract(name: string, make: () => Promise<CallSessionStore> | Cal
 
     const ringing = await h.calls.create({ accountId: h.accountA }, { direction: 'outbound', to: '+15551230000' });
     const ringSid = uniq('CAring');
-    await h.calls.beginDial(ringing.id);
-    await h.calls.recordDialed(ringing.id, ringSid);
+    await dialled(h, ringing.id, ringSid);
     await h.calls.transition(ringing.id, 'ringing');
     await h.calls.end({ accountId: h.accountA }, ringing.id);
     assert.deepEqual(h.provider.ended, [{ providerCallId: ringSid, mode: 'cancel' }]);

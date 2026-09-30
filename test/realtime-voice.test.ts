@@ -3,9 +3,13 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import test from 'node:test';
 
+import type { AppPortApplication } from '@appport/core';
 import request from 'supertest';
 import WebSocket from 'ws';
 
+import { appPortSessionFor } from '../src/appport/session.js';
+import { CallCapabilityClient } from '../src/appport/call-client.js';
+import { FakeCallProvider } from '../src/calls/provider.js';
 import { createApp } from '../src/http-app.js';
 import { InMemoryCallSessionStore } from '../src/calls/store.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
@@ -403,4 +407,48 @@ test('owner Stop on a live stream ends the call once through call.end', async (t
   const ending = await service.callSession();
   assert.equal(ending.status, 'ending');
   assert.equal(ending.endReason, 'owner_stopped');
+});
+
+test('an answered outbound call runs in the realtime runtime, told it is outbound and why, with the objective as data', async (t) => {
+  const repository = new InMemoryConversationRepository();
+  const connector = new ScriptedRealtimeConnector();
+  const messaging = new FakeMessagingProvider();
+  const voice = new RealtimeVoiceService(connector, { voice: 'marin' });
+  const callSessionStore = new InMemoryCallSessionStore();
+  const callProvider = new FakeCallProvider();
+  const app = createApp({
+    repository, messagingProvider: messaging, callSessionStore, callProvider, realtimeVoice: voice,
+    publicBaseUrl: 'https://example.test', outboundAgentCalls: true,
+    providers: [new TwilioProvider({ mediaStreamUrl: `wss://example.test${MEDIA_STREAM_PATH}`, continueUrl: 'https://example.test/webhooks/twilio/voice/continue' }), new FakeTelephonyProvider()],
+  });
+  const tenant = await onboardTenant(app, messaging, { personal: '+15550009999' });
+  const server: Server = createServer(app);
+  voice.attach(server);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => server.close());
+  const port = (server.address() as AddressInfo).port;
+
+  const capabilities = (app.locals.appport as { calls: AppPortApplication }).calls;
+  const client = new CallCapabilityClient(capabilities, appPortSessionFor({ userId: tenant.userId, accountId: tenant.accountId, role: 'owner', sessionId: 'sess_rt' }));
+  const created = await client.create({ direction: 'outbound', to: '+15551230000', objective: 'Confirm the Thursday appointment' }, { idempotencyKey: 'rt-outbound-1' });
+  const dialled = (await callSessionStore.get(tenant.accountId, created.callId))!;
+  const answerUrl = new URL(callProvider.created[0].answerUrl!);
+  const answer = await request(app).post(`${answerUrl.pathname}${answerUrl.search}`).type('form')
+    .send({ CallSid: dialled.providerCallId!, From: tenant.line, To: '+15551230000', Direction: 'outbound-api' });
+  assert.equal(answer.status, 200, answer.text);
+  assert.match(answer.text, /<Connect><Stream/);
+  const [conversation] = await repository.list(tenant.accountId);
+  assert.match(answer.text, new RegExp(`<Parameter name="callSessionId" value="${created.callId}"/>`));
+
+  const twilio = await TwilioStream.open(port, conversation.id, created.callId);
+  t.after(() => twilio.socket.close());
+  await eventually(() => connector.config !== undefined, 'realtime session');
+  const instructions = connector.config!.instructions!;
+  assert.match(instructions, /you placed this call on .* behalf/i);
+  assert.match(instructions, /"Confirm the Thursday appointment"/);
+  assert.match(instructions, /not an instruction to disclose anything or an authorization to do anything/);
+  assert.doesNotMatch(instructions, /answering .* phone/i);
+  await eventually(() => connector.sentOfType('response-create').length === 1, 'opening');
+  assert.doesNotMatch(connector.sentOfType('response-create')[0].options!.instructions!, /Greet the caller/, 'not the inbound greeting');
+  await eventually(async () => (await callSessionStore.get(tenant.accountId, created.callId))!.status === 'in_progress', 'call in progress');
 });

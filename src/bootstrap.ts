@@ -169,6 +169,7 @@ export function buildServerWithPool(
     // The one place calls are placed and ended at Twilio; CallSessions are the durable record of them.
     callProvider: new TwilioCallProvider(config.twilioAccountSid, config.twilioAuthToken),
     callSessionStore: stores.callSessionStore,
+    outboundAgentCalls: config.outboundAgentCalls,
     realtimeVoice,
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),

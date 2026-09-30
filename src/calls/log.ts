@@ -22,3 +22,12 @@ export const consoleCallLogger: CallLogger = {
     console[level]('[call]', JSON.stringify({ event, ...fields }));
   },
 };
+
+/**
+ * An error message that is safe to log: phone numbers masked (a provider's message often repeats the
+ * number it was given) and the length bounded. Never includes credentials: only the message text is used.
+ */
+export function safeError(error: unknown): string {
+  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : 'unknown';
+  return message.replace(/\+?\d[\d\s().-]{6,}\d/g, (match) => maskPhone(match) ?? '••••').slice(0, 300);
+}

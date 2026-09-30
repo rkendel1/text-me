@@ -23,6 +23,15 @@ const ACTIVE_RANK: Partial<Record<CallSessionStatus, number>> = {
   created: 0, initiating: 1, ringing: 2, answered: 3, in_progress: 4, ending: 5,
 };
 
+/**
+ * What the provider request for an outbound call came to. `pending`: a process claimed the dial and its
+ * request is in flight. `accepted`: the provider returned a call id. `rejected`: the provider refused it
+ * (definitively: no call exists). `unconfirmed`: the request timed out or failed ambiguously, so a call
+ * may or may not exist; the session stays observable and is never re-dialed.
+ */
+export const DIAL_OUTCOMES = ['pending', 'accepted', 'rejected', 'unconfirmed'] as const;
+export type DialOutcome = typeof DIAL_OUTCOMES[number];
+
 /** The durable record. `accountId` is the tenant; every read and write is scoped by it. */
 export interface CallSessionRecord {
   id: string;
@@ -53,6 +62,11 @@ export interface CallSessionRecord {
   endClaimedAt: Date | null;
   /** The last provider status seen, verbatim, for diagnosis only. */
   lastProviderStatus: string | null;
+  /** What an outbound call is for. Describes the goal; it is not authority to do anything. */
+  objective: string | null;
+  /** Set by the one process that won the right to place this outbound call with the provider. */
+  dialClaimedAt: Date | null;
+  dialOutcome: DialOutcome | null;
 }
 
 /** What capabilities and clients see: no provider id, no idempotency or claim internals. */
@@ -71,6 +85,9 @@ export interface CallSessionView {
   createdAt: string;
   updatedAt: string;
   version: number;
+  objective: string | null;
+  /** Outbound only: how the request to the provider went. `null` for a call nothing dialed. */
+  execution: DialOutcome | null;
 }
 
 const iso = (date: Date | null): string | null => (date ? date.toISOString() : null);
@@ -91,6 +108,8 @@ export function presentCallSession(record: CallSessionRecord): CallSessionView {
     createdAt: record.createdAt.toISOString(),
     updatedAt: record.updatedAt.toISOString(),
     version: record.version,
+    objective: record.objective,
+    execution: record.dialOutcome,
   };
 }
 

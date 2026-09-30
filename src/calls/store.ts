@@ -1,4 +1,4 @@
-import type { CallDirection, CallSessionRecord, CallSessionStatus } from './model.js';
+import type { CallDirection, CallSessionRecord, CallSessionStatus, DialOutcome } from './model.js';
 
 /** The fields a mutation may change. `status` is written only by `transitionCallSession`. */
 export interface CallSessionPatch {
@@ -13,6 +13,8 @@ export interface CallSessionPatch {
   endReason?: string | null;
   endClaimedAt?: Date | null;
   lastProviderStatus?: string | null;
+  dialClaimedAt?: Date | null;
+  dialOutcome?: DialOutcome | null;
 }
 
 /** One provider callback, identified by the provider and its event id. */
@@ -60,6 +62,12 @@ export interface CallSessionStore {
   get(accountId: string, id: string): Promise<CallSessionRecord | null>;
   /** Webhook-side lookup by the provider's own id. Callers must check `accountId` themselves. */
   findByProviderCallId(provider: string, providerCallId: string): Promise<CallSessionRecord | null>;
+  /** The session a tenant's request with this idempotency key created, if any. */
+  findByIdempotencyKey(accountId: string, idempotencyKey: string): Promise<CallSessionRecord | null>;
+  /** Webhook-side lookup by our own id (a URL we gave the provider). Callers must check `accountId` themselves. */
+  findById(id: string): Promise<CallSessionRecord | null>;
+  /** Outbound sessions whose dial was claimed before `claimedBefore` and never got a provider call id. */
+  listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]>;
   findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null>;
   list(accountId: string, filter: CallSessionFilter): Promise<CallSessionRecord[]>;
   /**
@@ -109,6 +117,24 @@ export class InMemoryCallSessionStore implements CallSessionStore {
   async findByProviderCallId(provider: string, providerCallId: string): Promise<CallSessionRecord | null> {
     const found = [...this.sessions.values()].find((candidate) => candidate.provider === provider && candidate.providerCallId === providerCallId);
     return found ? structuredClone(found) : null;
+  }
+
+  async findByIdempotencyKey(accountId: string, idempotencyKey: string): Promise<CallSessionRecord | null> {
+    const found = [...this.sessions.values()].find((candidate) => candidate.accountId === accountId && candidate.idempotencyKey === idempotencyKey);
+    return found ? structuredClone(found) : null;
+  }
+
+  async findById(id: string): Promise<CallSessionRecord | null> {
+    const found = this.sessions.get(id);
+    return found ? structuredClone(found) : null;
+  }
+
+  async listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]> {
+    return [...this.sessions.values()]
+      .filter((record) => record.status === 'initiating' && !record.providerCallId && record.dialClaimedAt && record.dialClaimedAt < claimedBefore)
+      .sort((left, right) => left.dialClaimedAt!.getTime() - right.dialClaimedAt!.getTime())
+      .slice(0, limit)
+      .map((record) => structuredClone(record));
   }
 
   async findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null> {

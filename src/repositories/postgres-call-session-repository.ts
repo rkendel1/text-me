@@ -5,6 +5,7 @@ import {
   type CallDirection,
   type CallSessionRecord,
   type CallSessionStatus,
+  type DialOutcome,
 } from '../calls/model.js';
 import {
   applyPatch,
@@ -40,6 +41,9 @@ interface CallSessionRow {
   request_fingerprint: string | null;
   end_claimed_at: Date | null;
   last_provider_status: string | null;
+  objective: string | null;
+  dial_claimed_at: Date | null;
+  dial_outcome: DialOutcome | null;
 }
 
 const COLUMN_FOR: Record<keyof CallSessionPatch, string> = {
@@ -54,6 +58,8 @@ const COLUMN_FOR: Record<keyof CallSessionPatch, string> = {
   endReason: 'end_reason',
   endClaimedAt: 'end_claimed_at',
   lastProviderStatus: 'last_provider_status',
+  dialClaimedAt: 'dial_claimed_at',
+  dialOutcome: 'dial_outcome',
 };
 
 function toRecord(row: CallSessionRow): CallSessionRecord {
@@ -81,6 +87,9 @@ function toRecord(row: CallSessionRow): CallSessionRecord {
     requestFingerprint: row.request_fingerprint,
     endClaimedAt: date(row.end_claimed_at),
     lastProviderStatus: row.last_provider_status,
+    objective: row.objective,
+    dialClaimedAt: date(row.dial_claimed_at),
+    dialOutcome: row.dial_outcome,
   };
 }
 
@@ -116,6 +125,13 @@ export class PostgresCallSessionStore implements CallSessionStore {
           last_provider_status TEXT
         );
       `);
+      // Outbound execution (added after the first release of this table): the objective, and the durable claim on the provider request.
+      await db.query(`ALTER TABLE call_sessions ADD COLUMN IF NOT EXISTS objective TEXT, ADD COLUMN IF NOT EXISTS dial_claimed_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS dial_outcome TEXT`);
+      await db.query(`DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'call_sessions_dial_outcome_check') THEN
+          ALTER TABLE call_sessions ADD CONSTRAINT call_sessions_dial_outcome_check CHECK (dial_outcome IS NULL OR dial_outcome IN ('pending', 'accepted', 'rejected', 'unconfirmed'));
+        END IF;
+      END $$`);
       // Webhooks find a call by the provider's id: one session per provider call.
       await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS call_sessions_provider_call ON call_sessions (provider, provider_call_id) WHERE provider_call_id IS NOT NULL`);
       // A retried request with the same key must land on the same session.
@@ -123,6 +139,8 @@ export class PostgresCallSessionStore implements CallSessionStore {
       // call.list: an account's calls, newest first (keyset on created_at, id), optionally by status.
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_sessions_account_created ON call_sessions (account_id, created_at DESC, id DESC)');
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_sessions_account_status ON call_sessions (account_id, status, created_at DESC)');
+      // Reconciling dials that never got a provider call id: a small, sparse set.
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_call_sessions_unconfirmed_dial ON call_sessions (dial_claimed_at) WHERE status = 'initiating' AND provider_call_id IS NULL`);
       // Owner Stop resolves a conversation's call.
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_sessions_conversation ON call_sessions (conversation_id) WHERE conversation_id IS NOT NULL');
       // One row per provider callback, keyed by its identity: what makes redelivery harmless.
@@ -149,8 +167,9 @@ export class PostgresCallSessionStore implements CallSessionStore {
       `INSERT INTO call_sessions (
          id, account_id, direction, status, provider, provider_call_id, from_number, to_number, conversation_id,
          started_at, answered_at, ended_at, end_reason, created_at, updated_at, version,
-         requested_by, trace_id, idempotency_key, request_fingerprint, end_claimed_at, last_provider_status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+         requested_by, trace_id, idempotency_key, request_fingerprint, end_claimed_at, last_provider_status,
+         objective, dial_claimed_at, dial_outcome)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
        ON CONFLICT DO NOTHING
        RETURNING *`,
       [
@@ -158,6 +177,7 @@ export class PostgresCallSessionStore implements CallSessionStore {
         record.from, record.to, record.conversationId, record.startedAt, record.answeredAt, record.endedAt,
         record.endReason, record.createdAt, record.updatedAt, record.version, record.requestedBy, record.traceId,
         record.idempotencyKey, record.requestFingerprint, record.endClaimedAt, record.lastProviderStatus,
+        record.objective, record.dialClaimedAt, record.dialOutcome,
       ],
     );
     if (result.rows[0]) return { session: toRecord(result.rows[0]), created: true };
@@ -181,6 +201,24 @@ export class PostgresCallSessionStore implements CallSessionStore {
   async findByProviderCallId(provider: string, providerCallId: string): Promise<CallSessionRecord | null> {
     const result = await this.pool.query<CallSessionRow>('SELECT * FROM call_sessions WHERE provider = $1 AND provider_call_id = $2', [provider, providerCallId]);
     return result.rows[0] ? toRecord(result.rows[0]) : null;
+  }
+
+  async findByIdempotencyKey(accountId: string, idempotencyKey: string): Promise<CallSessionRecord | null> {
+    const result = await this.pool.query<CallSessionRow>('SELECT * FROM call_sessions WHERE account_id = $1 AND idempotency_key = $2', [accountId, idempotencyKey]);
+    return result.rows[0] ? toRecord(result.rows[0]) : null;
+  }
+
+  async findById(id: string): Promise<CallSessionRecord | null> {
+    const result = await this.pool.query<CallSessionRow>('SELECT * FROM call_sessions WHERE id = $1', [id]);
+    return result.rows[0] ? toRecord(result.rows[0]) : null;
+  }
+
+  async listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]> {
+    const result = await this.pool.query<CallSessionRow>(
+      `SELECT * FROM call_sessions WHERE status = 'initiating' AND provider_call_id IS NULL AND dial_claimed_at < $1 ORDER BY dial_claimed_at LIMIT $2`,
+      [claimedBefore, limit],
+    );
+    return result.rows.map(toRecord);
   }
 
   async findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null> {

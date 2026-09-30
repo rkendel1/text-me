@@ -4,7 +4,7 @@ import test from 'node:test';
 import request from 'supertest';
 
 import { createApp, type AppOptions } from '../src/http-app.js';
-import { FakeCallProvider } from '../src/calls/provider.js';
+import { CallProviderRejectedError, FakeCallProvider } from '../src/calls/provider.js';
 import { InMemoryCallSessionStore } from '../src/calls/store.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
@@ -152,11 +152,11 @@ test('a call from before CallSessions is adopted when its first callback arrives
 });
 
 test('the owner test call runs through the same lifecycle as any other call', async () => {
-  const { app, owner, sessions, sessionFor, store, phoneNumberClient, status, repository } = await callApp();
+  const { app, owner, sessions, sessionFor, store, callProvider, status, repository } = await callApp();
   const placed = await request(app).post('/account/phone/test-call').set(owner.headers).send({});
   assert.equal(placed.status, 202, JSON.stringify(placed.body));
-  assert.equal(phoneNumberClient.testCalls.length, 1);
-  const sid = phoneNumberClient.testCalls[0].id;
+  assert.equal(callProvider.created.length, 1);
+  const sid = placed.body.id as string;
 
   // Established before anything rang, and its provider id recorded once dialed.
   let [session] = await sessions();
@@ -194,13 +194,14 @@ test('the owner test call runs through the same lifecycle as any other call', as
 });
 
 test('a test call that cannot be placed is recorded as failed', async () => {
-  const { app, owner, sessions, phoneNumberClient } = await callApp();
-  phoneNumberClient.placeTestCall = async () => { throw new Error('carrier rejected'); };
+  const { app, owner, sessions, callProvider } = await callApp();
+  callProvider.failCreate = new CallProviderRejectedError('carrier rejected', 21211);
   const placed = await request(app).post('/account/phone/test-call').set(owner.headers).send({});
-  assert.notEqual(placed.status, 200);
+  assert.equal(placed.status, 502);
   const [session] = await sessions();
   assert.equal(session.status, 'failed');
-  assert.equal(session.endReason, 'dial_failed');
+  assert.equal(session.endReason, 'provider_rejected');
+  assert.equal(session.providerCallId, null, 'no provider id was invented');
 });
 
 test('Stop ends the call through call.end once, however often it is pressed, and never after the call ended', async () => {

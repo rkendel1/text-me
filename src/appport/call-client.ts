@@ -36,7 +36,8 @@ export class CallCapabilityClient {
       }),
       { session: this.session, transport: 'in-process' },
     );
-    if (!response.ok) throw new AppPortError(response.error.code, response.error.message);
+    // Keep the error's details: a policy denial carries its machine-readable reason there.
+    if (!response.ok) throw new AppPortError(response.error.code, response.error.message, { details: response.error.details });
     return response.output as Output;
   }
 

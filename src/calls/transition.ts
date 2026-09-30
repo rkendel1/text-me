@@ -19,7 +19,7 @@ export interface TransitionOptions {
   reason?: string;
   now?: Date;
   /** Non-status fields to persist together with an applied transition. */
-  also?: Pick<CallSessionPatch, 'providerCallId' | 'conversationId' | 'lastProviderStatus' | 'endClaimedAt'>;
+  also?: Pick<CallSessionPatch, 'providerCallId' | 'conversationId' | 'lastProviderStatus' | 'endClaimedAt' | 'dialOutcome'>;
   providerEvent?: ProviderEventInput;
 }
 
@@ -129,4 +129,43 @@ export async function claimCallEnd(
 /** Lets a later `call.end` ask the provider again after a failed attempt. Changes no status. */
 export async function releaseEndClaim(store: CallSessionStore, id: string): Promise<void> {
   await store.mutate(id, (current) => (current.endClaimedAt ? { patch: { endClaimedAt: null } } : { patch: null }));
+}
+
+export interface DialClaimResult {
+  /** True only for the one process that won the right to place this call with the provider. */
+  claimed: boolean;
+  outcome: 'claimed' | 'already_claimed' | 'not_claimable' | 'not_found';
+  session: CallSessionRecord | null;
+}
+
+/**
+ * The execution claim for an outbound call: `created → initiating`, atomically, exactly once.
+ *
+ * Whichever process gets `claimed: true` (and only that one) may ask the provider to place the call.
+ * Any other process, however concurrent, a retry, or a later replay, finds the session already
+ * `initiating` (or further along) and must not dial. The claim is durable, so it also holds across
+ * application instances and process restarts; `dialClaimedAt` records when, for reconciliation.
+ */
+export async function claimOutboundDial(
+  store: CallSessionStore,
+  id: string,
+  options: { now?: Date } = {},
+): Promise<DialClaimResult> {
+  const now = options.now ?? new Date();
+  let outcome = 'not_claimable' as DialClaimResult['outcome'];
+  const result = await store.mutate(id, (current) => {
+    if (current.dialClaimedAt) {
+      outcome = 'already_claimed';
+      return { patch: null };
+    }
+    const decision = decideTransition(current, 'initiating');
+    if (current.direction !== 'outbound' || current.providerCallId || current.status !== 'created' || decision.kind !== 'apply') {
+      outcome = 'not_claimable';
+      return { patch: null };
+    }
+    outcome = 'claimed';
+    return { patch: { status: 'initiating', dialClaimedAt: now, dialOutcome: 'pending', ...transitionTimestamps(current, 'initiating', now) } };
+  }, { now });
+  if (!result) return { claimed: false, outcome: 'not_found', session: null };
+  return { claimed: outcome === 'claimed', outcome, session: result.session };
 }

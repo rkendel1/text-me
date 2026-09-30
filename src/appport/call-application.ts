@@ -6,6 +6,7 @@ import { s } from '@appport/schema';
 import {
   CALL_DIRECTIONS,
   CALL_SESSION_STATUSES,
+  DIAL_OUTCOMES,
   CallTransitionError,
   isTerminal,
   presentCallSession,
@@ -14,12 +15,17 @@ import {
 import {
   CallConflictError,
   CallNotFoundError,
+  CallPolicyDeniedError,
   CallProviderError,
   CallRequestError,
+  MAX_OBJECTIVE_LENGTH,
   type CallActor,
   type CallSessionService,
 } from '../calls/service.js';
 import { CALL_APPLICATION_ID, CALL_PERMISSIONS } from './session.js';
+
+/** The transport the in-process client declares. Anything else, MCP included, cannot place calls. */
+const IN_PROCESS = 'in-process';
 
 /** The longest a single `call.get` will hold a request open. Longer waits are clamped, not refused. */
 export const MAX_WAIT_SECONDS = 20;
@@ -45,6 +51,14 @@ const callView = s.object({
   updatedAt: s.timestamp(),
   /** Increases on every change. Pass it back as `sinceVersion` to wait for the next one. */
   version: s.integer({ minimum: 1 }),
+  /** What an outbound call is for. A description of the goal, never authority to act. */
+  objective: s.nullable(s.string()),
+  /**
+   * Outbound only. `pending`: the request to place the call is in flight. `accepted`: it was placed. `rejected`: it was
+   * refused, so no call exists (the call is `failed`). `unconfirmed`: the outcome is unknown, a call may exist, and it
+   * will not be placed again. `null`: nothing was placed for this call.
+   */
+  execution: s.nullable(s.enum(DIAL_OUTCOMES)),
 }, { title: 'Call' });
 
 /**
@@ -90,10 +104,11 @@ function actorOf(context: CapabilityContext): CallActor {
 function toAppPortError(error: unknown): unknown {
   if (error instanceof CallNotFoundError) return errors.notFound('Call not found');
   if (error instanceof CallRequestError) {
-    return error.code === 'invalid_input' ? errors.invalidInput(error.message)
+    return error.code === 'invalid_input' || error.code === 'idempotency_key_required' ? errors.invalidInput(error.message, { reason: error.code })
       : error.code === 'not_permitted' ? errors.forbidden(error.message)
         : errors.conflict(error.message);
   }
+  if (error instanceof CallPolicyDeniedError) return errors.forbidden(error.message, { reason: error.reason });
   if (error instanceof CallConflictError || error instanceof CallTransitionError) return errors.conflict(error.message);
   if (error instanceof CallProviderError) return errors.internal(error.message, { internal: error.cause });
   return error;
@@ -132,7 +147,7 @@ export function createCallApplication(options: CallApplicationOptions): AppPortA
   const create = defineCapability({
     name: 'call.create',
     version: 1,
-    description: 'Creates a call session. An outbound call is created but not dialed; an inbound call is recorded as it arrives.',
+    description: 'Creates a call. An outbound call is placed through the telephony provider and returns as soon as it has been accepted (observe it with call.get); it needs an idempotency key. An inbound call is recorded as it arrives (telephony webhook only).',
     authorization: [CALL_PERMISSIONS.create],
     effect: 'consequential',
     idempotency: 'supported',
@@ -142,10 +157,22 @@ export function createCallApplication(options: CallApplicationOptions): AppPortA
       to: s.optional(s.string({ description: 'E.164. Required for an outbound call.' })),
       providerCallId: s.optional(s.string({ description: 'Inbound only, and only for the telephony webhook (call.ingest).' })),
       conversationId: s.optional(s.string({ description: 'The owner-facing conversation, for the telephony webhook (call.ingest).' })),
+      objective: s.optional(s.string({ maxLength: MAX_OBJECTIVE_LENGTH, description: 'Outbound: what the call is for. Describes the goal; it grants no authority to act.' })),
     }),
     output: s.object({ callId: s.string(), status }),
     async handler(input, context) {
       return guarded(async () => {
+        if (input.direction === 'outbound') {
+          // Having a call placed is a separate authority from creating one.
+          context.authorization.require(CALL_PERMISSIONS.dial);
+          const placed = await calls.placeOutbound(
+            actorOf(context),
+            { direction: 'outbound', from: input.from, to: input.to, objective: input.objective, providerCallId: input.providerCallId, conversationId: input.conversationId },
+            // Only the in-process path carries the idempotency key, deadline and trace id intact. Any other transport cannot place calls.
+            { origin: context.metadata.transport === IN_PROCESS ? 'agent' : 'untrusted_transport' },
+          );
+          return { callId: placed.id, status: placed.status };
+        }
         const session = await calls.create(actorOf(context), {
           direction: input.direction, from: input.from, to: input.to,
           providerCallId: input.providerCallId, conversationId: input.conversationId,
