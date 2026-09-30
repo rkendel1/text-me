@@ -7,6 +7,7 @@ import request from 'supertest';
 import WebSocket from 'ws';
 
 import { createApp } from '../src/http-app.js';
+import { InMemoryCallSessionStore } from '../src/calls/store.js';
 import { FakeMessagingProvider } from '../src/messaging/fake-provider.js';
 import { FakeTelephonyProvider } from '../src/telephony/fake-provider.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
@@ -65,7 +66,7 @@ class TwilioStream {
     });
   }
 
-  static async open(port: number, conversationId: string): Promise<TwilioStream> {
+  static async open(port: number, conversationId: string, callSessionId?: string): Promise<TwilioStream> {
     const socket = new WebSocket(`ws://127.0.0.1:${port}${MEDIA_STREAM_PATH}`);
     await new Promise((resolve, reject) => {
       socket.once('open', resolve);
@@ -76,7 +77,7 @@ class TwilioStream {
     socket.send(JSON.stringify({
       event: 'start',
       streamSid: 'MZ123',
-      start: { streamSid: 'MZ123', callSid: 'CA123', customParameters: { conversationId } },
+      start: { streamSid: 'MZ123', callSid: 'CA123', customParameters: { conversationId, ...(callSessionId ? { callSessionId } : {}) } },
     }));
     return stream;
   }
@@ -103,9 +104,11 @@ async function startCallService() {
   const connector = new ScriptedRealtimeConnector();
   const messaging = new FakeMessagingProvider();
   const voice = new RealtimeVoiceService(connector, { voice: 'marin' });
+  const callSessionStore = new InMemoryCallSessionStore();
   const app = createApp({
     repository,
     messagingProvider: messaging,
+    callSessionStore,
     realtimeVoice: voice,
     providers: [
       new TwilioProvider({
@@ -124,7 +127,8 @@ async function startCallService() {
   const call = await request(app).post('/webhooks/fake/voice').send({ callId: 'call-1', callerPhone: '+15553334444', to: tenant.line });
   assert.equal(call.status, 200);
   const [conversation] = await repository.list(tenant.accountId);
-  return { app, server, port, repository, connector, messaging, voice, conversationId: conversation.id, headers: tenant.headers };
+  const callSession = async () => (await callSessionStore.findByProviderCallId('fake', 'call-1'))!;
+  return { app, server, port, repository, connector, messaging, voice, conversationId: conversation.id, headers: tenant.headers, callSessionStore, callSession, tenant };
 }
 
 test('Twilio answers realtime calls with a bidirectional media stream', async () => {
@@ -330,4 +334,73 @@ test('ask_owner keeps the conversation flagged until the owner replies', async (
   await request(service.app).post(`/conversations/${service.conversationId}/messages`).set(service.headers).send({ body: 'Friday at 10 is fine.' });
   const after = await request(service.app).get('/conversations?needsOwner=true').set(service.headers);
   assert.equal(after.body.length, 0);
+});
+
+// ----- The media stream reports into the CallSession; it never decides the call's lifecycle -----
+
+test('the stream moves its CallSession to in progress, reports the hang-up, and the provider completes it', async (t) => {
+  const service = await startCallService();
+  t.after(() => service.server.close());
+  const session = await service.callSession();
+  assert.equal(session.status, 'answered', 'the webhook answered the call before any media flowed');
+
+  const twilio = await TwilioStream.open(service.port, service.conversationId, session.id);
+  t.after(() => twilio.socket.close());
+  await eventually(async () => (await service.callSession()).status === 'in_progress', 'call in progress');
+
+  twilio.send({ event: 'stop', streamSid: 'MZ123' });
+  await eventually(async () => (await service.callSession()).status === 'ending', 'call ending after the stream stopped');
+  assert.equal((await service.callSession()).endReason, 'media_stream_ended');
+
+  // Only the provider's callback completes it, and the stream is not the source of truth for that.
+  const done = await request(service.app).post('/webhooks/fake/status').send({ callId: 'call-1', status: 'completed', durationSeconds: 41 });
+  assert.equal(done.status, 200);
+  assert.equal((await service.callSession()).status, 'completed');
+});
+
+test('a media stream cannot claim a CallSession that is not its own call', async (t) => {
+  const service = await startCallService();
+  t.after(() => service.server.close());
+  // A second call in the same account.
+  await request(service.app).post('/webhooks/fake/voice').send({ callId: 'call-2', callerPhone: '+15557778888', to: service.tenant.line });
+  const other = (await service.callSessionStore.findByProviderCallId('fake', 'call-2'))!;
+  const mine = await service.callSession();
+
+  const twilio = await TwilioStream.open(service.port, service.conversationId, other.id);
+  t.after(() => twilio.socket.close());
+  await eventually(() => service.connector.config !== undefined, 'realtime session');
+  await service.voice.bridge(service.conversationId)!.settled();
+  assert.equal((await service.callSession()).status, 'answered', 'the claim was not honoured');
+  assert.equal((await service.callSessionStore.get(service.tenant.accountId, other.id))!.status, 'answered');
+  assert.equal(mine.id === other.id, false);
+});
+
+test('if the realtime model cannot start, the CallSession records the failure and the provider\'s late completion is stale', async (t) => {
+  const service = await startCallService();
+  t.after(() => service.server.close());
+  const session = await service.callSession();
+  service.connector.failWith = new Error('Gateway unavailable');
+  const twilio = await TwilioStream.open(service.port, service.conversationId, session.id);
+  await eventually(() => twilio.closed, 'stream closed');
+  await eventually(async () => (await service.callSession()).status === 'failed', 'call failed');
+  assert.equal((await service.callSession()).endReason, 'voice_start_failed');
+
+  const late = await request(service.app).post('/webhooks/fake/status').send({ callId: 'call-1', status: 'completed' });
+  assert.equal(late.status, 200);
+  const after = await service.callSession();
+  assert.equal(after.status, 'failed', 'a terminal call stays as it ended');
+});
+
+test('owner Stop on a live stream ends the call once through call.end', async (t) => {
+  const service = await startCallService();
+  t.after(() => service.server.close());
+  const session = await service.callSession();
+  const twilio = await TwilioStream.open(service.port, service.conversationId, session.id);
+  t.after(() => twilio.socket.close());
+  await eventually(async () => (await service.callSession()).status === 'in_progress', 'call in progress');
+  const stop = await request(service.app).post(`/conversations/${service.conversationId}/runtime/stop`).set(service.headers).send({});
+  assert.equal(stop.status, 200);
+  const ending = await service.callSession();
+  assert.equal(ending.status, 'ending');
+  assert.equal(ending.endReason, 'owner_stopped');
 });

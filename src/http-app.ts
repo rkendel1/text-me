@@ -70,6 +70,13 @@ import { TenancyService } from './tenancy/service.js';
 import { NotificationChannelResolver } from './tenancy/channels.js';
 import { assertJobOwnership, authorize, type TenantAction, type TenantContext } from './tenancy/authorization.js';
 import { checkout, portal, verifyWebhook, type StripeBilling } from './billing/stripe.js';
+import { createCallApplication } from './appport/call-application.js';
+import { CallCapabilityClient } from './appport/call-client.js';
+import { appPortSessionFor } from './appport/session.js';
+import { isTerminal } from './calls/model.js';
+import { FakeCallProvider, type CallProvider } from './calls/provider.js';
+import { CallSessionService } from './calls/service.js';
+import { InMemoryCallSessionStore, type CallSessionStore } from './calls/store.js';
 
 export interface AppOptions {
   repository: ConversationRepository;
@@ -101,6 +108,10 @@ export interface AppOptions {
   surfaceDeviceStore?: OwnerSurfaceDeviceStore;
   appSecretStore?: AppSecretStore;
   pushSender?: PushSender;
+  /** Durable CallSessions: the canonical record of every call, inbound or outbound. */
+  callSessionStore?: CallSessionStore;
+  /** Places and ends calls at the telephony provider (Twilio in production). */
+  callProvider?: CallProvider;
   /** Account phone numbers (assistant lines and verified personal numbers). */
   phoneNumbers?: PhoneNumberService;
   /** The platform's number provider, when `phoneNumbers` isn't given (tests and local development use a fake pool). */
@@ -144,6 +155,8 @@ const PRODUCTION_REQUIREMENTS: Array<[keyof AppOptions, string]> = [
   ['runtimeEventStore', 'runtime event store'],
   ['runtimeOverrideStore', 'runtime override store'],
   ['runtimeCommandStore', 'runtime command store'],
+  ['callSessionStore', 'call session store'],
+  ['callProvider', 'call provider'],
   ['runtimeEventBus', 'cross-instance event bus'],
   ['attentionStore', 'owner attention store'],
   ['notificationDeliveryStore', 'notification delivery store'],
@@ -202,6 +215,42 @@ function ownerVoiceReply(ownerName: string, instruction: string): string {
   return `${name} says: ${instruction}`;
 }
 
+/** The id that ties a request's log lines together: Vercel's, else the caller's, else none. */
+function requestTraceId(request: Request): string | undefined {
+  return request.header('x-vercel-id') ?? request.header('x-request-id') ?? undefined;
+}
+
+/** Records (or resolves) the CallSession for a call arriving at a line. Returns null, and logs, if it cannot. */
+async function openCallSession(
+  calls: CallSessionService,
+  providerName: string,
+  accountId: string,
+  incoming: IncomingCall,
+  conversationId: string,
+  traceId?: string,
+) {
+  try {
+    const outbound = incoming.direction === 'outbound';
+    return await calls.openProviderCall({
+      accountId,
+      provider: providerName,
+      providerCallId: incoming.providerCallId,
+      direction: incoming.direction ?? 'inbound',
+      // For a call the application placed (the owner test call) the webhook's caller/called roles are swapped.
+      from: outbound ? incoming.calledNumber : incoming.callerPhone,
+      to: outbound ? incoming.callerPhone : incoming.calledNumber,
+      conversationId,
+      traceId,
+    });
+  } catch (error) {
+    console.error('[call] could not record call session', JSON.stringify({
+      providerCallId: incoming.providerCallId, conversationId, traceId: traceId ?? null,
+      error: error instanceof Error ? error.message : 'unknown',
+    }));
+    return null;
+  }
+}
+
 function registerIncomingCallRoute(
   app: express.Express,
   path: string,
@@ -209,6 +258,7 @@ function registerIncomingCallRoute(
   service: ConversationService,
   configuration: OwnerConfigurationService,
   phoneNumbers: PhoneNumberService,
+  calls: CallSessionService,
   transform?: (request: Request, call: IncomingCall) => IncomingCall,
   reject?: (request: Request) => ProviderResponse | undefined,
 ): void {
@@ -229,6 +279,9 @@ function registerIncomingCallRoute(
         return;
       }
       const conversation = await service.incomingCall(incomingCall, line.accountId);
+      const traceId = requestTraceId(request);
+      // The durable CallSession is the record of this call; a failure to keep it must never drop the call itself.
+      const callSession = await openCallSession(calls, provider.name, line.accountId, incomingCall, conversation.id, traceId);
       // Callers dialed the owner's real number; their carrier forwarded the call here.
       const forwardedFrom = typeof incomingCall.payload.ForwardedFrom === 'string' ? incomingCall.payload.ForwardedFrom : '';
       if (forwardedFrom && !conversation.events.some((event) => event.type === 'call.forwarded')) {
@@ -250,12 +303,14 @@ function registerIncomingCallRoute(
         }
         twiml.hangup();
         await service.answerCall(conversation.id, incomingCall.payload);
+        await calls.transition(callSession?.id ?? '', 'answered', { mode: 'lenient' }).catch(() => undefined);
         await service.recordEvent(conversation.id, 'call.declined', { voicemail: settings.calls.voicemailFallback });
         response.status(200).type('text/xml; charset=utf-8').send(twiml.toString());
         return;
       }
-      const providerResponse = provider.answerCall(conversation, { greeting: settings.assistant.greeting });
+      const providerResponse = provider.answerCall(conversation, { greeting: settings.assistant.greeting, ...(callSession ? { callSessionId: callSession.id } : {}) });
       await service.answerCall(conversation.id, incomingCall.payload);
+      if (callSession) await calls.transition(callSession.id, 'answered', { mode: 'lenient' }).catch(() => undefined);
       if (providerResponse.spokenGreeting && !conversation.events.some((event) =>
         event.type === 'ai.response' && event.payload.callbackId === `${conversation.providerCallId}:greeting`)) {
         await service.recordEvent(conversation.id, 'ai.response', {
@@ -288,21 +343,76 @@ function registerStatusRoute(
   path: string,
   provider: TelephonyProvider,
   service: ConversationService,
+  calls: CallSessionService,
 ): void {
   app.post(path, async (request, response, next) => {
     try {
-      const statusUpdate = provider.parseStatusUpdate(request.body);
-      const conversation = await service.updateCallStatus(statusUpdate);
-      if (statusUpdate.status === 'completed') {
-        await service.resolveAttention(conversation.id, ['conversation_started'], 'call ended');
-        await service.raiseAttention(conversation.id, {
-          type: 'conversation_completed',
-          title: (name) => `${name.split(' ')[0]}'s ${conversation.state === 'text_active' ? 'call' : 'conversation'} is complete`,
-          body: conversation.state === 'text_active' ? 'The conversation continues by text' : 'Handled by your assistant',
-          dedupeKey: `completed:${conversation.id}`,
-        });
+      const update = provider.parseStatusUpdate(request.body);
+      const traceId = requestTraceId(request);
+      const conversation = await service.findByProviderCall(update.provider, update.providerCallId);
+      let session = await calls.findByProviderCall(update.providerCallId, update.provider);
+      // A call that predates CallSessions, or whose first callback beat its own registration.
+      if (!session && conversation) session = await calls.adoptConversation(conversation).catch(() => null);
+
+      if (!session) {
+        if (!conversation) {
+          // Early lifecycle events of a call still being registered are expected; anything else is an unknown call.
+          if (update.status === 'initiating' || update.status === 'ringing') {
+            response.status(200).json({ ignored: 'unknown_call' });
+            return;
+          }
+          throw new HttpError(404, 'Conversation not found for provider call');
+        }
+        // No CallSession could be kept for it: keep the conversation correct as before.
+        const fallback = update.status === 'answered' ? 'answered' : update.status && isTerminal(update.status) ? 'completed' : null;
+        const updated = fallback
+          ? await service.updateCallStatus({ provider: update.provider, providerCallId: update.providerCallId, lifecycle: fallback, durationSeconds: update.durationSeconds, payload: update.payload })
+          : conversation;
+        response.status(200).json(presentConversation(updated));
+        return;
       }
-      response.status(200).json(presentConversation(conversation));
+
+      const { outcome } = await calls.applyProviderEvent({
+        provider: update.provider,
+        providerCallId: update.providerCallId,
+        eventId: update.eventId,
+        rawStatus: update.rawStatus,
+        status: update.status,
+        sequence: update.sequence,
+        providerTimestamp: update.providerTimestamp,
+        traceId,
+      });
+      const current = conversation ?? (session.conversationId ? await service.getConversation(session.conversationId) : null);
+
+      if (outcome === 'rejected') throw new HttpError(409, `Invalid call status transition to ${update.rawStatus}`);
+      // A call the application placed has no conversation until the callee answers and the provider asks for instructions.
+      if (!current) {
+        response.status(200).json({ callId: session.id, outcome });
+        return;
+      }
+      // Redelivered, late, already applied, or not a status the domain models: acknowledged, and nothing happens twice.
+      if (outcome !== 'applied' || !update.status) {
+        response.status(200).json(presentConversation(current));
+        return;
+      }
+
+      // The owner-facing conversation follows the CallSession lifecycle.
+      let projected = current;
+      if (update.status === 'answered') {
+        projected = await service.updateCallStatus({ provider: update.provider, providerCallId: update.providerCallId, lifecycle: 'answered', durationSeconds: update.durationSeconds, payload: update.payload });
+      } else if (isTerminal(update.status)) {
+        projected = await service.updateCallStatus({ provider: update.provider, providerCallId: update.providerCallId, lifecycle: 'completed', durationSeconds: update.durationSeconds, payload: update.payload });
+        await service.resolveAttention(projected.id, ['conversation_started'], 'call ended');
+        if (update.status === 'completed') {
+          await service.raiseAttention(projected.id, {
+            type: 'conversation_completed',
+            title: (name) => `${name.split(' ')[0]}'s ${projected.state === 'text_active' ? 'call' : 'conversation'} is complete`,
+            body: projected.state === 'text_active' ? 'The conversation continues by text' : 'Handled by your assistant',
+            dedupeKey: `completed:${projected.id}`,
+          });
+        }
+      }
+      response.status(200).json(presentConversation(projected));
     } catch (error) {
       next(error);
     }
@@ -394,6 +504,14 @@ export function createApp(options: AppOptions): express.Express {
   );
   // Every text is sent as an account, from that account's own assistant line.
   const accountMessaging = new AccountMessenger(messaging, phoneNumbers);
+  // CallSessions: the durable record of every call. One AppPort application exposes the operations on it; the
+  // voice runtime and the control plane reach it in-process, and the MCP projection (src/appport/mcp.ts) reaches the same one.
+  const callSessions = new CallSessionService(options.callSessionStore ?? new InMemoryCallSessionStore(), {
+    provider: options.callProvider ?? new FakeCallProvider(),
+    assistantLine: (accountId) => phoneNumbers.assistantLine(accountId),
+  });
+  phoneNumbers.bindCallSessions(callSessions);
+  const callApplication = createCallApplication({ calls: callSessions });
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
   const runtime = options.runtimeControlService ?? new RuntimeControlService(
     options.repository,
@@ -505,6 +623,7 @@ export function createApp(options: AppOptions): express.Express {
     runtime,
     conversations: service,
     configuration: ownerConfiguration,
+    calls: callSessions,
   });
   const presentVoice = (conversation: Conversation) => ({
     realtime: Boolean(realtimeVoice),
@@ -739,8 +858,8 @@ export function createApp(options: AppOptions): express.Express {
     throw new Error('Twilio provider is required');
   }
 
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, phoneNumbers);
-  registerIncomingCallRoute(app, '/webhooks/twilio/voice/test', twilioProvider, service, ownerConfiguration, phoneNumbers, (request, call) => {
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice', twilioProvider, service, ownerConfiguration, phoneNumbers, callSessions);
+  registerIncomingCallRoute(app, '/webhooks/twilio/voice/test', twilioProvider, service, ownerConfiguration, phoneNumbers, callSessions, (request, call) => {
     const assistantLine = typeof request.query.assistantLine === 'string' ? request.query.assistantLine : '';
     if (!assistantLine) throw new HttpError(400, 'assistantLine is required');
     // An outbound test rings the owner's phone. Treat the destination as the caller and the
@@ -778,6 +897,9 @@ export function createApp(options: AppOptions): express.Express {
       if (!conversationId || !callSid) throw new HttpError(400, 'conversationId and CallSid are required');
       const conversation = await service.getConversation(conversationId);
       if (!conversation) throw new HttpError(404, 'Conversation not found');
+      // The first spoken turn is the assistant conversing: the CallSession moves from answered to in progress.
+      const turnSession = await callSessions.findByConversation(conversation.accountId, conversationId).catch(() => null);
+      if (turnSession?.status === 'answered') await callSessions.markInProgress(turnSession.id);
 
       // Provider termination is normally immediate, but this also prevents a
       // Gather already in flight (or a transient Twilio REST failure) from
@@ -946,7 +1068,7 @@ export function createApp(options: AppOptions): express.Express {
       next(error);
     }
   });
-  registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service);
+  registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service, callSessions);
 
   // A caller left a voicemail (only offered when the owner turned off answering calls).
   app.post('/webhooks/twilio/voicemail', async (request, response, next) => {
@@ -1032,8 +1154,8 @@ export function createApp(options: AppOptions): express.Express {
   if (fakeRoutesEnabled) {
     const fake = providers.get('fake');
     if (fake) {
-      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, phoneNumbers);
-      registerStatusRoute(app, '/webhooks/fake/status', fake, service);
+      registerIncomingCallRoute(app, '/webhooks/fake/voice', fake, service, ownerConfiguration, phoneNumbers, callSessions);
+      registerStatusRoute(app, '/webhooks/fake/status', fake, service, callSessions);
     }
   }
 
@@ -2214,8 +2336,13 @@ export function createApp(options: AppOptions): express.Express {
       const conversation = await service.requireOwnedConversation(String(request.params.id), accountOf(request));
       const stopped = await runtime.stop(conversation.id, accountOf(request), runtimeInput(request));
       if (conversation.status !== 'completed') {
-        const provider = providers.get(conversation.provider);
-        if (provider?.endCall) await provider.endCall(conversation.providerCallId);
+        // Hang up through the call capability, as this member: the provider is asked once, however often Stop is pressed.
+        const callSession = await callSessions.findByConversation(conversation.accountId, conversation.id)
+          ?? await callSessions.adoptConversation(conversation);
+        if (callSession) {
+          await new CallCapabilityClient(callApplication, appPortSessionFor(tenantOf(request)))
+            .end({ callId: callSession.id, reason: 'owner_stopped' }, { idempotencyKey: `owner-stop:${conversation.id}`, traceId: requestTraceId(request) });
+        }
       }
       response.json(presentRuntime(stopped));
     } catch (error) {

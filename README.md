@@ -142,6 +142,9 @@ Accounts: `POST /auth/signup`, `POST /auth/sessions`, `GET /me`,
 notification channels, members). The full client contract, which the iOS app
 also uses, is in [`docs/owner-api.md`](docs/owner-api.md).
 
+Every call, inbound or outbound, is a durable `CallSession` exposed as the AppPort capabilities
+`call.create`, `call.get`, `call.list` and `call.end`; see [`docs/call-session.md`](docs/call-session.md).
+
 Twilio webhooks: `POST /webhooks/twilio/voice`, `/webhooks/twilio/status`,
 `/webhooks/twilio/sms`, `/webhooks/twilio/voice/continue`, and the media
 stream WebSocket at `/media-stream`.

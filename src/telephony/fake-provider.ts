@@ -1,4 +1,5 @@
 import { HttpError } from '../errors.js';
+import { mapTwilioCallStatus } from '../calls/provider-status.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
 import type {
   IncomingCall,
@@ -43,23 +44,23 @@ export class FakeTelephonyProvider implements TelephonyProvider {
 
   parseStatusUpdate(payload: unknown): StatusUpdate {
     const record = asRecord(payload);
-    const status = requiredString(record, 'status').toLowerCase();
-
-    if (status !== 'answered' && status !== 'completed') {
-      throw new HttpError(400, `Unsupported fake call status: ${status}`);
-    }
+    const rawStatus = requiredString(record, 'status').toLowerCase();
+    const providerCallId = requiredString(record, 'callId');
 
     return {
       provider: this.name,
-      providerCallId: requiredString(record, 'callId'),
-      status,
+      providerCallId,
+      eventId: `${providerCallId}:${rawStatus}${typeof record.sequence === 'number' ? `:${record.sequence}` : ''}`,
+      rawStatus,
+      // The fake speaks the same status words as the real provider.
+      status: mapTwilioCallStatus(rawStatus),
       durationSeconds:
         typeof record.durationSeconds === 'number' ? record.durationSeconds : null,
       payload: record,
     };
   }
 
-  answerCall(_conversation?: unknown, options: { greeting?: string } = {}): ProviderResponse {
+  answerCall(_conversation?: unknown, options: { greeting?: string; callSessionId?: string } = {}): ProviderResponse {
     const greeting = (options.greeting || 'Hi. What can I help you with?').replace(/[&<>"']/g, (char) =>
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[char]!));
     return {

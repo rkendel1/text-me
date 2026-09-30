@@ -8,6 +8,8 @@ import type { VerificationMessagingProvider } from '../messaging/provider.js';
 import type { PhoneVerificationProvider } from './verification.js';
 import { createAuditEventId, createPhoneNumberId, E164, type PhoneNumber } from '../tenancy/model.js';
 import { PhoneNumberTakenError, type TenancyStore } from '../tenancy/store.js';
+import type { CallSessionService } from '../calls/service.js';
+import { TwilioCallProvider } from './twilio-call-provider.js';
 
 /** A number held in the platform's provider account (a platform resource until assigned to an account). */
 export interface ProviderNumber {
@@ -41,9 +43,11 @@ const fromTwilio = (number: { sid: string; phoneNumber: string; voiceUrl?: strin
 export class TwilioPhoneNumberClient implements PhoneNumberClient {
   readonly provider = 'twilio';
   private readonly client: ReturnType<typeof twilio>;
+  private readonly callProvider: TwilioCallProvider;
 
   constructor(accountSid: string, authToken: string) {
     this.client = twilio(accountSid, authToken);
+    this.callProvider = new TwilioCallProvider(accountSid, authToken);
   }
 
   async find(phoneNumber: string): Promise<ProviderNumber | null> {
@@ -75,23 +79,16 @@ export class TwilioPhoneNumberClient implements PhoneNumberClient {
     const response = new twilio.twiml.VoiceResponse();
     const spoken = options.code.split('').join(', ');
     response.say(`Your Text Me verification code is ${spoken}. Again, ${spoken}.`);
-    await this.client.calls.create({ from: options.from, to: options.to, twiml: response.toString() });
+    await this.callProvider.createCall({ from: options.from, to: options.to, inlineInstructions: response.toString() });
   }
 
   async placeTestCall(options: { from: string; to: string; url: string; statusCallback: string; humanOnly?: boolean }): Promise<{ id: string }> {
-    const call = await this.client.calls.create({
-      from: options.from,
-      to: options.to,
-      url: options.url,
-      method: 'POST',
-      statusCallback: options.statusCallback,
-      statusCallbackMethod: 'POST',
-      statusCallbackEvent: ['completed'],
-      // Human confirmation happens in the test-call TwiML. Twilio's answering-
-      // machine detection can misclassify a real iPhone pickup and hang up on
-      // the owner before the assistant ever gets a chance to speak.
+    // Human confirmation happens in the test-call TwiML. Twilio's answering-machine detection can
+    // misclassify a real iPhone pickup and hang up on the owner before the assistant ever speaks.
+    const { providerCallId } = await this.callProvider.createCall({
+      from: options.from, to: options.to, answerUrl: options.url, statusUrl: options.statusCallback,
     });
-    return { id: call.sid };
+    return { id: providerCallId };
   }
 }
 
@@ -216,6 +213,13 @@ export class PhoneNumberService {
       verification?: PhoneVerificationProvider;
     } = {},
   ) {}
+
+  private calls?: CallSessionService;
+
+  /** Gives the owner test call a CallSession lifecycle. Bound after construction: the call service resolves lines through this one. */
+  bindCallSessions(calls: CallSessionService): void {
+    this.calls = calls;
+  }
 
   verificationChannels(): Array<'call' | 'sms'> {
     return [
@@ -380,14 +384,24 @@ export class PhoneNumberService {
     if (!personal || personal.status !== 'active') throw new HttpError(409, 'Verify your mobile number before placing a test call.', 'no_personal_number');
     const url = new URL('/webhooks/twilio/voice/test', this.publicBaseUrl);
     url.searchParams.set('assistantLine', line.number);
-    const call = await this.client.placeTestCall({
-      from: line.number,
-      to: personal.number,
-      url: url.toString(),
-      statusCallback: this.urls().statusCallback,
-      humanOnly: true,
-    });
-    await this.audit(accountId, 'phone.test_call_started', { providerCallId: call.id, from: line.number, to: personal.number }, userId);
+    // The call exists in the domain before anything is dialed, and its lifecycle is tracked from here on.
+    const session = await this.calls?.create({ accountId, ...(userId ? { principalId: userId } : {}) }, { direction: 'outbound', from: line.number, to: personal.number });
+    if (session) await this.calls!.beginDial(session.id);
+    let call: { id: string };
+    try {
+      call = await this.client.placeTestCall({
+        from: line.number,
+        to: personal.number,
+        url: url.toString(),
+        statusCallback: this.urls().statusCallback,
+        humanOnly: true,
+      });
+    } catch (error) {
+      if (session) await this.calls!.recordDialFailed(session.id, undefined, error);
+      throw error;
+    }
+    if (session) await this.calls!.recordDialed(session.id, call.id);
+    await this.audit(accountId, 'phone.test_call_started', { providerCallId: call.id, ...(session ? { callId: session.id } : {}), from: line.number, to: personal.number }, userId);
     return { id: call.id, from: line.number, to: personal.number };
   }
 
