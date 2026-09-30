@@ -123,7 +123,7 @@ sequenceDiagram
     loop each turn (max 20)
       T->>T: Twilio speech recognition
       T->>V: POST /webhooks/twilio/voice/turn?conversationId&turn (SpeechResult)
-      V->>DB: load conversation; check runtime (stopped/paused?)
+      V->>DB: load conversation, check runtime (stopped/paused?)
       V->>M: generateText(history, tools ask_owner/note_caller)
       V->>DB: append speech.transcript, ai.response
       V-->>T: TwiML <Gather><Say reply>
@@ -136,7 +136,7 @@ sequenceDiagram
     V-->>T: media + mark + clear (barge-in)
   end
   T->>V: POST /webhooks/twilio/status (CallStatus=completed, CallDuration)
-  V->>DB: status completed, call.ended; attention conversation_completed
+  V->>DB: status completed, call.ended, attention conversation_completed
 ```
 
 ### 3.2 Answers to the required "exactly how" questions
