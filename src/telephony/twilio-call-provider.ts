@@ -1,6 +1,10 @@
 import twilio from 'twilio';
 
-import { CallProviderRejectedError, CallProviderUnconfirmedError, type CallProvider, type CallProviderCreateInput } from '../calls/provider.js';
+import {
+  CallProviderRejectedError, CallProviderUnconfirmedError,
+  type CallProvider, type CallProviderCreateInput, type ProviderCallLookup, type ProviderCallLookupInput,
+} from '../calls/provider.js';
+import { mapTwilioCallStatus } from '../calls/provider-status.js';
 
 /**
  * The only place the application places or ends Twilio calls (`client.calls.create` / `.update`).
@@ -8,6 +12,9 @@ import { CallProviderRejectedError, CallProviderUnconfirmedError, type CallProvi
  */
 /** The slice of the Twilio SDK this adapter uses. Injectable so the adapter's own behavior can be tested without the network. */
 export type TwilioCallsClient = Pick<ReturnType<typeof twilio>, 'calls'>;
+
+/** Enough for the calls between one assistant line and one callee around one dial; a larger result is itself ambiguous. */
+const LOOKUP_LIMIT = 20;
 
 export class TwilioCallProvider implements CallProvider {
   readonly name = 'twilio';
@@ -36,6 +43,20 @@ export class TwilioCallProvider implements CallProvider {
     } catch (error) {
       throw classifyCreateFailure(error);
     }
+  }
+
+  /**
+   * Read-only (`client.calls.list`). Twilio has no lookup by our own reference, and its date filters are day-granular,
+   * so this lists the most recent calls between the two numbers and keeps those created inside the window. Twilio's
+   * list ordering, and how soon a just-created call appears in it, are not verified here, so absence is never
+   * conclusive and a match is only a candidate for the caller to judge.
+   */
+  async findDialedCalls(input: ProviderCallLookupInput): Promise<ProviderCallLookup> {
+    const listed = await this.client.calls.list({ from: input.from, to: input.to, pageSize: LOOKUP_LIMIT, limit: LOOKUP_LIMIT });
+    const calls = listed
+      .filter((call) => call.dateCreated >= input.createdAfter && call.dateCreated <= input.createdBefore)
+      .map((call) => ({ providerCallId: call.sid, status: mapTwilioCallStatus(String(call.status)), createdAt: call.dateCreated }));
+    return calls.length ? { outcome: 'found', calls } : { outcome: 'not_found', conclusive: false };
   }
 
   async endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void> {

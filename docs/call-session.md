@@ -181,12 +181,37 @@ so each can fail independently and be reasoned about.
 | Situation | Result |
 |---|---|
 | Twilio **rejects** (4xx other than 408) | `failed`, reason `provider_rejected`, `dial_outcome=rejected`; no provider id is invented |
-| Twilio **times out** or the response is lost (5xx, 408, network) | The call may exist. `dial_outcome=unconfirmed`; **never redialed**. Status callbacks carrying the `callId` hint attach it; `reconcileUnconfirmedDials` lists the stragglers. It is not scheduled, because the repository has no scheduler |
+| Twilio **times out** or the response is lost (5xx, 408, network) | The call may exist. `dial_outcome=unconfirmed`; **never redialed, never failed on a guess**. Callbacks carrying the `callId` hint attach it, and [reconciliation](#unconfirmed-outbound-calls) looks for it at the provider |
 | Row persisted, process dies before dialing | The session stays `created`; nothing was sent; a retry with the same key finds it and executes the claim |
 | Twilio accepts, process dies before recording | Callbacks adopt the provider id |
 | `call.end` while the request is in flight | The call is cancelled once the provider id is known |
 
 There is no retry loop. A second attempt needs a new, explicit request.
+
+### Unconfirmed outbound calls
+
+```mermaid
+flowchart LR
+  T[Twilio request] -->|response lost| U["initiating<br/>dial_outcome = unconfirmed"]
+  U -->|callback with callId hint| A[attached]
+  U -->|"cron, after the grace period"| R["claimReconciliation<br/>(row lock, attempt counted)"]
+  R --> L["provider.findDialedCalls<br/>(read-only)"]
+  L -->|one candidate| A
+  L -->|none / ambiguous / error| U
+  L -->|provider guarantees absence| F["failed, rejected"]
+  A --> S["session follows provider state<br/>(ended locally: hung up once, stays ended)"]
+```
+
+`failed` means the provider definitively refused; `unconfirmed` means the application does not know. Reconciliation never converts the second into the first unless the provider itself guarantees absence (`conclusive`). Twilio's adapter never does, so against Twilio an unknown dial stays `unconfirmed`, and after the attempts are used up it is left for an operator (visible as `exhausted` in the cron response and the `call.reconciliation.summary` log). No new domain status was added.
+
+- **Trigger.** Vercel Cron (`vercel.json`, every 5 minutes) calls `GET /api/internal/cron/reconcile-calls` with `Authorization: Bearer $CRON_SECRET` (Vercel's own mechanism). The secret is compared in constant time, never logged, and with no `CRON_SECRET` configured every request is refused (503). The route only reconciles; nothing it calls can place a call.
+- **Eligible:** outbound, no provider id, `dial_outcome` `pending` or `unconfirmed` (a process that died mid-request leaves `pending`), claimed longer ago than the **grace period**, fewer than the **maximum attempts**, not looked at within the **retry interval**. It does not matter whether the session was ended locally meanwhile.
+- **Bounds.** Grace: 120 s by default (`OUTBOUND_CALL_RECONCILIATION_GRACE_SECONDS`, 60-3600), and never less than twice the 20 s dial timeout in any case, so an in-flight request is not raced. Batch: 25 (`OUTBOUND_CALL_RECONCILIATION_BATCH_SIZE`, 1-100). Maximum attempts: 5, spaced at least 60 s apart (fixed). A run also stops taking attempts after 240 s. `OUTBOUND_CALL_RECONCILIATION_ENABLED=off` disables it. There is no setting that redials.
+- **Coordination.** `claimReconciliation` re-checks eligibility under the `SELECT ... FOR UPDATE` row lock, counts the attempt (`reconciliation_attempts`, `last_reconciliation_at`) and releases. Two instances cannot both take the same attempt. Attaching the provider id is a locked write too; whoever attaches it is the only one that hangs up a call that was ended locally.
+- **Matching.** Twilio has no lookup by our own reference, so the adapter lists calls between the two numbers (`calls.list`, 20 newest) and keeps those Twilio created within 30 s before to 5 min after our claim. Candidates already owned by another session are discarded. Exactly one remaining candidate is ours; several are ambiguous and are never guessed.
+- **Local intent wins.** If the session was ended (`canceled`) while its dial was unknown and the call turns up live at Twilio, the id is attached and the call is hung up once; the session is never moved out of its terminal state. A callback that attaches the id first does the same hang-up instead.
+- **Observability.** `call.reconciliation.started|confirmed|rejected|still_unconfirmed|failed|summary`, with `callId`, `providerCallId` when known, `attempt`, `traceId`, masked numbers. The summary carries the counters (examined, confirmed, stillUnconfirmed, failed, unresolved, exhausted); there is no metrics framework in the repository.
+- **Not verified against Twilio.** Everything above was tested against a stub of the Twilio SDK and a fake provider, never against Twilio. Specifically UNVERIFIED: how soon a just-created call appears in `calls.list`, list ordering, whether `dateCreated` is populated for queued calls, and whether Twilio emits `canceled` in status callbacks for a call cancelled while ringing (the domain treats `canceled` as terminal, and a call that existed and was cancelled is `accepted`, not `rejected`). The existing conservative behavior is unchanged.
 
 ### Owner test call
 
@@ -226,6 +251,6 @@ for webhooks and the AppPort request's trace id for capabilities.
 
 ## Not built
 
-Deliberately left for later PRs: bulk, scheduled or campaign dialing, automated retries, caller-ID rotation, contact lists; a scheduler for `reconcileUnconfirmedDials`; answering-machine detection; AI-disclosure, consent, calling-window and
+Deliberately left for later PRs: bulk, scheduled or campaign dialing, automated retries, caller-ID rotation, contact lists;  answering-machine detection; AI-disclosure, consent, calling-window and
 recording-consent policy; voicemail strategy; an MCP server transport; `call.answer`/`call.handoff`; an `operations.*`
 view of calls (core's operation reader has no per-tenant ownership hook, so calls are read through `call.get`).

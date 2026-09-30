@@ -170,6 +170,8 @@ export function buildServerWithPool(
     callProvider: new TwilioCallProvider(config.twilioAccountSid, config.twilioAuthToken),
     callSessionStore: stores.callSessionStore,
     outboundAgentCalls: config.outboundAgentCalls,
+    cronSecret: config.cronSecret,
+    callReconciliation: { enabled: config.outboundCallReconciliation.enabled, batchSize: config.outboundCallReconciliation.batchSize, graceMs: config.outboundCallReconciliation.graceSeconds * 1000 },
     realtimeVoice,
     conversationModel: textAgent,
     autoReplyToCallerTexts: Boolean(textAgent),

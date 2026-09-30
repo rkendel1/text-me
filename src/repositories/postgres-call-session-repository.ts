@@ -15,6 +15,7 @@ import {
   type MutationOutcome,
   type MutationResult,
   type ProviderEventInput,
+  type ReconcilableDialCriteria,
 } from '../calls/store.js';
 import { migrate } from './schema-lock.js';
 
@@ -44,6 +45,8 @@ interface CallSessionRow {
   objective: string | null;
   dial_claimed_at: Date | null;
   dial_outcome: DialOutcome | null;
+  reconciliation_attempts: number;
+  last_reconciliation_at: Date | null;
 }
 
 const COLUMN_FOR: Record<keyof CallSessionPatch, string> = {
@@ -60,6 +63,8 @@ const COLUMN_FOR: Record<keyof CallSessionPatch, string> = {
   lastProviderStatus: 'last_provider_status',
   dialClaimedAt: 'dial_claimed_at',
   dialOutcome: 'dial_outcome',
+  reconciliationAttempts: 'reconciliation_attempts',
+  lastReconciliationAt: 'last_reconciliation_at',
 };
 
 function toRecord(row: CallSessionRow): CallSessionRecord {
@@ -90,6 +95,8 @@ function toRecord(row: CallSessionRow): CallSessionRecord {
     objective: row.objective,
     dialClaimedAt: date(row.dial_claimed_at),
     dialOutcome: row.dial_outcome,
+    reconciliationAttempts: Number(row.reconciliation_attempts ?? 0),
+    lastReconciliationAt: date(row.last_reconciliation_at),
   };
 }
 
@@ -127,6 +134,7 @@ export class PostgresCallSessionStore implements CallSessionStore {
       `);
       // Outbound execution (added after the first release of this table): the objective, and the durable claim on the provider request.
       await db.query(`ALTER TABLE call_sessions ADD COLUMN IF NOT EXISTS objective TEXT, ADD COLUMN IF NOT EXISTS dial_claimed_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS dial_outcome TEXT`);
+      await db.query(`ALTER TABLE call_sessions ADD COLUMN IF NOT EXISTS reconciliation_attempts INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS last_reconciliation_at TIMESTAMPTZ`);
       await db.query(`DO $$ BEGIN
         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'call_sessions_dial_outcome_check') THEN
           ALTER TABLE call_sessions ADD CONSTRAINT call_sessions_dial_outcome_check CHECK (dial_outcome IS NULL OR dial_outcome IN ('pending', 'accepted', 'rejected', 'unconfirmed'));
@@ -141,6 +149,8 @@ export class PostgresCallSessionStore implements CallSessionStore {
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_sessions_account_status ON call_sessions (account_id, status, created_at DESC)');
       // Reconciling dials that never got a provider call id: a small, sparse set.
       await db.query(`CREATE INDEX IF NOT EXISTS idx_call_sessions_unconfirmed_dial ON call_sessions (dial_claimed_at) WHERE status = 'initiating' AND provider_call_id IS NULL`);
+      // Reconciliation's own queue: a dial claimed but never tied to a provider call, whatever became of the session locally since.
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_call_sessions_dial_reconciliation ON call_sessions (dial_claimed_at) WHERE provider_call_id IS NULL AND dial_outcome IN ('pending', 'unconfirmed')`);
       // Owner Stop resolves a conversation's call.
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_sessions_conversation ON call_sessions (conversation_id) WHERE conversation_id IS NOT NULL');
       // One row per provider callback, keyed by its identity: what makes redelivery harmless.
@@ -168,8 +178,8 @@ export class PostgresCallSessionStore implements CallSessionStore {
          id, account_id, direction, status, provider, provider_call_id, from_number, to_number, conversation_id,
          started_at, answered_at, ended_at, end_reason, created_at, updated_at, version,
          requested_by, trace_id, idempotency_key, request_fingerprint, end_claimed_at, last_provider_status,
-         objective, dial_claimed_at, dial_outcome)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+         objective, dial_claimed_at, dial_outcome, reconciliation_attempts, last_reconciliation_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
        ON CONFLICT DO NOTHING
        RETURNING *`,
       [
@@ -177,7 +187,7 @@ export class PostgresCallSessionStore implements CallSessionStore {
         record.from, record.to, record.conversationId, record.startedAt, record.answeredAt, record.endedAt,
         record.endReason, record.createdAt, record.updatedAt, record.version, record.requestedBy, record.traceId,
         record.idempotencyKey, record.requestFingerprint, record.endClaimedAt, record.lastProviderStatus,
-        record.objective, record.dialClaimedAt, record.dialOutcome,
+        record.objective, record.dialClaimedAt, record.dialOutcome, record.reconciliationAttempts, record.lastReconciliationAt,
       ],
     );
     if (result.rows[0]) return { session: toRecord(result.rows[0]), created: true };
@@ -213,12 +223,26 @@ export class PostgresCallSessionStore implements CallSessionStore {
     return result.rows[0] ? toRecord(result.rows[0]) : null;
   }
 
-  async listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]> {
+  async listReconcilableDials(criteria: ReconcilableDialCriteria): Promise<CallSessionRecord[]> {
     const result = await this.pool.query<CallSessionRow>(
-      `SELECT * FROM call_sessions WHERE status = 'initiating' AND provider_call_id IS NULL AND dial_claimed_at < $1 ORDER BY dial_claimed_at LIMIT $2`,
-      [claimedBefore, limit],
+      `SELECT * FROM call_sessions
+        WHERE direction = 'outbound' AND provider_call_id IS NULL AND dial_outcome IN ('pending', 'unconfirmed')
+          AND dial_claimed_at < $1 AND reconciliation_attempts < $3
+          AND (last_reconciliation_at IS NULL OR last_reconciliation_at < $2)
+        ORDER BY dial_claimed_at LIMIT $4`,
+      [criteria.claimedBefore, criteria.attemptedBefore, criteria.maxAttempts, criteria.limit],
     );
     return result.rows.map(toRecord);
+  }
+
+  async countUnresolvedDials(maxAttempts: number): Promise<{ unresolved: number; exhausted: number }> {
+    const result = await this.pool.query<{ unresolved: string; exhausted: string }>(
+      `SELECT count(*) AS unresolved, count(*) FILTER (WHERE reconciliation_attempts >= $1) AS exhausted
+         FROM call_sessions
+        WHERE direction = 'outbound' AND provider_call_id IS NULL AND dial_claimed_at IS NOT NULL AND dial_outcome IN ('pending', 'unconfirmed')`,
+      [maxAttempts],
+    );
+    return { unresolved: Number(result.rows[0]?.unresolved ?? 0), exhausted: Number(result.rows[0]?.exhausted ?? 0) };
   }
 
   async findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null> {

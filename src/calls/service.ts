@@ -15,7 +15,7 @@ import { denyAllOutboundPolicy, type OutboundOrigin, type OutboundPolicy } from 
 import { normalizeDialableNumber } from './phone.js';
 import { CallProviderRejectedError, type CallProvider } from './provider.js';
 import type { CallSessionStore } from './store.js';
-import { claimCallEnd, claimOutboundDial, releaseEndClaim, transitionCallSession, type TransitionOutcome, type TransitionResult } from './transition.js';
+import { claimCallEnd, claimOutboundDial, claimReconciliation, releaseEndClaim, transitionCallSession, type TransitionOutcome, type TransitionResult } from './transition.js';
 
 export class CallNotFoundError extends Error {
   constructor() {
@@ -145,6 +145,47 @@ const fingerprint = (direction: CallDirection, from: string | null, to: string |
 
 const DEFAULT_DIAL_TIMEOUT_MS = 20_000;
 
+/**
+ * Reconciliation bounds. The grace period is how long a claimed dial is left alone before anyone looks for it at the
+ * provider: the request itself can take up to the dial timeout (20 s; the Twilio adapter's own HTTP timeout is 15 s),
+ * so the default is six times that and the floor is twice it.
+ */
+export const DEFAULT_RECONCILIATION_GRACE_MS = 120_000;
+export const DEFAULT_RECONCILIATION_BATCH = 25;
+export const MAX_RECONCILIATION_BATCH = 100;
+export const DEFAULT_RECONCILIATION_MAX_ATTEMPTS = 5;
+export const DEFAULT_RECONCILIATION_RETRY_MS = 60_000;
+const DEFAULT_RECONCILIATION_BUDGET_MS = 240_000;
+const RECONCILIATION_CLOCK_SKEW_MS = 30_000;
+const RECONCILIATION_LOOKUP_WINDOW_MS = 5 * 60_000;
+
+export interface ReconciliationOptions {
+  graceMs?: number;
+  limit?: number;
+  maxAttempts?: number;
+  retryIntervalMs?: number;
+  /** Stop taking new attempts once a run has lasted this long (each lookup is itself a bounded network call). */
+  budgetMs?: number;
+}
+
+export interface ReconciliationReport {
+  /** Eligible sessions looked at this run. */
+  examined: number;
+  /** Eligible but taken by another reconciler, or no longer eligible. */
+  skipped: number;
+  /** Tied to a provider call. */
+  confirmed: number;
+  /** ... of which the call was already ended locally, and was hung up at the provider. */
+  cancelledAtProvider: number;
+  /** The provider guaranteed no such call exists: failed. */
+  rejected: number;
+  stillUnconfirmed: number;
+  failed: number;
+  /** Across the whole table after the run: dials still unknown, and those that have used up their attempts. */
+  unresolved: number;
+  exhausted: number;
+}
+
 class DialTimeout extends Error {
   constructor() {
     super('The provider did not answer the create-call request in time.');
@@ -258,6 +299,8 @@ export class CallSessionService {
       objective: fields.objective,
       dialClaimedAt: null,
       dialOutcome: null,
+      reconciliationAttempts: 0,
+      lastReconciliationAt: null,
     };
     const inserted = await this.store.insert(record);
     if (inserted.created) {
@@ -340,7 +383,7 @@ export class CallSessionService {
       conversationId: conversation.id, startedAt: null, answeredAt: null, endedAt: null, endReason: null,
       createdAt: conversation.startedAt, updatedAt: now, version: 1, requestedBy: 'system', traceId: null,
       idempotencyKey: null, requestFingerprint: null, endClaimedAt: null, lastProviderStatus: null,
-      objective: null, dialClaimedAt: null, dialOutcome: null,
+      objective: null, dialClaimedAt: null, dialOutcome: null, reconciliationAttempts: 0, lastReconciliationAt: null,
     };
     const { session } = await this.store.insert(record);
     // Mirror where the conversation already is, through the same transition mechanism.
@@ -621,24 +664,130 @@ export class CallSessionService {
     if (session.providerCallId) return session;
     const result = await this.store.mutate(callId, (current) =>
       current.providerCallId ? { patch: null } : { patch: { providerCallId, dialOutcome: 'accepted' as const } });
-    if (result?.changed) this.log('info', 'call.outbound.provider_created', result.session, { via: 'callback' });
+    if (result?.changed) {
+      this.log('info', 'call.outbound.provider_created', result.session, { via: 'callback' });
+      if (isTerminal(result.session.status)) {
+        // Ended locally while its dial was unknown, and now the provider call turns up: do not let it ring. Whoever attaches the id does this, once.
+        await this.options.provider?.endCall(providerCallId, { mode: 'cancel' }).catch((error) =>
+          this.log('warn', 'call.outbound.cancel_after_dial_failed', result.session, { via: 'callback', error: safeError(error) }));
+      }
+    }
     return result?.session ?? null;
   }
 
   /**
-   * Closes outbound calls whose provider request never resolved: claimed a while ago, no provider id.
-   * Not scheduled here (there is no scheduler yet); safe to run from a job or by hand, and safe to repeat.
-   * A call that does exist at the provider is met with a hang-up when answered, because the session is over.
+   * Converges dials whose outcome was never learned (the provider's response was lost, or the process died
+   * mid-request). It only ever *asks the provider what exists*: it never creates a call, never redials, and never
+   * turns "I do not know" into "failed". For each eligible session, at most one reconciler (the row lock) takes
+   * the attempt; then:
+   * - exactly one provider call can be ours: its id is attached and the session follows the provider's state;
+   * - a call turns up but the session was already ended locally: the id is attached and the call is hung up once;
+   *   the session is never moved out of its terminal state;
+   * - nothing is found and the provider cannot vouch for that: it stays `unconfirmed` (until attempts run out);
+   * - nothing is found and the provider guarantees it would have been listed: `failed`, `rejected`;
+   * - several candidates: ambiguous, never guessed.
+   * Bounded by batch size, a grace period (> the dial timeout, so an in-flight request is never raced) and a maximum number of attempts.
    */
-  async reconcileUnconfirmedDials(options: { olderThanMs?: number; limit?: number } = {}): Promise<number> {
-    const before = new Date(this.now().getTime() - (options.olderThanMs ?? 10 * 60_000));
-    const stale = await this.store.listUnconfirmedDials(before, options.limit ?? 50);
-    let closed = 0;
-    for (const session of stale) {
-      const result = await this.transition(session.id, 'failed', { mode: 'lenient', reason: 'dial_unconfirmed' });
-      if (result.outcome === 'applied') closed += 1;
+  async reconcileUnconfirmedDials(options: ReconciliationOptions = {}): Promise<ReconciliationReport> {
+    const provider = this.options.provider;
+    const dialTimeout = this.options.dialTimeoutMs ?? DEFAULT_DIAL_TIMEOUT_MS;
+    const graceMs = Math.max(options.graceMs ?? DEFAULT_RECONCILIATION_GRACE_MS, dialTimeout * 2);
+    const maxAttempts = options.maxAttempts ?? DEFAULT_RECONCILIATION_MAX_ATTEMPTS;
+    const retryIntervalMs = options.retryIntervalMs ?? DEFAULT_RECONCILIATION_RETRY_MS;
+    const limit = Math.max(1, Math.min(options.limit ?? DEFAULT_RECONCILIATION_BATCH, MAX_RECONCILIATION_BATCH));
+    const report: ReconciliationReport = { examined: 0, skipped: 0, confirmed: 0, rejected: 0, stillUnconfirmed: 0, failed: 0, cancelledAtProvider: 0, unresolved: 0, exhausted: 0 };
+    const now = this.now();
+    const claimedBefore = new Date(now.getTime() - graceMs);
+    const attemptedBefore = new Date(now.getTime() - retryIntervalMs);
+    const candidates = provider ? await this.store.listReconcilableDials({ claimedBefore, attemptedBefore, maxAttempts, limit }) : [];
+
+    const deadline = now.getTime() + (options.budgetMs ?? DEFAULT_RECONCILIATION_BUDGET_MS);
+    for (const candidate of candidates) {
+      if (this.now().getTime() > deadline) break;
+      report.examined += 1;
+      const claim = await claimReconciliation(this.store, candidate.id, { now: this.now(), claimedBefore, attemptedBefore, maxAttempts });
+      if (!claim.claimed || !claim.session) { report.skipped += 1; continue; }
+      try {
+        const verdict = await this.reconcileOne(provider!, claim.session, claim.attempt, maxAttempts);
+        report[verdict] += 1;
+        if (verdict === 'cancelledAtProvider') report.confirmed += 1;
+      } catch (error) {
+        report.failed += 1;
+        this.log('error', 'call.reconciliation.failed', claim.session, { attempt: claim.attempt, maxAttempts, error: safeError(error) });
+      }
     }
-    return closed;
+    const counts = await this.store.countUnresolvedDials(maxAttempts);
+    report.unresolved = counts.unresolved;
+    report.exhausted = counts.exhausted;
+    this.log('info', 'call.reconciliation.summary', null, { ...report });
+    return report;
+  }
+
+  private async reconcileOne(
+    provider: CallProvider, session: CallSessionRecord, attempt: number, maxAttempts: number,
+  ): Promise<'confirmed' | 'rejected' | 'stillUnconfirmed' | 'cancelledAtProvider'> {
+    this.log('info', 'call.reconciliation.started', session, { attempt, maxAttempts, to: maskPhone(session.to), from: maskPhone(session.from) });
+    const claimedAt = session.dialClaimedAt!;
+    // The provider created any call of ours after we claimed the dial (allowing for clock skew) and within a bounded time.
+    const lookup = await provider.findDialedCalls({
+      from: session.from!, to: session.to!,
+      createdAfter: new Date(claimedAt.getTime() - RECONCILIATION_CLOCK_SKEW_MS),
+      createdBefore: new Date(claimedAt.getTime() + RECONCILIATION_LOOKUP_WINDOW_MS),
+    });
+
+    let candidates = lookup.outcome === 'found' ? lookup.calls : [];
+    // A provider call another session already owns is not ours.
+    const unclaimed = [];
+    for (const call of candidates) {
+      const owner = await this.store.findByProviderCallId(provider.name, call.providerCallId);
+      if (!owner || owner.id === session.id) unclaimed.push(call);
+    }
+    candidates = unclaimed;
+
+    if (candidates.length === 0 && lookup.outcome === 'not_found' && lookup.conclusive) {
+      await this.store.mutate(session.id, (current) => (current.providerCallId || current.dialOutcome === 'rejected' ? { patch: null } : { patch: { dialOutcome: 'rejected' as const } }));
+      await this.transition(session.id, 'failed', { mode: 'lenient', reason: 'provider_has_no_such_call' });
+      this.log('warn', 'call.reconciliation.rejected', session, { attempt, maxAttempts });
+      return 'rejected';
+    }
+    if (candidates.length !== 1) {
+      this.log('warn', 'call.reconciliation.still_unconfirmed', session, {
+        attempt, maxAttempts, exhausted: attempt >= maxAttempts, reason: candidates.length === 0 ? 'not_found' : 'ambiguous', candidates: candidates.length,
+      });
+      return 'stillUnconfirmed';
+    }
+
+    const [found] = candidates;
+    let attached = false;
+    let conflicting = false;
+    const result = await this.store.mutate(session.id, (current) => {
+      if (current.providerCallId) {
+        conflicting = current.providerCallId !== found.providerCallId;
+        return { patch: null };
+      }
+      attached = true;
+      return { patch: { providerCallId: found.providerCallId, dialOutcome: 'accepted' as const } };
+    });
+    if (!result) throw new CallNotFoundError();
+    if (conflicting) {
+      this.log('error', 'call.outbound.provider_id_conflict', result.session, { attempt });
+      return 'stillUnconfirmed';
+    }
+    // Attached by the callback, the answer webhook or a late response in the meantime: already converged; only catch up.
+    let cancelled = false;
+    if (isTerminal(result.session.status)) {
+      // The call was ended locally while its dial was unknown. Never resurrect it: hang the provider call up, once (by whoever attached it).
+      const live = found.status === null ? false : !isTerminal(found.status);
+      if (attached && live) {
+        const mode = found.status === 'initiating' || found.status === 'ringing' ? 'cancel' : 'complete';
+        await provider.endCall(found.providerCallId, { mode }).then(() => { cancelled = true; }, (error) =>
+          this.log('error', 'call.reconciliation.failed', result.session, { attempt, maxAttempts, step: 'end_discovered_call', error: safeError(error) }));
+      }
+    } else if (found.status) {
+      await this.transition(session.id, found.status, { mode: 'lenient', reason: 'reconciled' });
+    }
+    this.log('info', 'call.reconciliation.confirmed', result.session, { attempt, maxAttempts, providerStatus: found.status, endedAtProvider: cancelled });
+    return cancelled ? 'cancelledAtProvider' : 'confirmed';
   }
 
   /** Where an account's outbound calls still in progress are going (for the duplicate-destination rule). */

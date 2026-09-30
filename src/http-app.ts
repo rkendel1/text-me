@@ -1,5 +1,6 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { toDataURL } from 'qrcode';
 import {
@@ -115,6 +116,10 @@ export interface AppOptions {
   callProvider?: CallProvider;
   /** Let agents place outbound calls through `call.create`. Off unless a deployment turns it on. */
   outboundAgentCalls?: boolean;
+  /** Authenticates Vercel Cron (`Authorization: Bearer <CRON_SECRET>`). Unset: the cron routes refuse every request. */
+  cronSecret?: string;
+  /** Bounds for reconciling outbound dials whose outcome was never learned. Enabled unless turned off. */
+  callReconciliation?: { enabled?: boolean; batchSize?: number; graceMs?: number; maxAttempts?: number; retryIntervalMs?: number };
   /** Replaces the default outbound policy (tests, or a stricter deployment). */
   outboundPolicy?: OutboundPolicy;
   /** Account phone numbers (assistant lines and verified personal numbers). */
@@ -720,6 +725,31 @@ export function createApp(options: AppOptions): express.Express {
       });
     });
   }
+  // Vercel Cron: GET with `Authorization: Bearer <CRON_SECRET>`. Fails closed: no configured secret, no access.
+  // Reconciliation only asks the provider what exists; nothing here can create a call.
+  app.get('/api/internal/cron/reconcile-calls', async (request, response, next) => {
+    try {
+      const secret = options.cronSecret;
+      const presented = bearerToken(request);
+      const digest = (value: string) => createHash('sha256').update(value).digest();
+      if (!secret || !presented || !timingSafeEqual(digest(secret), digest(presented))) {
+        response.status(secret ? 401 : 503).json({ error: secret ? 'Unauthorized' : 'Cron is not configured' });
+        return;
+      }
+      const settings = options.callReconciliation ?? {};
+      if (settings.enabled === false) {
+        response.json({ status: 'disabled' });
+        return;
+      }
+      const report = await callSessions.reconcileUnconfirmedDials({
+        limit: settings.batchSize, graceMs: settings.graceMs, maxAttempts: settings.maxAttempts, retryIntervalMs: settings.retryIntervalMs,
+      });
+      response.json({ status: 'ok', ...report });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use(express.json({ verify: (request, _response, buffer) => {
     (request as Request & { rawBody?: string }).rawBody = buffer.toString('utf8');
   } }));

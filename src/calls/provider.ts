@@ -34,6 +34,33 @@ export class CallProviderUnconfirmedError extends Error {
   }
 }
 
+/** What a provider reports about one call it holds, in the domain's vocabulary. */
+export interface ProviderCallObservation {
+  providerCallId: string;
+  /** The call's state, already translated to the domain (`null`: a state the domain does not model). */
+  status: import('./model.js').CallSessionStatus | null;
+  /** When the provider created the call. */
+  createdAt: Date;
+}
+
+/**
+ * What a provider can say about a call we asked for but never heard back about.
+ * - `found`: calls the provider holds that match the request. The caller decides whether they identify ours.
+ * - `not_found`: none match. `conclusive` is true only when the provider guarantees a call that was accepted
+ *   would be listed by now; otherwise absence proves nothing (propagation delay, filter granularity).
+ */
+export type ProviderCallLookup =
+  | { outcome: 'found'; calls: ProviderCallObservation[] }
+  | { outcome: 'not_found'; conclusive: boolean };
+
+export interface ProviderCallLookupInput {
+  from: string;
+  to: string;
+  /** Only calls the provider created within this window can be ours. */
+  createdAfter: Date;
+  createdBefore: Date;
+}
+
 export interface CallProvider {
   readonly name: string;
   /**
@@ -47,6 +74,11 @@ export interface CallProvider {
    * `complete` hangs up one that has.
    */
   endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void>;
+  /**
+   * Read-only. Looks for calls matching a dial whose response was lost. Never creates, changes or ends a call.
+   * Rejects when the provider cannot be asked (the outcome then stays unknown).
+   */
+  findDialedCalls(input: ProviderCallLookupInput): Promise<ProviderCallLookup>;
 }
 
 /** A provider stand-in for local development and tests: records what it was asked to do. */
@@ -78,9 +110,28 @@ export class FakeCallProvider implements CallProvider {
     this.created.push(structuredClone(input));
     this.counter += 1;
     const providerCallId = `CAfake${String(this.counter).padStart(14, '0')}${Math.random().toString(16).slice(2, 16).padEnd(14, '0')}`;
+    this.held.push({ providerCallId, from: input.from, to: input.to, status: 'initiating', createdAt: this.clock() });
     await this.duringCreate?.(providerCallId, input);
     if (this.loseResponse) throw new CallProviderUnconfirmedError('connection reset before the response arrived');
     return { providerCallId };
+  }
+
+  /** Calls the fake provider "holds": everything created, plus anything a test registers (its `createdAt` is when it was created). */
+  readonly held: Array<ProviderCallObservation & { from: string; to: string }> = [];
+  lookups: ProviderCallLookupInput[] = [];
+  failLookup?: Error;
+  /** What absence means for this fake (a real provider decides for itself). */
+  absenceIsConclusive = false;
+  /** The fake provider's clock, for `createdAt`; a test with a fake clock replaces it. */
+  clock: () => Date = () => new Date();
+
+  async findDialedCalls(input: ProviderCallLookupInput): Promise<ProviderCallLookup> {
+    this.lookups.push(input);
+    if (this.failLookup) throw this.failLookup;
+    const calls = this.held
+      .filter((call) => call.from === input.from && call.to === input.to && call.createdAt >= input.createdAfter && call.createdAt <= input.createdBefore)
+      .map(({ providerCallId, status, createdAt }) => ({ providerCallId, status, createdAt }));
+    return calls.length ? { outcome: 'found', calls } : { outcome: 'not_found', conclusive: this.absenceIsConclusive };
   }
 
   async endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void> {

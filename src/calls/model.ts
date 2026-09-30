@@ -67,6 +67,9 @@ export interface CallSessionRecord {
   /** Set by the one process that won the right to place this outbound call with the provider. */
   dialClaimedAt: Date | null;
   dialOutcome: DialOutcome | null;
+  /** How many times reconciliation has looked for this call at the provider after an unconfirmed dial. */
+  reconciliationAttempts: number;
+  lastReconciliationAt: Date | null;
 }
 
 /** What capabilities and clients see: no provider id, no idempotency or claim internals. */

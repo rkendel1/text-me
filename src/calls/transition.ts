@@ -169,3 +169,34 @@ export async function claimOutboundDial(
   if (!result) return { claimed: false, outcome: 'not_found', session: null };
   return { claimed: outcome === 'claimed', outcome, session: result.session };
 }
+
+export interface ReconciliationClaim {
+  /** True only for the one caller that may look this dial up now. */
+  claimed: boolean;
+  /** 1-based number of this reconciliation attempt (when claimed). */
+  attempt: number;
+  session: CallSessionRecord | null;
+}
+
+/**
+ * Takes one reconciliation attempt on an unresolved dial. The row lock makes it exclusive across instances and
+ * processes: the conditions are re-checked under the lock, the attempt is counted and timestamped in the same
+ * write, so a second reconciler arriving at once (or a run retried too soon) finds nothing to do. A dial that
+ * was only ever `pending` (the process died mid-request) is, from here on, `unconfirmed`.
+ */
+export async function claimReconciliation(
+  store: CallSessionStore,
+  id: string,
+  options: { now: Date; claimedBefore: Date; attemptedBefore: Date; maxAttempts: number },
+): Promise<ReconciliationClaim> {
+  let attempt = 0;
+  const result = await store.mutate(id, (current) => {
+    const unresolved = current.direction === 'outbound' && !current.providerCallId && !!current.dialClaimedAt &&
+      (current.dialOutcome === 'pending' || current.dialOutcome === 'unconfirmed');
+    if (!unresolved || current.dialClaimedAt! >= options.claimedBefore || current.reconciliationAttempts >= options.maxAttempts ||
+      (current.lastReconciliationAt && current.lastReconciliationAt >= options.attemptedBefore)) return { patch: null };
+    attempt = current.reconciliationAttempts + 1;
+    return { patch: { reconciliationAttempts: attempt, lastReconciliationAt: options.now, dialOutcome: 'unconfirmed' } };
+  }, { now: options.now });
+  return { claimed: attempt > 0, attempt, session: result?.session ?? null };
+}

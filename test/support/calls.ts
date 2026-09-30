@@ -36,6 +36,7 @@ export interface CallStackOptions {
 export function createCallStack(options: CallStackOptions = {}) {
   const store = options.store ?? new InMemoryCallSessionStore();
   const provider = options.provider ?? new FakeCallProvider();
+  if (options.now) provider.clock = options.now;
   const logs: Array<{ level: string; event: string; fields: Record<string, unknown> }> = [];
   const lines: Record<string, string> = { acct_a: LINE_A, acct_b: LINE_B };
   const calls: CallSessionService = new CallSessionService(store, {

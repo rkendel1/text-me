@@ -15,6 +15,8 @@ export interface CallSessionPatch {
   lastProviderStatus?: string | null;
   dialClaimedAt?: Date | null;
   dialOutcome?: DialOutcome | null;
+  reconciliationAttempts?: number;
+  lastReconciliationAt?: Date | null;
 }
 
 /** One provider callback, identified by the provider and its event id. */
@@ -51,6 +53,13 @@ export interface CallSessionFilter {
   after?: { createdAt: Date; id: string };
 }
 
+export interface ReconcilableDialCriteria {
+  claimedBefore: Date;
+  attemptedBefore: Date;
+  maxAttempts: number;
+  limit: number;
+}
+
 export interface CallSessionStore {
   /**
    * Inserts a new session. If one already exists for the same account + idempotency key, or the
@@ -66,8 +75,14 @@ export interface CallSessionStore {
   findByIdempotencyKey(accountId: string, idempotencyKey: string): Promise<CallSessionRecord | null>;
   /** Webhook-side lookup by our own id (a URL we gave the provider). Callers must check `accountId` themselves. */
   findById(id: string): Promise<CallSessionRecord | null>;
-  /** Outbound sessions whose dial was claimed before `claimedBefore` and never got a provider call id. */
-  listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]>;
+  /**
+   * Outbound dials whose outcome is still unknown: claimed before `claimedBefore`, never tied to a provider call,
+   * not yet proven accepted or rejected, reconciled fewer than `maxAttempts` times and not looked at since
+   * `attemptedBefore`. Whatever the session's local status is (it may have been ended meanwhile). Oldest first.
+   */
+  listReconcilableDials(criteria: ReconcilableDialCriteria): Promise<CallSessionRecord[]>;
+  /** Dials still unknown, and how many of them reconciliation has given up on (attempts used up). */
+  countUnresolvedDials(maxAttempts: number): Promise<{ unresolved: number; exhausted: number }>;
   findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null>;
   list(accountId: string, filter: CallSessionFilter): Promise<CallSessionRecord[]>;
   /**
@@ -81,6 +96,11 @@ export interface CallSessionStore {
     options?: { providerEvent?: ProviderEventInput; now?: Date },
   ): Promise<MutationResult | null>;
 }
+
+/** A dial that was claimed, is tied to no provider call, and is neither proven accepted nor proven rejected. */
+export const isUnresolvedDial = (record: CallSessionRecord): boolean =>
+  record.direction === 'outbound' && !record.providerCallId && !!record.dialClaimedAt &&
+  (record.dialOutcome === 'pending' || record.dialOutcome === 'unconfirmed');
 
 const matches = (record: CallSessionRecord, filter: CallSessionFilter): boolean =>
   (!filter.status?.length || filter.status.includes(record.status)) &&
@@ -129,12 +149,19 @@ export class InMemoryCallSessionStore implements CallSessionStore {
     return found ? structuredClone(found) : null;
   }
 
-  async listUnconfirmedDials(claimedBefore: Date, limit: number): Promise<CallSessionRecord[]> {
+  async listReconcilableDials(criteria: ReconcilableDialCriteria): Promise<CallSessionRecord[]> {
     return [...this.sessions.values()]
-      .filter((record) => record.status === 'initiating' && !record.providerCallId && record.dialClaimedAt && record.dialClaimedAt < claimedBefore)
+      .filter((record) => isUnresolvedDial(record) && record.dialClaimedAt! < criteria.claimedBefore &&
+        record.reconciliationAttempts < criteria.maxAttempts &&
+        (!record.lastReconciliationAt || record.lastReconciliationAt < criteria.attemptedBefore))
       .sort((left, right) => left.dialClaimedAt!.getTime() - right.dialClaimedAt!.getTime())
-      .slice(0, limit)
+      .slice(0, criteria.limit)
       .map((record) => structuredClone(record));
+  }
+
+  async countUnresolvedDials(maxAttempts: number): Promise<{ unresolved: number; exhausted: number }> {
+    const unresolved = [...this.sessions.values()].filter(isUnresolvedDial);
+    return { unresolved: unresolved.length, exhausted: unresolved.filter((record) => record.reconciliationAttempts >= maxAttempts).length };
   }
 
   async findByConversation(accountId: string, conversationId: string): Promise<CallSessionRecord | null> {

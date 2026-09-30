@@ -324,28 +324,6 @@ test('a provider that is too slow is treated as unknown, and if its answer lands
   assert.equal(stack.provider.attempts, 1);
 });
 
-test('unconfirmed dials that never resolve are closed by reconciliation, and a stray answer meets a dead session', async () => {
-  let clock = Date.parse('2026-06-01T12:00:00Z');
-  const stack = createCallStack({ now: () => new Date(clock) });
-  stack.provider.loseResponse = true;
-  const lost = await stack.adminA.create({ direction: 'outbound', to: '+15551230000' }, { idempotencyKey: uniq('rec1') });
-  stack.provider.loseResponse = false;
-  const fine = await stack.adminA.create({ direction: 'outbound', to: '+15551230001' }, { idempotencyKey: uniq('rec2') });
-
-  clock += 60_000;
-  assert.equal(await stack.calls.reconcileUnconfirmedDials({ olderThanMs: 10 * 60_000 }), 0, 'not yet stale');
-  clock += 15 * 60_000;
-  assert.equal(await stack.calls.reconcileUnconfirmedDials({ olderThanMs: 10 * 60_000 }), 1, 'only the call that never got a provider id');
-  assert.equal(await stack.calls.reconcileUnconfirmedDials({ olderThanMs: 10 * 60_000 }), 0, 'repeatable');
-  const closed = await stack.adminA.get({ callId: lost.callId });
-  assert.equal(closed.status, 'failed');
-  assert.equal(closed.endReason, 'dial_unconfirmed');
-  assert.equal((await stack.adminA.get({ callId: fine.callId })).status, 'initiating');
-  // If the call did exist after all, its late id is recorded but it is cancelled rather than allowed to ring.
-  await stack.calls.adoptDialedCall(lost.callId, 'CAstray0000000000000000000000000001');
-  assert.equal((await stack.calls.get('acct_a', lost.callId)).status, 'failed');
-});
-
 // ---------- Callback races, in every ordering ----------
 
 test('callbacks that arrive before our own request returns still converge (and never regress the call)', async () => {
@@ -565,13 +543,15 @@ test('Postgres: the claim, the outcome and the migration behave as the in-memory
   assert.equal(row.dial_outcome, 'pending');
   assert.ok(row.dial_claimed_at);
   const columns = (await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'call_sessions'`)).rows.map((r) => r.column_name);
-  for (const column of ['objective', 'dial_claimed_at', 'dial_outcome']) assert.ok(columns.includes(column), column);
+  for (const column of ['objective', 'dial_claimed_at', 'dial_outcome', 'reconciliation_attempts', 'last_reconciliation_at']) assert.ok(columns.includes(column), column);
   await assert.rejects(pool.query(`UPDATE call_sessions SET dial_outcome = 'nonsense' WHERE id = $1`, [planned.id]), /violates check constraint/);
   const indexes = (await pool.query(`SELECT indexname FROM pg_indexes WHERE tablename = 'call_sessions'`)).rows.map((r) => r.indexname);
   assert.ok(indexes.includes('idx_call_sessions_unconfirmed_dial'));
+  assert.ok(indexes.includes('idx_call_sessions_dial_reconciliation'));
   // Unconfirmed-dial lookup uses it: only claimed, unresolved, old enough.
-  const old = await store.listUnconfirmedDials(new Date(Date.now() + 60_000), 100);
+  const criteria = { claimedBefore: new Date(Date.now() + 60_000), attemptedBefore: new Date(Date.now() + 60_000), maxAttempts: 5, limit: 100 };
+  const old = await store.listReconcilableDials(criteria);
   assert.ok(old.some((session) => session.id === planned.id));
   await stack.calls.attachProviderCall(planned.id, uniq('CA'));
-  assert.ok(!(await store.listUnconfirmedDials(new Date(Date.now() + 60_000), 100)).some((session) => session.id === planned.id));
+  assert.ok(!(await store.listReconcilableDials(criteria)).some((session) => session.id === planned.id));
 });
