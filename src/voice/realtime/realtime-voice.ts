@@ -93,9 +93,11 @@ export class RealtimeVoiceService {
           return;
         }
         const services = this.services;
+        const callSessionId = message.start?.customParameters?.callSessionId;
         let unsubscribe = () => {};
         const starting = new RealtimeCallBridge(conversationId, this.connector, services, socket, {
           voice: this.options.voice,
+          ...(callSessionId ? { callSessionId } : {}),
           onCommandApplied: (commandId) => services.runtime.markCommandAppliedLive(commandId, conversationId),
           onClosed: (closed) => {
             unsubscribe();
@@ -114,6 +116,7 @@ export class RealtimeVoiceService {
           await services.repository.appendEvent(conversationId, 'voice.completed', {
             source: 'realtime', outcome: 'failed', error: error instanceof Error ? error.message : 'unknown',
           }, new Date()).catch(() => undefined);
+          await services.calls?.markFailed(callSessionId, 'voice_start_failed');
           await services.conversations.raiseAttention(conversationId, {
             type: 'error',
             title: () => 'Your assistant needs attention',

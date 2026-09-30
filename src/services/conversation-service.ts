@@ -1,7 +1,7 @@
 import type { Conversation, ConversationStatus } from '../domain/conversation.js';
 import { HttpError } from '../errors.js';
 import type { ConversationRepository } from '../repositories/conversation-repository.js';
-import type { IncomingCall, IncomingSms, StatusUpdate } from '../telephony/provider.js';
+import type { IncomingCall, IncomingSms } from '../telephony/provider.js';
 import type { AccountMessaging } from '../messaging/provider.js';
 import type { OwnerAttentionService, RaiseAttentionInput } from '../attention/service.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
@@ -36,6 +36,15 @@ function canTransition(
   next: ConversationStatus,
 ): boolean {
   return allowedTransitions[current].includes(next);
+}
+
+/** What a provider callback means for the owner-facing conversation (a projection of the CallSession lifecycle). */
+export interface ConversationCallUpdate {
+  provider: string;
+  providerCallId: string;
+  lifecycle: 'answered' | 'completed';
+  durationSeconds: number | null;
+  payload: Record<string, unknown>;
 }
 
 export class ConversationService {
@@ -321,7 +330,12 @@ export class ConversationService {
     return this.requireConversation(conversation.id);
   }
 
-  async updateCallStatus(input: StatusUpdate): Promise<Conversation> {
+  /** The conversation for a provider's call id, if the application has one. */
+  findByProviderCall(provider: string, providerCallId: string): Promise<Conversation | null> {
+    return this.repository.getByProviderCallId(provider, providerCallId);
+  }
+
+  async updateCallStatus(input: ConversationCallUpdate): Promise<Conversation> {
     const conversation = await this.repository.getByProviderCallId(
       input.provider,
       input.providerCallId,
@@ -331,7 +345,7 @@ export class ConversationService {
       throw new HttpError(404, 'Conversation not found for provider call');
     }
 
-    if (input.status === 'answered') {
+    if (input.lifecycle === 'answered') {
       return this.answerCall(conversation.id, input.payload);
     }
 

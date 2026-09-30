@@ -1,5 +1,7 @@
 import twilio from 'twilio';
 
+import { mapTwilioCallStatus, mapTwilioDirection, twilioProviderEventId } from '../calls/provider-status.js';
+
 import type { Conversation } from '../domain/conversation.js';
 import { HttpError } from '../errors.js';
 import { normalizePhoneNumber } from '../lib/phone.js';
@@ -41,21 +43,11 @@ export interface TwilioVoiceOptions {
   turnUrl?: string;
 }
 
+/** Webhook parsing and TwiML for Twilio. Placing and ending calls lives in `TwilioCallProvider`. */
 export class TwilioProvider implements TelephonyProvider {
   readonly name = 'twilio';
-  readonly endCall?: (providerCallId: string) => Promise<void>;
 
-  constructor(
-    private readonly voice: TwilioVoiceOptions = {},
-    credentials?: { accountSid: string; authToken: string },
-  ) {
-    if (credentials) {
-      const client = twilio(credentials.accountSid, credentials.authToken);
-      this.endCall = async (providerCallId) => {
-        await client.calls(providerCallId).update({ status: 'completed' });
-      };
-    }
-  }
+  constructor(private readonly voice: TwilioVoiceOptions = {}) {}
 
   parseIncomingCall(payload: unknown): IncomingCall {
     const record = asRecord(payload);
@@ -68,6 +60,7 @@ export class TwilioProvider implements TelephonyProvider {
       providerCallId,
       callerPhone,
       ...(calledNumber ? { calledNumber } : {}),
+      direction: mapTwilioDirection(record.Direction),
       payload: record,
     };
   }
@@ -75,34 +68,27 @@ export class TwilioProvider implements TelephonyProvider {
   parseStatusUpdate(payload: unknown): StatusUpdate {
     const record = asRecord(payload);
     const providerCallId = requiredString(record, 'CallSid');
-    const callStatus = requiredString(record, 'CallStatus').toLowerCase();
+    const rawStatus = requiredString(record, 'CallStatus').toLowerCase();
     const rawDuration = record.CallDuration;
     const durationSeconds =
-      typeof rawDuration === 'string' && rawDuration !== ''
+      typeof rawDuration === 'string' && rawDuration !== '' && Number.isFinite(Number(rawDuration))
         ? Number(rawDuration)
         : null;
+    const sequence = record.SequenceNumber;
+    const timestamp = record.Timestamp;
 
-    if (callStatus === 'in-progress' || callStatus === 'answered') {
-      return {
-        provider: this.name,
-        providerCallId,
-        status: 'answered',
-        durationSeconds,
-        payload: record,
-      };
-    }
-
-    if (callStatus === 'completed') {
-      return {
-        provider: this.name,
-        providerCallId,
-        status: 'completed',
-        durationSeconds,
-        payload: record,
-      };
-    }
-
-    throw new HttpError(400, `Unsupported Twilio call status: ${callStatus}`);
+    return {
+      provider: this.name,
+      providerCallId,
+      eventId: twilioProviderEventId(record),
+      rawStatus,
+      // A status the domain does not model is data, not an error: the webhook must not 400 over it.
+      status: mapTwilioCallStatus(rawStatus),
+      sequence: typeof sequence === 'string' || typeof sequence === 'number' ? String(sequence) : null,
+      providerTimestamp: typeof timestamp === 'string' ? timestamp : null,
+      durationSeconds,
+      payload: record,
+    };
   }
 
   parseIncomingSms(payload: unknown): IncomingSms {
@@ -117,11 +103,12 @@ export class TwilioProvider implements TelephonyProvider {
     };
   }
 
-  answerCall(conversation?: Conversation, options: { greeting?: string } = {}): ProviderResponse {
+  answerCall(conversation?: Conversation, options: { greeting?: string; callSessionId?: string } = {}): ProviderResponse {
     const response = new twilio.twiml.VoiceResponse();
     if (this.voice.mediaStreamUrl && conversation) {
       const stream = response.connect().stream({ url: this.voice.mediaStreamUrl });
       stream.parameter({ name: 'conversationId', value: conversation.id });
+      if (options.callSessionId) stream.parameter({ name: 'callSessionId', value: options.callSessionId });
       if (this.voice.continueUrl) {
         response.redirect({ method: 'POST' }, `${this.voice.continueUrl}?conversationId=${encodeURIComponent(conversation.id)}`);
       } else {

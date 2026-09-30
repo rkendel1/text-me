@@ -4,19 +4,22 @@ import { presentConversationSummary } from '../../http/presenters.js';
 import type { ConversationRepository } from '../../repositories/conversation-repository.js';
 import type { RuntimeControlService } from '../../runtime/service.js';
 import type { ConversationService } from '../../services/conversation-service.js';
+import type { CallSessionService } from '../../calls/service.js';
 import type {
   RealtimeConnection,
   RealtimeConnector,
   RealtimeServerEvent,
 } from './connector.js';
 import type { OwnerConfiguration } from '../../owner/configuration.js';
-import { buildSessionConfig, relayInstructions, type CallToolName } from './session-config.js';
+import { buildSessionConfig, outboundOpeningInstruction, relayInstructions, type CallContext, type CallToolName } from './session-config.js';
 
 export interface CallBridgeServices {
   repository: ConversationRepository;
   runtime: RuntimeControlService;
   conversations: ConversationService;
   configuration: OwnerConfigurationService;
+  /** The durable CallSessions. Optional so a bridge can run without them (and tests that don't need them). */
+  calls?: CallSessionService;
 }
 
 /** The server side of a Twilio bidirectional media stream. */
@@ -45,6 +48,10 @@ export class RealtimeCallBridge {
   private runtimeSnapshot?: ConversationRuntime;
   private configuration?: OwnerConfiguration;
   private accountId?: string;
+  /** Set only once the session is confirmed to be this conversation's. The stream never decides lifecycle; it reports it. */
+  private callSessionId?: string;
+  /** What the verified CallSession says about this call: outbound calls are told so, and why. */
+  private callContext?: CallContext;
   private paused = false;
   private closing = false;
   private hangupWhenIdle = false;
@@ -66,6 +73,8 @@ export class RealtimeCallBridge {
     private readonly socket: MediaStreamSocket,
     private readonly options: {
       voice?: string;
+      /** The CallSession this media stream belongs to, from the stream's start parameters. Verified before use. */
+      callSessionId?: string;
       onClosed?: (bridge: RealtimeCallBridge) => void;
       /** Called once an owner command has actually been applied to this live call. */
       onCommandApplied?: (commandId: string) => void | Promise<void>;
@@ -79,6 +88,7 @@ export class RealtimeCallBridge {
     if (!conversation.accountId) throw new Error(`Conversation ${this.conversationId} has no account`);
     // The call runs as its conversation's account: its settings, its owner's name, its commands only.
     this.accountId = conversation.accountId;
+    await this.attachCallSession(conversation.accountId);
     const runtime = await this.services.runtime.getRuntimeForConversation(conversation);
     const configuration = await this.services.configuration.get(conversation.accountId);
     this.runtimeSnapshot = runtime;
@@ -86,7 +96,7 @@ export class RealtimeCallBridge {
     this.paused = runtime.state === 'paused' || runtime.state === 'stopped' || !runtime.assistantEnabled;
     this.sequence = conversation.events.length + 1000;
     this.connection = await this.connector.connect(
-      await buildSessionConfig(runtime, configuration, this.options.voice),
+      await buildSessionConfig(runtime, configuration, this.options.voice, this.callContext),
       {
         onEvent: (event) => this.onModelEvent(event),
         onClose: (reason) => this.onModelClosed(reason),
@@ -99,8 +109,25 @@ export class RealtimeCallBridge {
       ...(callSid ? { callSid } : {}),
     }, new Date());
     if (!this.paused && runtime.aiMode !== 'owner_only') {
-      await this.requestResponse(`Greet the caller now with: "${configuration.assistant.greeting}"`);
+      await this.requestResponse(this.callContext?.direction === 'outbound'
+        ? outboundOpeningInstruction(configuration.assistant.ownerName)
+        : `Greet the caller now with: "${configuration.assistant.greeting}"`);
     }
+  }
+
+  /** The stream's callSessionId is a claim: it counts only if that session is this conversation's, in this account. */
+  private async attachCallSession(accountId: string): Promise<void> {
+    const { calls } = this.services;
+    const claimed = this.options.callSessionId;
+    if (!calls || !claimed) return;
+    const session = await calls.get(accountId, claimed).catch(() => null);
+    if (!session || session.conversationId !== this.conversationId) {
+      console.error(`[call ${this.conversationId}] ignored a media stream claiming a call session that is not this call's`);
+      return;
+    }
+    this.callSessionId = session.id;
+    this.callContext = { direction: session.direction, objective: session.objective };
+    await calls.markInProgress(session.id);
   }
 
   // ----- Twilio side -----
@@ -208,7 +235,7 @@ export class RealtimeCallBridge {
     this.configuration = configuration;
     await this.connection.send({
       type: 'session-update',
-      config: await buildSessionConfig(runtime, configuration, this.options.voice),
+      config: await buildSessionConfig(runtime, configuration, this.options.voice, this.callContext),
     });
   }
 
@@ -482,6 +509,9 @@ export class RealtimeCallBridge {
       await this.services.repository.appendEvent(this.conversationId, 'voice.completed', {
         source: 'realtime', outcome,
       }, new Date());
+      // The CallSession records how the runtime's part ended; the provider's final callback completes it.
+      if (outcome === 'failed') await this.services.calls?.markFailed(this.callSessionId, 'voice_runtime_failed');
+      else await this.services.calls?.markEnding(this.callSessionId, 'media_stream_ended');
     });
     this.options.onClosed?.(this);
   }

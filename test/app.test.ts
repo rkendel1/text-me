@@ -8,6 +8,7 @@ import { onboardTenant } from './support/tenant.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
 import { InMemoryNotificationDeliveryStore, InMemoryOwnerAttentionStore } from '../src/attention/stores.js';
 import { TwilioProvider } from '../src/telephony/twilio-provider.js';
+import { FakeCallProvider } from '../src/calls/provider.js';
 import { FakeConversationModel } from '../src/conversation/fake-model.js';
 import { FakeSpeechProvider } from '../src/speech/fake-provider.js';
 import { FakeVoiceProvider } from '../src/voice/fake-provider.js';
@@ -669,16 +670,10 @@ test('a queued owner decision is spoken on the next turn of an active voice call
 });
 
 test('Stop terminates the provider call and an in-flight voice turn cannot continue it', async () => {
-  const ended: string[] = [];
-  const provider = new TwilioProvider(
-    { turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' },
-    // A structural test double: TwilioProvider only needs an end-call function here.
-    undefined,
-  );
-  Object.defineProperty(provider, 'endCall', {
-    value: async (providerCallId: string) => { ended.push(providerCallId); },
-  });
-  const { app, auth, owner, repository } = await ownedApp({ providers: [provider] });
+  // Calls are ended through the call provider boundary, never by reaching into the Twilio SDK.
+  const callProvider = new FakeCallProvider();
+  const provider = new TwilioProvider({ turnUrl: 'https://text-me.example.test/webhooks/twilio/voice/turn' });
+  const { app, auth, owner, repository } = await ownedApp({ providers: [provider], callProvider });
   await request(app).post('/webhooks/twilio/voice').type('form')
     .send({ CallSid: 'CA-STOP-NOW', From: '+15555550123', To: owner.line });
   const [conversation] = await repository.list(owner.accountId);
@@ -686,7 +681,7 @@ test('Stop terminates the provider call and an in-flight voice turn cannot conti
   const stopped = await request(app).post(`/conversations/${conversation.id}/runtime/stop`).set(auth).send({});
   assert.equal(stopped.status, 200, JSON.stringify(stopped.body));
   assert.equal(stopped.body.state, 'stopped');
-  assert.deepEqual(ended, ['CA-STOP-NOW']);
+  assert.deepEqual(callProvider.ended, [{ providerCallId: 'CA-STOP-NOW', mode: 'complete' }]);
 
   const lateTurn = await request(app)
     .post(`/webhooks/twilio/voice/turn?conversationId=${encodeURIComponent(conversation.id)}&turn=2`)

@@ -1,0 +1,95 @@
+From b6b978a31cb12ed32c8c357305b1d1a49dc543e5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 30 Sep 2026 22:39:20 +0000
+Subject: [PATCH] mcp: carry idempotency key, timeout and trace id through
+ callTool
+
+createMcpBridge().callTool built its request from only requestId, capability
+and input, so AppPort's idempotency (spec 13.1), deadline (13.3) and trace
+(20) metadata could not reach a capability over MCP, and a retried tool call
+to a consequential capability ran again. callTool now takes an optional
+McpCallMeta and places it on the envelope like any other caller.
+---
+ packages/mcp/src/index.ts        | 22 +++++++++++++++++++---
+ packages/mcp/test/bridge.test.ts | 18 ++++++++++++++++++
+ 2 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/packages/mcp/src/index.ts b/packages/mcp/src/index.ts
+index a51fad7..176ced9 100644
+--- a/packages/mcp/src/index.ts
++++ b/packages/mcp/src/index.ts
+@@ -84,9 +84,22 @@ export function toMcpTools(manifest: AppPortManifest, options: McpBridgeOptions
+  * dispatch pipeline — validation, authorization, telemetry — is unchanged, so
+  * an agent has exactly the access its session grants and no more.
+  */
++/**
++ * Request metadata for one tool call, carried on the AppPort envelope exactly as any other caller would
++ * carry it. A `tools/call` request's `_meta` is the natural source; nothing here is MCP-specific.
++ */
++export interface McpCallMeta {
++  /** Deduplicates a consequential capability (§13.1). Without it, a retried tool call runs again. */
++  idempotencyKey?: string;
++  /** Requested deadline in milliseconds (§13.3). */
++  timeoutMs?: number;
++  /** Correlation id propagated to the response, events and telemetry (§20). */
++  traceId?: string;
++}
++
+ export interface McpBridge {
+   listTools(): McpTool[];
+-  callTool(name: string, args: unknown): Promise<McpToolResult>;
++  callTool(name: string, args: unknown, meta?: McpCallMeta): Promise<McpToolResult>;
+ }
+ 
+ export function createMcpBridge(
+@@ -99,7 +112,7 @@ export function createMcpBridge(
+   return {
+     listTools: tools,
+ 
+-    async callTool(name: string, args: unknown): Promise<McpToolResult> {
++    async callTool(name: string, args: unknown, meta: McpCallMeta = {}): Promise<McpToolResult> {
+       const tool = tools().find((entry) => entry.name === name);
+       if (!tool) {
+         return {
+@@ -112,7 +125,10 @@ export function createMcpBridge(
+         createRequest({
+           requestId: newRequestId(),
+           capability: { name: tool._appport.capability, version: tool._appport.version },
+-          input: args ?? {}
++          input: args ?? {},
++          ...(meta.idempotencyKey ? { idempotencyKey: meta.idempotencyKey } : {}),
++          ...(meta.timeoutMs ? { timeoutMs: meta.timeoutMs } : {}),
++          ...(meta.traceId ? { traceId: meta.traceId } : {})
+         }),
+         { transport: "mcp", ...dispatch }
+       );
+diff --git a/packages/mcp/test/bridge.test.ts b/packages/mcp/test/bridge.test.ts
+index 403c4f6..9c7ebd1 100644
+--- a/packages/mcp/test/bridge.test.ts
++++ b/packages/mcp/test/bridge.test.ts
+@@ -39,4 +39,22 @@ describe("mcp bridge", () => {
+     expect(result.isError).toBe(true);
+     expect(result.content[0]!.text).toContain("INVALID_INPUT");
+   });
++
++  it("carries idempotency, trace and timeout metadata through to dispatch", async () => {
++    const save = (meta?: Parameters<typeof bridge.callTool>[2]) =>
++      bridge.callTool("documents_save", { documentId: "doc_meta", content: "x" }, meta);
++
++    // Without a key a retried tool call runs again; with one it is replayed, not re-executed.
++    const first = JSON.parse((await save()).content[0]!.text).version as number;
++    const second = JSON.parse((await save()).content[0]!.text).version as number;
++    expect(second).toBe(first + 1);
++
++    const keyed = JSON.parse((await save({ idempotencyKey: "mcp-once" })).content[0]!.text).version as number;
++    const retried = JSON.parse((await save({ idempotencyKey: "mcp-once" })).content[0]!.text).version as number;
++    expect(retried).toBe(keyed);
++    expect(fixture.telemetry.entries.at(-1)?.idempotentReplay).toBe(true);
++
++    await save({ traceId: "trace-from-mcp", timeoutMs: 1000 });
++    expect(fixture.telemetry.entries.at(-1)?.traceId).toBe("trace-from-mcp");
++  });
+ });
+-- 
+2.43.0
+

@@ -44,6 +44,15 @@ export interface AppConfig {
   twilioAuthToken: string;
   /** Let accounts buy a new assistant line when the platform's pool of numbers is empty. */
   allowNumberPurchase: boolean;
+  /**
+   * Let agents place outbound calls through the `call.create` capability. Off unless OUTBOUND_AGENT_CALLS=on. It does not
+   * affect the owner's own "test call", and it is not a consent or compliance system (see docs/call-session.md).
+   */
+  outboundAgentCalls: boolean;
+  /** Shared secret Vercel Cron sends as `Authorization: Bearer <CRON_SECRET>`. Without it the cron routes refuse every request. */
+  cronSecret?: string;
+  /** Reconciliation of outbound dials whose outcome was never learned. It only looks calls up; it never dials. */
+  outboundCallReconciliation: { enabled: boolean; batchSize: number; graceSeconds: number };
   /** Enable SMS verification only after the sending numbers are registered for local messaging rules. */
   allowSmsVerification: boolean;
   /** A2P-registered sender pool used for every onboarding verification text. */
@@ -180,6 +189,13 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     allowSmsVerification: env.TELEPHONY_SMS_VERIFICATION === 'on',
+    outboundAgentCalls: env.OUTBOUND_AGENT_CALLS === 'on',
+    cronSecret: env.CRON_SECRET || undefined,
+    outboundCallReconciliation: {
+      enabled: env.OUTBOUND_CALL_RECONCILIATION_ENABLED !== 'off',
+      batchSize: boundedInt(env.OUTBOUND_CALL_RECONCILIATION_BATCH_SIZE, 25, 1, 100),
+      graceSeconds: boundedInt(env.OUTBOUND_CALL_RECONCILIATION_GRACE_SECONDS, 120, 60, 3600),
+    },
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID?.trim() || undefined,
     twilioVerifyServiceSid: env.TWILIO_VERIFY_SERVICE_SID?.trim() || undefined,
     realtimeVoice: resolveRealtimeVoice(env),
@@ -189,4 +205,10 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       publishableKey: env.STRIPE_PUBLISHABLE_KEY?.trim(),
     } : undefined,
   };
+}
+
+/** An integer from the environment, clamped to [min, max]; the default when absent or not a number. */
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = Number(raw);
+  return raw && Number.isFinite(value) ? Math.max(min, Math.min(max, Math.trunc(value))) : fallback;
 }
