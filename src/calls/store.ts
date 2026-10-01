@@ -120,6 +120,11 @@ export class InMemoryCallSessionStore implements CallSessionStore {
   private readonly sessions = new Map<string, CallSessionRecord>();
   private readonly events = new Map<string, { outcome?: string }>();
 
+  /** Every session held (for the in-memory cost ledger's joins). */
+  all(): CallSessionRecord[] {
+    return [...this.sessions.values()].map((record) => structuredClone(record));
+  }
+
   async insert(record: CallSessionRecord): Promise<{ session: CallSessionRecord; created: boolean }> {
     const existing = [...this.sessions.values()].find((candidate) =>
       (record.providerCallId !== null && candidate.provider === record.provider && candidate.providerCallId === record.providerCallId) ||

@@ -78,6 +78,9 @@ import { isTerminal } from './calls/model.js';
 import { DefaultOutboundPolicy, type OutboundPolicy } from './calls/outbound-policy.js';
 import { FakeCallProvider, type CallProvider } from './calls/provider.js';
 import { CallSessionService } from './calls/service.js';
+import { CallCostLedger } from './calls/cost/ledger.js';
+import type { PriceBook } from './calls/cost/pricing.js';
+import { InMemoryCallUsageStore, type CallUsageStore } from './calls/cost/store.js';
 import { InMemoryCallSessionStore, type CallSessionStore } from './calls/store.js';
 
 export interface AppOptions {
@@ -112,6 +115,10 @@ export interface AppOptions {
   pushSender?: PushSender;
   /** Durable CallSessions: the canonical record of every call, inbound or outbound. */
   callSessionStore?: CallSessionStore;
+  /** The durable cost ledger (usage and what it was priced at). Defaults to an in-memory one. */
+  callUsageStore?: CallUsageStore;
+  /** What usage costs. Defaults to the reference price book (see `src/billing/call-reference-rates.ts`). */
+  priceBook?: PriceBook;
   /** Places and ends calls at the telephony provider (Twilio in production). */
   callProvider?: CallProvider;
   /** Let agents place outbound calls through `call.create`. Off unless a deployment turns it on. */
@@ -402,6 +409,7 @@ function registerStatusRoute(
         status: update.status,
         sequence: update.sequence,
         providerTimestamp: update.providerTimestamp,
+        durationSeconds: update.durationSeconds,
         traceId,
       });
       const current = conversation ?? (session.conversationId ? await service.getConversation(session.conversationId) : null);
@@ -529,7 +537,13 @@ export function createApp(options: AppOptions): express.Express {
   // CallSessions: the durable record of every call. One AppPort application exposes the operations on it; the
   // voice runtime and the control plane reach it in-process, and the MCP projection (src/appport/mcp.ts) reaches the same one.
   const publicOrigin = options.publicBaseUrl ?? 'http://localhost:3000';
-  const callSessions: CallSessionService = new CallSessionService(options.callSessionStore ?? new InMemoryCallSessionStore(), {
+  const sessionStore = options.callSessionStore ?? new InMemoryCallSessionStore();
+  const callUsage = new CallCostLedger(
+    options.callUsageStore ?? new InMemoryCallUsageStore(() => (sessionStore instanceof InMemoryCallSessionStore ? sessionStore.all() : [])),
+    { priceBook: options.priceBook },
+  );
+  const callSessions: CallSessionService = new CallSessionService(sessionStore, {
+    usage: callUsage,
     provider: options.callProvider ?? new FakeCallProvider(),
     assistantLine: (accountId) => phoneNumbers.assistantLine(accountId),
     // Whether and from where an outbound call may be placed: decided before anything is created or dialed.
@@ -547,9 +561,9 @@ export function createApp(options: AppOptions): express.Express {
     }),
   });
   phoneNumbers.bindCallSessions(callSessions);
-  const callApplication = createCallApplication({ calls: callSessions });
+  const callApplication = createCallApplication({ calls: callSessions, usage: callUsage });
   // In-process access to the call capabilities (no HTTP round trip) for code that owns the app: the voice runtime, the control plane, tests.
-  app.locals.appport = { calls: callApplication };
+  app.locals.appport = { calls: callApplication, usage: callUsage };
   const ownerDeliveries = options.ownerDeliveryStore ?? new InMemoryOwnerMessageDeliveryStore();
   const runtime = options.runtimeControlService ?? new RuntimeControlService(
     options.repository,
@@ -663,6 +677,7 @@ export function createApp(options: AppOptions): express.Express {
     conversations: service,
     configuration: ownerConfiguration,
     calls: callSessions,
+    usage: callUsage,
   });
   const presentVoice = (conversation: Conversation) => ({
     realtime: Boolean(realtimeVoice),
@@ -725,17 +740,20 @@ export function createApp(options: AppOptions): express.Express {
       });
     });
   }
+  /** Vercel Cron's own mechanism: `Authorization: Bearer <CRON_SECRET>`, compared in constant time. No secret configured: nothing is allowed. */
+  const authorizeCron = (request: Request, response: Response): boolean => {
+    const secret = options.cronSecret;
+    const presented = bearerToken(request);
+    const digest = (value: string) => createHash('sha256').update(value).digest();
+    if (secret && presented && timingSafeEqual(digest(secret), digest(presented))) return true;
+    response.status(secret ? 401 : 503).json({ error: secret ? 'Unauthorized' : 'Cron is not configured' });
+    return false;
+  };
   // Vercel Cron: GET with `Authorization: Bearer <CRON_SECRET>`. Fails closed: no configured secret, no access.
   // Reconciliation only asks the provider what exists; nothing here can create a call.
   app.get('/api/internal/cron/reconcile-calls', async (request, response, next) => {
     try {
-      const secret = options.cronSecret;
-      const presented = bearerToken(request);
-      const digest = (value: string) => createHash('sha256').update(value).digest();
-      if (!secret || !presented || !timingSafeEqual(digest(secret), digest(presented))) {
-        response.status(secret ? 401 : 503).json({ error: secret ? 'Unauthorized' : 'Cron is not configured' });
-        return;
-      }
+      if (!authorizeCron(request, response)) return;
       const settings = options.callReconciliation ?? {};
       if (settings.enabled === false) {
         response.json({ status: 'disabled' });
@@ -744,6 +762,18 @@ export function createApp(options: AppOptions): express.Express {
       const report = await callSessions.reconcileUnconfirmedDials({
         limit: settings.batchSize, graceMs: settings.graceMs, maxAttempts: settings.maxAttempts, retryIntervalMs: settings.retryIntervalMs,
       });
+      response.json({ status: 'ok', ...report });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Asks the carrier for the settled usage of calls that have ended. Read-only at the carrier; bounded; safe to repeat.
+  app.get('/api/internal/cron/finalize-call-usage', async (request, response, next) => {
+    try {
+      if (!authorizeCron(request, response)) return;
+      const provider = options.callProvider;
+      const report = provider ? await callUsage.finalizeCompletedCalls(provider, { limit: options.callReconciliation?.batchSize }) : { examined: 0, recorded: 0, duplicates: 0, notReady: 0, failed: 0 };
       response.json({ status: 'ok', ...report });
     } catch (error) {
       next(error);
@@ -1169,6 +1199,11 @@ export function createApp(options: AppOptions): express.Express {
       const recordingUrl = typeof request.body?.RecordingUrl === 'string' ? request.body.RecordingUrl : '';
       if (!conversationId || !recordingUrl) throw new HttpError(400, 'conversationId and RecordingUrl are required');
       const duration = Number(request.body?.RecordingDuration ?? 0);
+      // The recording is a carrier-billed product on the call it belongs to.
+      const recordingSid = typeof request.body?.RecordingSid === 'string' ? request.body.RecordingSid : '';
+      const conversation = recordingSid && Number.isFinite(duration) ? await service.getConversation(conversationId) : null;
+      const call = conversation?.accountId ? await callSessions.findByConversation(conversation.accountId, conversationId).catch(() => null) : null;
+      if (call) await callUsage.recordRecording(call, { recordingSid, seconds: duration }).catch((error) => console.error('[call] usage', error instanceof Error ? error.message : 'unknown'));
       await service.recordEvent(conversationId, 'voicemail.recorded', {
         recordingUrl, recordingSid: request.body?.RecordingSid, durationSeconds: Number.isFinite(duration) ? duration : null,
       });

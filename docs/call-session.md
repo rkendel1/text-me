@@ -243,6 +243,10 @@ Created on first use with the repository's existing convention (`CREATE TABLE IF
 - `call_provider_events (provider, event_id)` primary key, cascade-deleted with the session.
 - Indexes, each tied to a query: unique `(provider, provider_call_id)` (webhook lookup and one session per provider call); unique `(account_id, idempotency_key)` (retry lands on the same call); `(account_id, created_at DESC, id DESC)` (`call.list` keyset paging); `(account_id, status, created_at DESC)` (`call.list` by status); `(conversation_id)` (owner Stop resolves a conversation's call); `call_provider_events (call_session_id)` (cascade and diagnostics).
 
+## Cost
+
+Every call's usage and cost live in a separate append-only ledger that references `CallSession.id`; `call.get` exposes the summary. See [`call-cost-ledger.md`](call-cost-ledger.md).
+
 ## Observability
 
 `src/calls/log.ts`: one JSON line per event through `console` (the repository's existing convention, tagged `[call]`), always carrying `callId`,

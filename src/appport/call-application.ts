@@ -10,6 +10,7 @@ import {
   CallTransitionError,
   isTerminal,
   presentCallSession,
+  type CallSessionRecord,
   type CallSessionView,
 } from '../calls/model.js';
 import {
@@ -22,6 +23,8 @@ import {
   type CallActor,
   type CallSessionService,
 } from '../calls/service.js';
+import type { CallCostLedger } from '../calls/cost/ledger.js';
+import { USAGE_BASES, USAGE_CATEGORIES } from '../calls/cost/model.js';
 import { CALL_APPLICATION_ID, CALL_PERMISSIONS } from './session.js';
 
 /** The transport the in-process client declares. Anything else, MCP included, cannot place calls. */
@@ -33,6 +36,25 @@ const DEFAULT_POLL_INTERVAL_MS = 500;
 
 const status = s.enum(CALL_SESSION_STATUSES);
 const direction = s.enum(CALL_DIRECTIONS as readonly ['inbound', 'outbound']);
+
+/**
+ * What a call has cost so far, derived from its durable usage ledger (never authoritative on its own: the ledger is).
+ * `estimatedCost` is the best current figure; `finalCost` exists only once every observed usage is authoritative and priced.
+ */
+const costView = s.object({
+  currency: s.string(),
+  status: s.enum(['unknown', 'estimated', 'final'] as const),
+  estimatedCost: s.nullable(s.number()),
+  finalCost: s.nullable(s.number()),
+  breakdown: s.array(s.object({
+    category: s.enum(USAGE_CATEGORIES),
+    amount: s.nullable(s.number()),
+    basis: s.enum(USAGE_BASES),
+    unpriced: s.integer({ minimum: 0 }),
+  })),
+  unpricedUsage: s.integer({ minimum: 0 }),
+  derived: s.boolean('True when part of the figure is derived from the call\'s lifecycle times because no usage had been recorded.'),
+}, { title: 'CallCost' });
 
 /** What every call capability returns for a call: no provider id, no internals. */
 const callView = s.object({
@@ -59,6 +81,8 @@ const callView = s.object({
    * will not be placed again. `null`: nothing was placed for this call.
    */
   execution: s.nullable(s.enum(DIAL_OUTCOMES)),
+  /** Only `call.get` fills this, and only when a cost ledger is configured. Absent elsewhere. */
+  cost: s.optional(costView),
 }, { title: 'Call' });
 
 /**
@@ -75,6 +99,8 @@ const durableIdempotencyOnly: IdempotencyStore = {
 
 export interface CallApplicationOptions {
   calls: CallSessionService;
+  /** The cost ledger `call.get` reads from. Without one, calls carry no cost. */
+  usage?: CallCostLedger;
   /** How often `call.get` re-reads while waiting. Tests shorten it. */
   pollIntervalMs?: number;
 }
@@ -128,6 +154,16 @@ const date = (value: string | undefined, field: string): Date | undefined => {
   if (Number.isNaN(parsed.getTime())) throw errors.invalidInput(`${field} must be an ISO-8601 timestamp.`);
   return parsed;
 };
+
+/** A call's cost for the view. A ledger that cannot be read leaves the call readable, without a cost. */
+async function summarizeCall(usage: CallCostLedger, session: CallSessionRecord): Promise<CallSessionView['cost']> {
+  try {
+    const { callId: _callId, ...cost } = await usage.summarize(session);
+    return cost;
+  } catch {
+    return undefined;
+  }
+}
 
 const sleep = (ms: number, signal: AbortSignal): Promise<void> =>
   new Promise((resolve) => {
@@ -208,7 +244,9 @@ export function createCallApplication(options: CallApplicationOptions): AppPortA
             session = await calls.get(accountId, input.callId);
           }
         }
-        return presentCallSession(session);
+        const view = presentCallSession(session);
+        // The same authorized read: the call was just loaded for this account, so its cost is this account's cost.
+        return options.usage ? { ...view, cost: await summarizeCall(options.usage, session) } : view;
       });
     },
   });

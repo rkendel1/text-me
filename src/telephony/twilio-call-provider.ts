@@ -2,7 +2,7 @@ import twilio from 'twilio';
 
 import {
   CallProviderRejectedError, CallProviderUnconfirmedError,
-  type CallProvider, type CallProviderCreateInput, type ProviderCallLookup, type ProviderCallLookupInput,
+  type CallProvider, type CallProviderCreateInput, type ProviderCallLookup, type ProviderCallLookupInput, type ProviderUsageReport,
 } from '../calls/provider.js';
 import { mapTwilioCallStatus } from '../calls/provider-status.js';
 
@@ -57,6 +57,29 @@ export class TwilioCallProvider implements CallProvider {
       .filter((call) => call.dateCreated >= input.createdAfter && call.dateCreated <= input.createdBefore)
       .map((call) => ({ providerCallId: call.sid, status: mapTwilioCallStatus(String(call.status)), createdAt: call.dateCreated }));
     return calls.length ? { outcome: 'found', calls } : { outcome: 'not_found', conclusive: false };
+  }
+
+  /**
+   * Read-only (`client.calls(sid).fetch()`). Twilio's call resource carries the connected `duration` (seconds) and,
+   * once it has been rated, `price` with `priceUnit` (Twilio reports a charge as a negative number). A call that has
+   * not been rated yet reports a duration only, which is an interim figure: it is returned as `estimated`. How long
+   * Twilio takes to rate a call is not verified here.
+   */
+  async getCallUsage(providerCallId: string): Promise<ProviderUsageReport | null> {
+    const call = await this.client.calls(providerCallId).fetch();
+    const seconds = call.duration === null || call.duration === undefined || call.duration === '' ? NaN : Number(call.duration);
+    if (!Number.isFinite(seconds)) return null;
+    const price = call.price === null || call.price === undefined || call.price === '' ? NaN : Number(call.price);
+    const rated = Number.isFinite(price) && typeof call.priceUnit === 'string' && call.priceUnit !== '';
+    return {
+      providerCallId,
+      observations: [{
+        key: 'duration', category: 'telephony', product: String(call.direction ?? '').toLowerCase().startsWith('outbound') ? 'voice_outbound' : 'voice_inbound',
+        metric: 'duration', quantity: seconds, unit: 'second', basis: rated ? 'final' : 'estimated',
+        ...(rated ? { reportedAmount: Math.abs(price), currency: String(call.priceUnit).toUpperCase() } : {}),
+        metadata: { twilioStatus: call.status ?? null },
+      }],
+    };
   }
 
   async endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void> {

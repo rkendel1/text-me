@@ -41,6 +41,7 @@ import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
 import { TwilioCallProvider } from './telephony/twilio-call-provider.js';
 import { PostgresCallSessionStore } from './repositories/postgres-call-session-repository.js';
+import { PostgresCallUsageStore } from './repositories/postgres-call-usage-repository.js';
 import { createGateway } from 'ai';
 
 import { AiSdkTextAgent } from './conversation/ai-sdk-text-agent.js';
@@ -169,6 +170,7 @@ export function buildServerWithPool(
     // The one place calls are placed and ended at Twilio; CallSessions are the durable record of them.
     callProvider: new TwilioCallProvider(config.twilioAccountSid, config.twilioAuthToken),
     callSessionStore: stores.callSessionStore,
+    callUsageStore: stores.callUsageStore,
     outboundAgentCalls: config.outboundAgentCalls,
     cronSecret: config.cronSecret,
     callReconciliation: { enabled: config.outboundCallReconciliation.enabled, batchSize: config.outboundCallReconciliation.batchSize, graceMs: config.outboundCallReconciliation.graceSeconds * 1000 },
@@ -217,6 +219,7 @@ export function createStores(pool: Pool, config: Pick<AppConfig, 'databaseListen
   const runtimeEventBus = new PostgresRuntimeEventBus(pool, config.databaseListenUrl);
   const authSessions = new PostgresAuthSessionStore(pool);
   const callSessionStore = new PostgresCallSessionStore(pool);
+  const callUsageStore = new PostgresCallUsageStore(pool);
   const initialize = async () => {
     await tenancyStore.initialize();
     await repository.initialize();
@@ -235,10 +238,11 @@ export function createStores(pool: Pool, config: Pick<AppConfig, 'databaseListen
     await appSecrets.initialize();
     await authSessions.initialize();
     await callSessionStore.initialize();
+    await callUsageStore.initialize();
   };
   return {
     pool, tenancyStore, repository, ownerDeviceStore, ownerPairings, ownerSessions, ownerConfigurations, ownerDeliveries,
     runtimeStore, runtimeEvents, runtimeOverrides, runtimeCommands, attentionStore, notificationDeliveries, surfaceDevices,
-    appSecrets, runtimeEventBus, authSessions, callSessionStore, initialize,
+    appSecrets, runtimeEventBus, authSessions, callSessionStore, callUsageStore, initialize,
   };
 }
