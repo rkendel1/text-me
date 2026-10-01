@@ -126,6 +126,12 @@ export interface CallCostSummary {
   /** The authoritative figure. Only present when `status` is `final`. */
   finalCost: number | null;
   breakdown: CostBreakdownEntry[];
+  /** The part of the figure that is authoritative (settled and priced), whether or not the rest is. `null` when none of it is. */
+  authoritativeCost: number | null;
+  /** Categories still estimated that the provider or runtime can yet settle: waiting, not wrong. */
+  pending: UsageCategory[];
+  /** Categories that can only ever be estimates (nothing authoritative exists per call, or the figure was unavailable). They keep the call from ever being `final`. */
+  nonFinalizable: UsageCategory[];
   /** Usage observed but not priced (no rate configured), so the totals above exclude it. */
   unpricedUsage: number;
   /** True when part of the figure was derived from the call's lifecycle times because no usage had been recorded. */

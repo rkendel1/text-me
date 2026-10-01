@@ -89,6 +89,12 @@ export interface ProviderUsageReport {
 export interface CallProvider {
   readonly name: string;
   /**
+   * The usage categories this provider can report an authoritative (settled) figure for through `getCallUsage`.
+   * Usage in any other category that the application observes itself can only ever be an estimate, and is
+   * reported as such rather than left looking pending.
+   */
+  readonly authoritativeUsage: readonly import('./cost/model.js').UsageCategory[];
+  /**
    * Places an outbound call. Resolves with the provider's id for it. Rejects with
    * `CallProviderRejectedError` when the provider definitively refused, and with anything else
    * (typically `CallProviderUnconfirmedError`) when the outcome is unknown.
@@ -114,6 +120,8 @@ export interface CallProvider {
 /** A provider stand-in for local development and tests: records what it was asked to do. */
 export class FakeCallProvider implements CallProvider {
   readonly name: string;
+  /** What this fake can settle; a test narrows or widens it. */
+  authoritativeUsage: readonly import('./cost/model.js').UsageCategory[] = ['telephony', 'recording'];
   readonly created: CallProviderCreateInput[] = [];
   readonly ended: Array<{ providerCallId: string; mode: 'cancel' | 'complete' }> = [];
   failEnd?: Error;

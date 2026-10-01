@@ -46,7 +46,22 @@ function deriveTelephony(call: Call, book: PriceBook, now: Date): UsageRecord | 
 }
 
 /** What a call has cost, from its recorded usage (and, failing any carrier usage, from its lifecycle times). */
-export function summarizeCost(call: Call, records: readonly UsageRecord[], book: PriceBook, now: Date): CallCostSummary {
+/** Categories whose settled figure comes from the AI runtime itself (the model vendor's own report), not from the carrier. */
+const RUNTIME_SETTLED: ReadonlySet<UsageCategory> = new Set(['ai_voice', 'ai_reasoning', 'transcription', 'tts']);
+
+export interface SummaryOptions {
+  /** The categories the carrier can settle per call. Absent: every category is assumed settle-able, so none is called non-finalizable. */
+  carrierSettles?: ReadonlySet<UsageCategory>;
+}
+
+/** An estimate that can never become authoritative: the provider has no per-call figure for it, or the figure was unavailable. */
+export function isNonFinalizable(event: UsageEvent, options: SummaryOptions): boolean {
+  if (event.basis === 'final') return false;
+  if (event.metadata.unavailable === true) return true;
+  return !!options.carrierSettles && !options.carrierSettles.has(event.category) && !RUNTIME_SETTLED.has(event.category);
+}
+
+export function summarizeCost(call: Call, records: readonly UsageRecord[], book: PriceBook, now: Date, options: SummaryOptions = {}): CallCostSummary {
   const effective = effectiveRecords(records);
   let derived = false;
   if (!effective.some((record) => record.event.category === 'telephony')) {
@@ -55,7 +70,10 @@ export function summarizeCost(call: Call, records: readonly UsageRecord[], book:
   }
   const currency = effective.find((record) => record.component.currency)?.component.currency ?? 'USD';
   const byCategory = new Map<UsageCategory, { amount: number | null; final: boolean; unpriced: number }>();
+  const pending = new Set<UsageCategory>();
+  const nonFinalizable = new Set<UsageCategory>();
   let total: number | null = null;
+  let authoritative: number | null = null;
   let unpricedUsage = 0;
   for (const { event, component } of effective) {
     const entry = byCategory.get(event.category) ?? { amount: null, final: true, unpriced: 0 };
@@ -63,11 +81,15 @@ export function summarizeCost(call: Call, records: readonly UsageRecord[], book:
     if (priced) {
       entry.amount = (entry.amount ?? 0) + component.amount!;
       total = (total ?? 0) + component.amount!;
+      if (event.basis === 'final') authoritative = (authoritative ?? 0) + component.amount!;
     } else {
       entry.unpriced += 1;
       unpricedUsage += 1;
     }
-    if (event.basis !== 'final') entry.final = false;
+    if (event.basis !== 'final') {
+      entry.final = false;
+      (isNonFinalizable(event, options) ? nonFinalizable : pending).add(event.category);
+    }
     byCategory.set(event.category, entry);
   }
   const breakdown: CostBreakdownEntry[] = [...byCategory].map(([category, entry]) => ({
@@ -77,6 +99,7 @@ export function summarizeCost(call: Call, records: readonly UsageRecord[], book:
     : isTerminal(call.status) && !derived && unpricedUsage === 0 && effective.every((record) => record.event.basis === 'final') ? 'final' : 'estimated';
   return {
     callId: call.id, currency, status, breakdown, unpricedUsage, derived,
+    authoritativeCost: authoritative === null ? null : round6(authoritative), pending: [...pending], nonFinalizable: [...nonFinalizable],
     estimatedCost: total === null ? null : round6(total),
     finalCost: status === 'final' && total !== null ? round6(total) : null,
   };

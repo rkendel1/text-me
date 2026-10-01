@@ -469,16 +469,21 @@ test('the stream records what the model reported for each response, and how long
   service.connector.emit(done('resp-1', reported));
   service.connector.emit(done('resp-1', reported));
   service.connector.emit(done('resp-2'));
-  await eventually(async () => (await entries()).length === 4, 'AI usage recorded');
+  await eventually(async () => (await entries()).length === 5, 'AI usage recorded');
   await new Promise((resolve) => setTimeout(resolve, 50));
   const rows = await entries();
-  assert.equal(rows.length, 4, 'four dimensions once each; the replay and the response with no usage add nothing');
-  assert.deepEqual(rows.map((row) => row.event.metric).sort(), ['audio_input_tokens', 'audio_output_tokens', 'text_input_tokens', 'text_output_tokens']);
-  assert.ok(rows.every((row) => row.event.category === 'ai_voice' && row.event.provider === 'openai' && row.event.model === 'gpt-realtime-2' && row.event.basis === 'final'));
+  assert.equal(rows.length, 5, 'four dimensions once each (the replay adds nothing), plus one marker that a response reported no usage');
+  const marker = rows.find((row) => row.event.metadata.unavailable === true)!;
+  assert.deepEqual([marker.event.basis, marker.component.rateSource, marker.event.metric], ['estimated', 'unpriced', 'invocation'], 'unavailable usage is marked, never derived');
+  const reportedRows = rows.filter((row) => row !== marker);
+  assert.deepEqual(reportedRows.map((row) => row.event.metric).sort(), ['audio_input_tokens', 'audio_output_tokens', 'text_input_tokens', 'text_output_tokens']);
+  assert.ok(reportedRows.every((row) => row.event.category === 'ai_voice' && row.event.provider === 'openai' && row.event.model === 'gpt-realtime-2' && row.event.basis === 'final'));
   assert.ok(rows.every((row) => row.component.rateSource === 'unpriced'), 'no AI rate is configured by default: recorded, not guessed');
 
   twilio.send({ event: 'stop', streamSid: 'MZ123' });
   await eventually(async () => (await entries()).some((row) => row.event.category === 'media'), 'media stream recorded');
   const media = (await entries()).find((row) => row.event.category === 'media')!;
   assert.deepEqual([media.event.product, media.event.metric, media.event.basis, media.event.source], ['media_stream', 'duration', 'estimated', 'media_stream']);
+  const summary = await usage.summarize(session);
+  assert.ok(summary.nonFinalizable.includes('ai_voice') && summary.nonFinalizable.includes('media'), 'unavailable AI usage and media both keep the call from being final');
 });

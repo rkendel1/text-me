@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 
 import type { CallSessionRecord } from '../calls/model.js';
 import type { CostComponent, UsageEvent, UsageRecord } from '../calls/cost/model.js';
-import type { AwaitingFinalUsageQuery, CallUsageStore, CostRow, CostRowQuery } from '../calls/cost/store.js';
+import type { CallUsageStore, CostRow, CostRowQuery, FinalizationQuery, FinalizationState } from '../calls/cost/store.js';
 import { PostgresCallSessionStore } from './postgres-call-session-repository.js';
 import { migrate } from './schema-lock.js';
 
@@ -90,6 +90,15 @@ export class PostgresCallUsageStore implements CallUsageStore {
       // A call's ledger (call.get), and an account's usage over time (aggregation).
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_usage_call ON call_usage_events (account_id, call_session_id)');
       await db.query('CREATE INDEX IF NOT EXISTS idx_call_usage_account_time ON call_usage_events (account_id, occurred_at)');
+      // Operational bookkeeping for asking the carrier about a call: attempts and when. Unlike the ledger it is updated in place.
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS call_usage_finalization (
+          call_session_id TEXT PRIMARY KEY REFERENCES call_sessions(id),
+          attempts INTEGER NOT NULL,
+          last_attempt_at TIMESTAMPTZ NOT NULL,
+          last_outcome TEXT
+        );
+      `);
       // Finalization looks for calls with no authoritative telephony usage.
       await db.query(`CREATE INDEX IF NOT EXISTS idx_call_usage_final_telephony ON call_usage_events (call_session_id) WHERE basis = 'final' AND category = 'telephony'`);
     });
@@ -134,34 +143,73 @@ export class PostgresCallUsageStore implements CallUsageStore {
   }
 
   async listCostRows(query: CostRowQuery): Promise<CostRow[]> {
-    const result = await this.pool.query<Row & { s_direction: CostRow['direction']; s_status: CostRow['outcome']; s_provider: string; s_created_at: Date }>(
+    const result = await this.pool.query<Row & { s_direction: CostRow['direction']; s_status: CostRow['outcome']; s_provider: string; s_created_at: Date; s_answered_at: Date | null; s_ended_at: Date | null }>(
       `SELECT e.*, c.id AS c_id, c.amount AS c_amount, c.currency AS c_currency, c.rate_source AS c_rate_source, c.rate_id AS c_rate_id,
               c.rate AS c_rate, c.rate_per AS c_rate_per, c.rate_unit AS c_rate_unit, c.priced_quantity AS c_priced_quantity, c.priced_at AS c_priced_at,
-              s.direction AS s_direction, s.status AS s_status, s.provider AS s_provider, s.created_at AS s_created_at
+              s.direction AS s_direction, s.status AS s_status, s.provider AS s_provider, s.created_at AS s_created_at, s.answered_at AS s_answered_at, s.ended_at AS s_ended_at
          FROM call_usage_events e
          JOIN call_cost_components c ON c.usage_event_id = e.id
          JOIN call_sessions s ON s.id = e.call_session_id AND s.account_id = e.account_id
-        WHERE e.account_id = $1 AND ($2::timestamptz IS NULL OR e.occurred_at >= $2) AND ($3::timestamptz IS NULL OR e.occurred_at < $3)
+        WHERE ($1::text IS NULL OR e.account_id = $1) AND ($2::timestamptz IS NULL OR e.occurred_at >= $2) AND ($3::timestamptz IS NULL OR e.occurred_at < $3)
         ORDER BY e.occurred_at, e.id LIMIT $4`,
-      [query.accountId, query.from ?? null, query.to ?? null, query.limit],
+      [query.accountId ?? null, query.from ?? null, query.to ?? null, query.limit],
     );
     return result.rows.map((row) => ({
-      record: toRecord(row), direction: row.s_direction, outcome: row.s_status, callProvider: row.s_provider, callCreatedAt: new Date(row.s_created_at),
+      record: toRecord(row),
+      call: { id: row.call_session_id, accountId: row.account_id, direction: row.s_direction, status: row.s_status, provider: row.s_provider, answeredAt: row.s_answered_at ? new Date(row.s_answered_at) : null, endedAt: row.s_ended_at ? new Date(row.s_ended_at) : null },
+      direction: row.s_direction, outcome: row.s_status, callProvider: row.s_provider, callCreatedAt: new Date(row.s_created_at),
     }));
   }
 
-  async findCallsAwaitingFinalUsage(query: AwaitingFinalUsageQuery): Promise<CallSessionRecord[]> {
+  async findFinalizationCandidates(query: FinalizationQuery): Promise<CallSessionRecord[]> {
     const sessions = await this.pool.query<{ id: string }>(
-      `SELECT s.id FROM call_sessions s
+      `SELECT s.id FROM call_sessions s LEFT JOIN call_usage_finalization f ON f.call_session_id = s.id
         WHERE s.status IN ('completed', 'failed', 'no_answer', 'busy', 'canceled') AND s.provider_call_id IS NOT NULL
           AND s.ended_at >= $1 AND s.ended_at < $2
           AND NOT EXISTS (SELECT 1 FROM call_usage_events e WHERE e.call_session_id = s.id AND e.basis = 'final' AND e.category = 'telephony')
-        ORDER BY s.ended_at DESC LIMIT $3`,
-      [query.endedAfter, query.endedBefore, query.limit],
+          AND (f.call_session_id IS NULL OR (f.attempts < $4 AND f.last_attempt_at < $3))
+          AND ($6::text IS NULL OR s.account_id = $6)
+        ORDER BY f.last_attempt_at ASC NULLS FIRST, s.ended_at ASC LIMIT $5`,
+      [query.endedAfter, query.endedBefore, query.retryBefore, query.maxAttempts, query.limit, query.accountId ?? null],
     );
     if (sessions.rows.length === 0) return [];
     const store = new PostgresCallSessionStore(this.pool);
     const found = await Promise.all(sessions.rows.map((row) => store.findById(row.id)));
     return found.filter((session): session is CallSessionRecord => session !== null);
+  }
+
+  async claimFinalizationAttempt(callSessionId: string, claim: { now: Date; retryBefore: Date; maxAttempts: number }): Promise<number | null> {
+    // The row lock makes this exclusive: a second instance finds the attempt already taken (last_attempt_at is now) and gets nothing.
+    const result = await this.pool.query<{ attempts: number }>(
+      `INSERT INTO call_usage_finalization AS f (call_session_id, attempts, last_attempt_at) VALUES ($1, 1, $2)
+       ON CONFLICT (call_session_id) DO UPDATE SET attempts = f.attempts + 1, last_attempt_at = $2
+         WHERE f.attempts < $4 AND f.last_attempt_at < $3
+       RETURNING attempts`,
+      [callSessionId, claim.now, claim.retryBefore, claim.maxAttempts],
+    );
+    return result.rows[0]?.attempts ?? null;
+  }
+
+  async recordFinalizationOutcome(callSessionId: string, outcome: string): Promise<void> {
+    await this.pool.query('UPDATE call_usage_finalization SET last_outcome = $2 WHERE call_session_id = $1', [callSessionId, outcome]);
+  }
+
+  async getFinalizationState(callSessionId: string): Promise<FinalizationState | null> {
+    const result = await this.pool.query('SELECT * FROM call_usage_finalization WHERE call_session_id = $1', [callSessionId]);
+    const row = result.rows[0];
+    return row ? { callSessionId, attempts: row.attempts, lastAttemptAt: new Date(row.last_attempt_at), lastOutcome: row.last_outcome } : null;
+  }
+
+  async finalizationBacklog(query: { endedAfter: Date; maxAttempts: number; accountId?: string }): Promise<{ pending: number; exhausted: number }> {
+    const result = await this.pool.query<{ pending: string; exhausted: string }>(
+      `SELECT count(*) FILTER (WHERE COALESCE(f.attempts, 0) < $2 AND s.ended_at >= $1) AS pending,
+              count(*) FILTER (WHERE COALESCE(f.attempts, 0) >= $2) AS exhausted
+         FROM call_sessions s LEFT JOIN call_usage_finalization f ON f.call_session_id = s.id
+        WHERE s.status IN ('completed', 'failed', 'no_answer', 'busy', 'canceled') AND s.provider_call_id IS NOT NULL AND s.ended_at IS NOT NULL
+          AND ($3::text IS NULL OR s.account_id = $3)
+          AND NOT EXISTS (SELECT 1 FROM call_usage_events e WHERE e.call_session_id = s.id AND e.basis = 'final' AND e.category = 'telephony')`,
+      [query.endedAfter, query.maxAttempts, query.accountId ?? null],
+    );
+    return { pending: Number(result.rows[0].pending), exhausted: Number(result.rows[0].exhausted) };
   }
 }

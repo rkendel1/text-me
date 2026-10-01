@@ -252,7 +252,7 @@ test('media stream and recording usage are recorded as observed, as estimates', 
   const c = call();
   await ledger.recordMediaStream(c, { streamSid: 'MZ1', seconds: 570, startedAt: T0 });
   await ledger.recordMediaStream(c, { streamSid: 'MZ1', seconds: 570, startedAt: T0 });
-  await ledger.recordRecording(c, { recordingSid: 'RE1', seconds: 60 });
+  await ledger.recordRecording(c, { recordingSid: 'RE1', seconds: 60, providerCallId: 'CAr' });
   const summary = await ledger.summarize(c);
   const by = Object.fromEntries(summary.breakdown.map((entry) => [entry.category, entry]));
   assert.equal(by.media.amount, 0.04180, '9.5 minutes at 0.0044');
@@ -323,8 +323,8 @@ const assertNormalized = (observation: ProviderUsageObservation) => {
   if (observation.reportedAmount !== undefined) assert.ok(observation.reportedAmount >= 0 && observation.currency, 'a reported charge is absolute and has a currency');
 };
 
-const twilioStub = (call: Record<string, unknown> | null) => new TwilioCallProvider('AC', 'token', {
-  client: { calls: Object.assign(() => ({ fetch: async () => call, update: async () => undefined }), { create: async () => { throw new Error('no'); }, list: async () => [] }) } as unknown as TwilioCallsClient,
+const twilioStub = (call: Record<string, unknown> | null, recordings: Array<Record<string, unknown>> = []) => new TwilioCallProvider('AC', 'token', {
+  client: { calls: Object.assign(() => ({ fetch: async () => call, update: async () => undefined, recordings: { list: async () => recordings } }), { create: async () => { throw new Error('no'); }, list: async () => [] }) } as unknown as TwilioCallsClient,
 });
 
 /** What every CallProvider must satisfy for the cost ledger. A future carrier's adapter is run through this same function. */
@@ -475,6 +475,9 @@ test('finalization asks the carrier for settled usage on ended calls, once each,
   assert.deepEqual([first.examined, first.recorded, first.notReady, first.failed], [3, 2, 2, 0]);
   const done = await stack.usage.summarize((await stack.store.findById(sessions[0]))!);
   assert.deepEqual([done.status, done.finalCost], ['final', 0.14]);
+  const immediately = await stack.usage.finalizeCompletedCalls(provider);
+  assert.equal(immediately.examined, 0, 'a call is asked at most once per retry interval');
+  clock += 61 * 60_000;
   const second = await stack.usage.finalizeCompletedCalls(provider);
   assert.equal(second.examined, 2, 'the settled call is not asked about again');
   assert.equal(second.recorded, 0, 'a repeat records nothing');
@@ -499,6 +502,7 @@ test('finalization survives a provider that errors, and records nothing for it',
   const report = await stack.usage.finalizeCompletedCalls(provider);
   assert.deepEqual([report.examined, report.failed, report.recorded], [1, 1, 0]);
   provider.failUsage = undefined;
+  clock += 61 * 60_000;
   provider.usageReports.set('CAerr', { providerCallId: 'CAerr', observations: [{ key: 'duration', category: 'telephony', product: 'voice_outbound', metric: 'duration', quantity: 30, unit: 'second', basis: 'final', reportedAmount: 0.007, currency: 'USD' }] });
   assert.equal((await stack.usage.finalizeCompletedCalls(provider)).recorded, 1, 'the next run catches up');
 });
@@ -591,13 +595,14 @@ test('Postgres: two instances finalizing the same ended call at once record one 
     const provider = new FakeCallProvider();
     const one = createCallStack({ store: sessions, usageStore: usage, provider });
     const two = createCallStack({ store: sessions, usageStore: usage, provider });
-    const created = await one.calls.create({ accountId: uniq('acct') }, { direction: 'outbound', to: freshNumber(), from: '+15550001000' });
+    const accountId = uniq('acct');
+    const created = await one.calls.create({ accountId }, { direction: 'outbound', to: freshNumber(), from: '+15550001000' });
     const sid = uniq('CAfinal');
     await one.calls.attachProviderCall(created.id, sid);
     for (const next of ['initiating', 'ringing', 'completed'] as const) await one.calls.transition(created.id, next, { mode: 'lenient' });
     await pool.query(`UPDATE call_sessions SET ended_at = now() - interval '11 minutes' WHERE id = $1`, [created.id]);
     provider.usageReports.set(sid, { providerCallId: sid, observations: [{ key: 'duration', category: 'telephony', product: 'voice_outbound', metric: 'duration', quantity: 90, unit: 'second', basis: 'final', reportedAmount: 0.021, currency: 'USD' }] });
-    const reports = await Promise.all([one.usage.finalizeCompletedCalls(provider, { limit: 100 }), two.usage.finalizeCompletedCalls(provider, { limit: 100 })]);
+    const reports = await Promise.all([one.usage.finalizeCompletedCalls(provider, { limit: 100, accountId }), two.usage.finalizeCompletedCalls(provider, { limit: 100, accountId })]);
     assert.ok(reports.every((report) => report.failed === 0));
     const ledger = await usage.listForCall((await sessions.findById(created.id))!.accountId, created.id);
     assert.equal(ledger.length, 1, 'one authoritative entry however many finalizers ran');

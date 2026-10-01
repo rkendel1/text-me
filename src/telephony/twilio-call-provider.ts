@@ -13,11 +13,24 @@ import { mapTwilioCallStatus } from '../calls/provider-status.js';
 /** The slice of the Twilio SDK this adapter uses. Injectable so the adapter's own behavior can be tested without the network. */
 export type TwilioCallsClient = Pick<ReturnType<typeof twilio>, 'calls'>;
 
+/** A number from one of Twilio's string fields; `null` when absent or not numeric. */
+function number(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /** Enough for the calls between one assistant line and one callee around one dial; a larger result is itself ambiguous. */
 const LOOKUP_LIMIT = 20;
 
 export class TwilioCallProvider implements CallProvider {
   readonly name = 'twilio';
+  /**
+   * Per-call settled figures exist for the call itself (`calls(sid).fetch()`: `price`) and for its recordings
+   * (`calls(sid).recordings.list()`: `price`). Twilio's Usage Records are account-level aggregates by category and
+   * date, with no call identifier, so media-stream usage cannot be attributed to one call authoritatively.
+   */
+  readonly authoritativeUsage = ['telephony', 'recording'] as const;
   private readonly client: TwilioCallsClient;
 
   constructor(accountSid: string, authToken: string, options: { timeoutMs?: number; client?: TwilioCallsClient } = {}) {
@@ -66,20 +79,35 @@ export class TwilioCallProvider implements CallProvider {
    * Twilio takes to rate a call is not verified here.
    */
   async getCallUsage(providerCallId: string): Promise<ProviderUsageReport | null> {
-    const call = await this.client.calls(providerCallId).fetch();
-    const seconds = call.duration === null || call.duration === undefined || call.duration === '' ? NaN : Number(call.duration);
-    if (!Number.isFinite(seconds)) return null;
-    const price = call.price === null || call.price === undefined || call.price === '' ? NaN : Number(call.price);
-    const rated = Number.isFinite(price) && typeof call.priceUnit === 'string' && call.priceUnit !== '';
-    return {
-      providerCallId,
-      observations: [{
+    const context = this.client.calls(providerCallId);
+    const call = await context.fetch();
+    const observations: ProviderUsageReport['observations'] = [];
+    const seconds = number(call.duration);
+    if (seconds !== null) {
+      const price = number(call.price);
+      const rated = price !== null && typeof call.priceUnit === 'string' && call.priceUnit !== '';
+      observations.push({
         key: 'duration', category: 'telephony', product: String(call.direction ?? '').toLowerCase().startsWith('outbound') ? 'voice_outbound' : 'voice_inbound',
         metric: 'duration', quantity: seconds, unit: 'second', basis: rated ? 'final' : 'estimated',
         ...(rated ? { reportedAmount: Math.abs(price), currency: String(call.priceUnit).toUpperCase() } : {}),
         metadata: { twilioStatus: call.status ?? null },
-      }],
-    };
+      });
+    }
+    // The call's recordings, each with its own price once Twilio has finished (`completed`) and rated it.
+    const recordings = await context.recordings.list({ limit: 50 }).catch(() => []);
+    for (const recording of recordings) {
+      const length = number(recording.duration);
+      if (length === null) continue;
+      const price = number(recording.price);
+      const settled = recording.status === 'completed' && price !== null && typeof recording.priceUnit === 'string' && recording.priceUnit !== '';
+      observations.push({
+        key: `recording:${recording.sid}`, category: 'recording', product: 'recording', metric: 'duration', quantity: length, unit: 'second',
+        basis: settled ? 'final' : 'estimated',
+        ...(settled ? { reportedAmount: Math.abs(price), currency: String(recording.priceUnit).toUpperCase() } : {}),
+        metadata: { recordingSid: recording.sid, twilioStatus: recording.status },
+      });
+    }
+    return observations.length ? { providerCallId, observations } : null;
   }
 
   async endCall(providerCallId: string, options: { mode: 'cancel' | 'complete' }): Promise<void> {

@@ -52,6 +52,12 @@ const costView = s.object({
     basis: s.enum(USAGE_BASES),
     unpriced: s.integer({ minimum: 0 }),
   })),
+  /** The part of the figure that is authoritative. */
+  authoritativeCost: s.nullable(s.number()),
+  /** Estimated categories that may still be settled by the provider. */
+  pending: s.array(s.enum(USAGE_CATEGORIES)),
+  /** Estimated categories that can never be settled (no per-call authoritative figure exists, or it was unavailable). */
+  nonFinalizable: s.array(s.enum(USAGE_CATEGORIES)),
   unpricedUsage: s.integer({ minimum: 0 }),
   derived: s.boolean('True when part of the figure is derived from the call\'s lifecycle times because no usage had been recorded.'),
 }, { title: 'CallCost' });

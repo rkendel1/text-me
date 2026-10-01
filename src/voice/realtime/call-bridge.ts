@@ -328,7 +328,11 @@ export class RealtimeCallBridge {
     const call = this.ledgerCall;
     if (!usage || !call) return;
     const metrics = extractRealtimeUsage(raw);
-    if (Object.keys(metrics).length === 0) return;
+    if (Object.keys(metrics).length === 0) {
+      // The model reported nothing: say so, once, instead of leaving the call looking fully accounted for.
+      this.enqueue(() => usage.recordAiUsageUnavailable(call, { modelId: this.connector.modelId, responseId }));
+      return;
+    }
     this.enqueue(() => usage.recordAiUsage(call, { modelId: this.connector.modelId, responseId, metrics, metadata: { via: 'ai-gateway' } }));
   }
 

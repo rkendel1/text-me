@@ -538,13 +538,14 @@ export function createApp(options: AppOptions): express.Express {
   // voice runtime and the control plane reach it in-process, and the MCP projection (src/appport/mcp.ts) reaches the same one.
   const publicOrigin = options.publicBaseUrl ?? 'http://localhost:3000';
   const sessionStore = options.callSessionStore ?? new InMemoryCallSessionStore();
+  const callProvider = options.callProvider ?? new FakeCallProvider();
   const callUsage = new CallCostLedger(
     options.callUsageStore ?? new InMemoryCallUsageStore(() => (sessionStore instanceof InMemoryCallSessionStore ? sessionStore.all() : [])),
-    { priceBook: options.priceBook },
+    { priceBook: options.priceBook, carrierSettles: callProvider.authoritativeUsage },
   );
   const callSessions: CallSessionService = new CallSessionService(sessionStore, {
     usage: callUsage,
-    provider: options.callProvider ?? new FakeCallProvider(),
+    provider: callProvider,
     assistantLine: (accountId) => phoneNumbers.assistantLine(accountId),
     // Whether and from where an outbound call may be placed: decided before anything is created or dialed.
     policy: options.outboundPolicy ?? new DefaultOutboundPolicy({
@@ -773,7 +774,7 @@ export function createApp(options: AppOptions): express.Express {
     try {
       if (!authorizeCron(request, response)) return;
       const provider = options.callProvider;
-      const report = provider ? await callUsage.finalizeCompletedCalls(provider, { limit: options.callReconciliation?.batchSize }) : { examined: 0, recorded: 0, duplicates: 0, notReady: 0, failed: 0 };
+      const report = provider ? await callUsage.finalizeCompletedCalls(provider, { limit: options.callReconciliation?.batchSize }) : { examined: 0, skipped: 0, recorded: 0, duplicates: 0, notReady: 0, failed: 0, pending: 0, exhausted: 0 };
       response.json({ status: 'ok', ...report });
     } catch (error) {
       next(error);
@@ -1203,7 +1204,7 @@ export function createApp(options: AppOptions): express.Express {
       const recordingSid = typeof request.body?.RecordingSid === 'string' ? request.body.RecordingSid : '';
       const conversation = recordingSid && Number.isFinite(duration) ? await service.getConversation(conversationId) : null;
       const call = conversation?.accountId ? await callSessions.findByConversation(conversation.accountId, conversationId).catch(() => null) : null;
-      if (call) await callUsage.recordRecording(call, { recordingSid, seconds: duration }).catch((error) => console.error('[call] usage', error instanceof Error ? error.message : 'unknown'));
+      if (call?.providerCallId) await callUsage.recordRecording(call, { recordingSid, seconds: duration, providerCallId: call.providerCallId }).catch((error) => console.error('[call] usage', error instanceof Error ? error.message : 'unknown'));
       await service.recordEvent(conversationId, 'voicemail.recorded', {
         recordingUrl, recordingSid: request.body?.RecordingSid, durationSeconds: Number.isFinite(duration) ? duration : null,
       });
