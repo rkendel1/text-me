@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "fluid": true,
-  "crons": [{ "path": "/api/internal/cron/reconcile-calls", "schedule": "*/5 * * * *" }],
+  "crons": [{ "path": "/api/internal/cron/reconcile-calls", "schedule": "*/5 * * * *" }, { "path": "/api/internal/cron/finalize-call-usage", "schedule": "*/15 * * * *" }],
   "functions": {
     "**/*": {
       "maxDuration": 800

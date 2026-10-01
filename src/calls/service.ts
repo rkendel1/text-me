@@ -13,6 +13,7 @@ import {
 import { consoleCallLogger, maskPhone, safeError, type CallLogger } from './log.js';
 import { denyAllOutboundPolicy, type OutboundOrigin, type OutboundPolicy } from './outbound-policy.js';
 import { normalizeDialableNumber } from './phone.js';
+import type { CallCostLedger } from './cost/ledger.js';
 import { CallProviderRejectedError, type CallProvider } from './provider.js';
 import type { CallSessionStore } from './store.js';
 import { claimCallEnd, claimOutboundDial, claimReconciliation, releaseEndClaim, transitionCallSession, type TransitionOutcome, type TransitionResult } from './transition.js';
@@ -106,11 +107,15 @@ export interface ProviderCallEvent {
   traceId?: string;
   sequence?: string | null;
   providerTimestamp?: string | null;
+  /** The call's connected duration, when the provider's callback states one. */
+  durationSeconds?: number | null;
 }
 
 export type ProviderEventOutcome = TransitionOutcome | 'unmapped' | 'unknown_call';
 
 export interface CallSessionServiceOptions {
+  /** The cost ledger: usage the provider's callbacks report is recorded in it. Accounting never fails a callback. */
+  usage?: CallCostLedger;
   provider?: CallProvider;
   /** Decides whether an outbound call may be placed, and from which number. With none, nothing is allowed. */
   policy?: OutboundPolicy;
@@ -868,6 +873,11 @@ export class CallSessionService {
       });
       outcome = result.outcome;
       latest = result.session;
+    }
+    // Cost: whatever usage the callback reports is recorded under the call's own id. A redelivery repeats the same key and records nothing.
+    if (this.options.usage && latest && event.status !== null && isTerminal(event.status) && event.durationSeconds !== null && event.durationSeconds !== undefined) {
+      await this.options.usage.recordProviderDuration(latest, { provider: event.provider, providerCallId: event.providerCallId, eventId: event.eventId, durationSeconds: event.durationSeconds })
+        .catch((error) => this.log('error', 'call.usage.record_failed', latest, { error: safeError(error) }));
     }
     this.log(outcome === 'rejected' || outcome === 'unmapped' ? 'warn' : 'info', `call.event.${outcome}`, latest ?? session, { rawStatus: event.rawStatus, eventId: event.eventId, traceId: event.traceId });
     return { outcome, session: latest };

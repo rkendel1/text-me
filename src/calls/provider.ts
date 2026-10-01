@@ -61,8 +61,39 @@ export interface ProviderCallLookupInput {
   createdBefore: Date;
 }
 
+/**
+ * One usage the provider reports for a call, in the ledger's vocabulary. The adapter translates its vendor's
+ * records into this; nothing downstream knows what the vendor called them.
+ */
+export interface ProviderUsageObservation {
+  /** Names what is measured within this provider call (`duration`, `recording:RE123`); the ledger scopes it to the call. */
+  key: string;
+  category: import('./cost/model.js').UsageCategory;
+  product: string;
+  metric: import('./cost/model.js').UsageMetric;
+  quantity: number;
+  unit: import('./cost/model.js').UsageUnit;
+  /** `final` only when the provider states this measurement as its settled record. */
+  basis: import('./cost/model.js').UsageBasis;
+  /** The charge the provider itself states, when it does (absolute, in `currency`). */
+  reportedAmount?: number;
+  currency?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ProviderUsageReport {
+  providerCallId: string;
+  observations: ProviderUsageObservation[];
+}
+
 export interface CallProvider {
   readonly name: string;
+  /**
+   * The usage categories this provider can report an authoritative (settled) figure for through `getCallUsage`.
+   * Usage in any other category that the application observes itself can only ever be an estimate, and is
+   * reported as such rather than left looking pending.
+   */
+  readonly authoritativeUsage: readonly import('./cost/model.js').UsageCategory[];
   /**
    * Places an outbound call. Resolves with the provider's id for it. Rejects with
    * `CallProviderRejectedError` when the provider definitively refused, and with anything else
@@ -79,11 +110,18 @@ export interface CallProvider {
    * Rejects when the provider cannot be asked (the outcome then stays unknown).
    */
   findDialedCalls(input: ProviderCallLookupInput): Promise<ProviderCallLookup>;
+  /**
+   * Read-only. What the provider reports having used for this call, as normalized observations. `null` when the
+   * provider has nothing to report (yet). An observation is `final` only if the provider itself settled it.
+   */
+  getCallUsage(providerCallId: string): Promise<ProviderUsageReport | null>;
 }
 
 /** A provider stand-in for local development and tests: records what it was asked to do. */
 export class FakeCallProvider implements CallProvider {
   readonly name: string;
+  /** What this fake can settle; a test narrows or widens it. */
+  authoritativeUsage: readonly import('./cost/model.js').UsageCategory[] = ['telephony', 'recording'];
   readonly created: CallProviderCreateInput[] = [];
   readonly ended: Array<{ providerCallId: string; mode: 'cancel' | 'complete' }> = [];
   failEnd?: Error;
@@ -124,6 +162,17 @@ export class FakeCallProvider implements CallProvider {
   absenceIsConclusive = false;
   /** The fake provider's clock, for `createdAt`; a test with a fake clock replaces it. */
   clock: () => Date = () => new Date();
+
+  /** What `getCallUsage` reports, per provider call id (a test sets it; absent means "nothing to report yet"). */
+  readonly usageReports = new Map<string, ProviderUsageReport>();
+  usageFetches: string[] = [];
+  failUsage?: Error;
+
+  async getCallUsage(providerCallId: string): Promise<ProviderUsageReport | null> {
+    this.usageFetches.push(providerCallId);
+    if (this.failUsage) throw this.failUsage;
+    return this.usageReports.get(providerCallId) ?? null;
+  }
 
   async findDialedCalls(input: ProviderCallLookupInput): Promise<ProviderCallLookup> {
     this.lookups.push(input);

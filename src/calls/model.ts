@@ -91,6 +91,8 @@ export interface CallSessionView {
   objective: string | null;
   /** Outbound only: how the request to the provider went. `null` for a call nothing dialed. */
   execution: DialOutcome | null;
+  /** `call.get` only: what the call has cost (see `CallCostLedger`). */
+  cost?: Omit<import('./cost/model.js').CallCostSummary, 'callId'>;
 }
 
 const iso = (date: Date | null): string | null => (date ? date.toISOString() : null);

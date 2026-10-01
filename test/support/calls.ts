@@ -7,6 +7,9 @@ import { DefaultOutboundPolicy, type OutboundPolicy } from '../../src/calls/outb
 import { FakeCallProvider } from '../../src/calls/provider.js';
 import { CallSessionService } from '../../src/calls/service.js';
 import { InMemoryCallSessionStore, type CallSessionStore } from '../../src/calls/store.js';
+import { CallCostLedger } from '../../src/calls/cost/ledger.js';
+import type { PriceBook } from '../../src/calls/cost/pricing.js';
+import { InMemoryCallUsageStore, type CallUsageStore } from '../../src/calls/cost/store.js';
 import type { TenantContext } from '../../src/tenancy/authorization.js';
 
 export const LINE_A = '+15550001000';
@@ -25,6 +28,9 @@ export interface CallStackOptions {
   pollIntervalMs?: number;
   dialTimeoutMs?: number;
   now?: () => Date;
+  /** The cost ledger's store and price book (an in-memory ledger over the call store by default). */
+  usageStore?: CallUsageStore;
+  priceBook?: PriceBook;
   /** Wraps the default policy (to observe or interleave with it). */
   wrapPolicy?: (inner: OutboundPolicy, calls: () => CallSessionService) => OutboundPolicy;
 }
@@ -37,10 +43,15 @@ export function createCallStack(options: CallStackOptions = {}) {
   const store = options.store ?? new InMemoryCallSessionStore();
   const provider = options.provider ?? new FakeCallProvider();
   if (options.now) provider.clock = options.now;
+  const usage = new CallCostLedger(
+    options.usageStore ?? new InMemoryCallUsageStore(() => (store instanceof InMemoryCallSessionStore ? store.all() : [])),
+    { priceBook: options.priceBook, now: options.now },
+  );
   const logs: Array<{ level: string; event: string; fields: Record<string, unknown> }> = [];
   const lines: Record<string, string> = { acct_a: LINE_A, acct_b: LINE_B };
   const calls: CallSessionService = new CallSessionService(store, {
     provider,
+    usage,
     assistantLine: async (accountId) => lines[accountId] ?? null,
     policy: (options.wrapPolicy ?? ((inner) => inner))(new DefaultOutboundPolicy({
       agentCallsEnabled: options.outboundEnabled ?? true,
@@ -57,10 +68,10 @@ export function createCallStack(options: CallStackOptions = {}) {
     ...(options.dialTimeoutMs ? { dialTimeoutMs: options.dialTimeoutMs } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
-  const application = createCallApplication({ calls, pollIntervalMs: options.pollIntervalMs ?? 5 });
+  const application = createCallApplication({ calls, usage, pollIntervalMs: options.pollIntervalMs ?? 5 });
   const as = (session: Session) => new CallCapabilityClient(application, session);
   return {
-    store, provider, calls, application, logs, as, lines,
+    store, provider, calls, application, logs, as, lines, usage,
     adminA: as(appPortSessionFor(tenant('acct_a', 'admin'))),
     memberA: as(appPortSessionFor(tenant('acct_a', 'member'))),
     adminB: as(appPortSessionFor(tenant('acct_b', 'admin'))),

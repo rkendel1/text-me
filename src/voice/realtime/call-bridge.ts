@@ -1,3 +1,5 @@
+import type { CallCostLedger, LedgerCall } from '../../calls/cost/ledger.js';
+import { extractRealtimeUsage } from './usage.js';
 import type { ConversationRuntime, ConversationRuntimeEvent } from '../../domain/runtime.js';
 import type { OwnerConfigurationService } from '../../owner/configuration.js';
 import { presentConversationSummary } from '../../http/presenters.js';
@@ -20,6 +22,8 @@ export interface CallBridgeServices {
   configuration: OwnerConfigurationService;
   /** The durable CallSessions. Optional so a bridge can run without them (and tests that don't need them). */
   calls?: CallSessionService;
+  /** The cost ledger. Optional: accounting never gates a call, and a failure to record is logged, not surfaced. */
+  usage?: CallCostLedger;
 }
 
 /** The server side of a Twilio bidirectional media stream. */
@@ -50,6 +54,9 @@ export class RealtimeCallBridge {
   private accountId?: string;
   /** Set only once the session is confirmed to be this conversation's. The stream never decides lifecycle; it reports it. */
   private callSessionId?: string;
+  /** The verified session, for the ledger. */
+  private ledgerCall?: LedgerCall;
+  private streamStartedAt?: Date;
   /** What the verified CallSession says about this call: outbound calls are told so, and why. */
   private callContext?: CallContext;
   private paused = false;
@@ -83,6 +90,7 @@ export class RealtimeCallBridge {
 
   async start(streamSid: string, callSid?: string): Promise<void> {
     this.streamSid = streamSid;
+    this.streamStartedAt = new Date();
     const conversation = await this.services.repository.getById(this.conversationId);
     if (!conversation) throw new Error(`Conversation not found: ${this.conversationId}`);
     if (!conversation.accountId) throw new Error(`Conversation ${this.conversationId} has no account`);
@@ -126,6 +134,7 @@ export class RealtimeCallBridge {
       return;
     }
     this.callSessionId = session.id;
+    this.ledgerCall = session;
     this.callContext = { direction: session.direction, objective: session.objective };
     await calls.markInProgress(session.id);
   }
@@ -281,6 +290,7 @@ export class RealtimeCallBridge {
         return;
       }
       case 'response-done':
+        this.recordAiUsage(event.responseId, event.raw);
         this.onResponseDone(event.responseId);
         return;
       case 'function-call-arguments-done':
@@ -310,6 +320,20 @@ export class RealtimeCallBridge {
     }
     this.allowedResponses.add(responseId);
     this.enqueue(() => this.services.runtime.noteAiStarted(this.conversationId, responseId));
+  }
+
+  /** Whatever the model reported for this response, whether or not it was played: the cost was incurred either way. */
+  private recordAiUsage(responseId: string, raw: unknown): void {
+    const { usage } = this.services;
+    const call = this.ledgerCall;
+    if (!usage || !call) return;
+    const metrics = extractRealtimeUsage(raw);
+    if (Object.keys(metrics).length === 0) {
+      // The model reported nothing: say so, once, instead of leaving the call looking fully accounted for.
+      this.enqueue(() => usage.recordAiUsageUnavailable(call, { modelId: this.connector.modelId, responseId }));
+      return;
+    }
+    this.enqueue(() => usage.recordAiUsage(call, { modelId: this.connector.modelId, responseId, metrics, metadata: { via: 'ai-gateway' } }));
   }
 
   private onResponseDone(responseId: string): void {
@@ -505,6 +529,13 @@ export class RealtimeCallBridge {
     this.outcome = outcome;
     clearTimeout(this.farewellTimer);
     this.connection?.close();
+    const { usage } = this.services;
+    const call = this.ledgerCall;
+    const startedAt = this.streamStartedAt;
+    const streamSid = this.streamSid;
+    if (usage && call && startedAt && streamSid) {
+      this.enqueue(() => usage.recordMediaStream(call, { streamSid, startedAt, seconds: (Date.now() - startedAt.getTime()) / 1000 }));
+    }
     this.enqueue(async () => {
       await this.services.repository.appendEvent(this.conversationId, 'voice.completed', {
         source: 'realtime', outcome,
