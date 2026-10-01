@@ -268,8 +268,13 @@ test('malformed and unsupported requests, HTTP methods, origins and size', async
 test('concurrent requests from two accounts stay isolated and share no state', async () => {
   const t = await mcpApp();
   try {
-    const callsA = await Promise.all([1, 2, 3, 4].map((n) => t.inbound(t.a, `CA-CONC-A${n}`)));
-    const callsB = await Promise.all([1, 2, 3, 4].map((n) => t.inbound(t.b, `CA-CONC-B${n}`)));
+    // Seed calls serially: this test is about concurrent MCP requests, not concurrent Twilio webhook handling.
+    // Sharing a caller number across simultaneous fake inbound calls can engage unrelated conversation safeguards
+    // and make setup fail before the MCP boundary is exercised.
+    const callsA = [];
+    const callsB = [];
+    for (const n of [1, 2, 3, 4]) callsA.push(await t.inbound(t.a, `CA-CONC-A${n}`));
+    for (const n of [1, 2, 3, 4]) callsB.push(await t.inbound(t.b, `CA-CONC-B${n}`));
     const asA = await t.connect(t.a.token);
     const asB = await t.connect(t.b.token);
     const results = await Promise.all([

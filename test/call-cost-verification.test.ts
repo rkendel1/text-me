@@ -419,7 +419,10 @@ test('call.get cost: unknown, active, final and unpriced states, identical over 
 
   const viaMcp = JSON.parse((await mcp.callTool('call_get', { callId: fresh.callId })).content[0].text);
   assert.deepEqual(viaMcp.cost, withUnpriced.cost, 'MCP output is the AppPort output');
-  const text = JSON.stringify(withUnpriced);
+  // The call's own id is an expected part of the payload. It is random hex, so a
+  // `ca` + six hex digits window can coincidentally look like a Twilio SID; scan
+  // everything except that id for the internals the contract must not leak.
+  const text = JSON.stringify(withUnpriced).replaceAll(withUnpriced.callId, 'call_id');
   assert.doesNotMatch(text, /rate_card|rateId|provider_reported|reportedAmount|idempotency|providerCallId|CA[0-9a-f]{6}/i, 'no pricing internals, provider ids or keys');
 
   await assert.rejects(stack.adminB.get({ callId: fresh.callId }), (error: { code?: string }) => error.code === 'NOT_FOUND');

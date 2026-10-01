@@ -42,6 +42,20 @@ export interface AppConfig {
   /** Platform telephony credentials. The numbers they hold are assigned to accounts in the database. */
   twilioAccountSid: string;
   twilioAuthToken: string;
+  /**
+   * Which carrier the CallSession domain dials and ends calls through.
+   * `twilio` (default) or `telnyx`. Carrier selection never changes the
+   * CallSession domain model; it only swaps the `CallProvider` adapter.
+   * Existing calls are never migrated: a session keeps the provider it was
+   * created with (`CallSession.provider`), and webhooks resolve by provider.
+   */
+  telephonyProvider: 'twilio' | 'telnyx';
+  /** Telnyx Voice API application all Telnyx calls are placed from. Required only when `telephonyProvider` is `telnyx`. */
+  telnyxConnectionId?: string;
+  /** Bearer API key for Telnyx Voice API calls. Required only when `telephonyProvider` is `telnyx`. */
+  telnyxApiKey?: string;
+  /** Telnyx webhook signing public key (base64, Mission Control → Settings → Public Keys). Required only when `telephonyProvider` is `telnyx`. */
+  telnyxPublicKey?: string;
   /** Let accounts buy a new assistant line when the platform's pool of numbers is empty. */
   allowNumberPurchase: boolean;
   /**
@@ -122,6 +136,13 @@ const REQUIRED: Array<[string, string]> = [
   ['TWILIO_AUTH_TOKEN', 'TWILIO_AUTH_TOKEN is missing (Twilio Console → Account Info → Auth Token)'],
 ];
 
+/** Required only when the Telnyx carrier is selected. */
+const TELNYX_REQUIRED: Array<[string, string]> = [
+  ['TELNYX_CONNECTION_ID', 'TELNYX_CONNECTION_ID is missing (Telnyx Mission Control → Voice API application ID)'],
+  ['TELNYX_API_KEY', 'TELNYX_API_KEY is missing (Telnyx Mission Control → API Keys)'],
+  ['TELNYX_PUBLIC_KEY', 'TELNYX_PUBLIC_KEY is missing (Telnyx Mission Control → Settings → Public Keys, webhook signing key)'],
+];
+
 /**
  * Environment variables are platform configuration and secrets only. These
  * named a customer (the single owner) and are no longer read by anything; if
@@ -147,6 +168,11 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (!databaseUrl) problems.push('DATABASE_URL is missing (Vercel → Storage → add Neon and connect it to this project)');
   for (const [key, message] of REQUIRED) {
     if (!env[key]?.trim()) problems.push(message);
+  }
+  if (env.TELEPHONY_PROVIDER === 'telnyx') {
+    for (const [key, message] of TELNYX_REQUIRED) {
+      if (!env[key]?.trim()) problems.push(message);
+    }
   }
   problems.push(...customerIdentityProblems(env));
   const apnsKeys = ['APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_PRIVATE_KEY', 'APNS_BUNDLE_ID'];
@@ -187,6 +213,10 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: resolvePublicBaseUrl(env),
     twilioAccountSid: env.TWILIO_ACCOUNT_SID!.trim(),
     twilioAuthToken: env.TWILIO_AUTH_TOKEN!.trim(),
+    telephonyProvider: env.TELEPHONY_PROVIDER === 'telnyx' ? 'telnyx' : 'twilio',
+    telnyxConnectionId: env.TELNYX_CONNECTION_ID?.trim() || undefined,
+    telnyxApiKey: env.TELNYX_API_KEY?.trim() || undefined,
+    telnyxPublicKey: env.TELNYX_PUBLIC_KEY?.trim() || undefined,
     allowNumberPurchase: env.TELEPHONY_NUMBER_PURCHASE === 'on',
     allowSmsVerification: env.TELEPHONY_SMS_VERIFICATION === 'on',
     outboundAgentCalls: env.OUTBOUND_AGENT_CALLS === 'on',

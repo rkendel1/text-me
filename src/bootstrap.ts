@@ -38,7 +38,9 @@ import { PhoneNumberService, TwilioPhoneNumberClient, type PhoneNumberClient } f
 import { TwilioVerifyProvider } from './telephony/verification.js';
 import type { MessagingProvider } from './messaging/provider.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
+import { TelnyxProvider } from './telephony/telnyx-provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
+import { TelnyxCallProvider } from './telephony/telnyx-call-provider.js';
 import { TwilioCallProvider } from './telephony/twilio-call-provider.js';
 import { PostgresCallSessionStore } from './repositories/postgres-call-session-repository.js';
 import { PostgresCallUsageStore } from './repositories/postgres-call-usage-repository.js';
@@ -129,6 +131,7 @@ export function buildServerWithPool(
     ? undefined
     : `${config.publicBaseUrl.replace(/^http/, 'ws')}${MEDIA_STREAM_PATH}`;
 
+  const telnyxSelected = config.telephonyProvider === 'telnyx';
   const app = createApp({
     repository,
     providers: [
@@ -137,6 +140,7 @@ export function buildServerWithPool(
         continueUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/continue`,
         turnUrl: `${config.publicBaseUrl}/webhooks/twilio/voice/turn`,
       } : {}),
+      new TelnyxProvider(),
       // The fake provider exists for local development only; production never registers it.
       ...(config.production ? [] : [new FakeTelephonyProvider()]),
     ],
@@ -145,6 +149,7 @@ export function buildServerWithPool(
     messagingProvider,
     tenancyStore,
     twilioAuthToken: config.twilioAuthToken,
+    telnyxPublicKey: config.telnyxPublicKey,
     billingBypassAccountId: config.billingBypassAccountId,
     stripe: config.stripe ? { ...config.stripe, baseUrl: config.publicBaseUrl } : undefined,
     ownerDeviceService,
@@ -167,8 +172,14 @@ export function buildServerWithPool(
       publicKey: process.env.VAPID_PUBLIC_KEY,
       privateKey: process.env.VAPID_PRIVATE_KEY,
     }),
-    // The one place calls are placed and ended at Twilio; CallSessions are the durable record of them.
-    callProvider: new TwilioCallProvider(config.twilioAccountSid, config.twilioAuthToken),
+    // The one place calls are placed and ended at the carrier; CallSessions are the durable record of them.
+    // The production default stays Twilio; `TELEPHONY_PROVIDER=telnyx` swaps the adapter (and requires the Telnyx env).
+    callProvider: telnyxSelected
+      ? new TelnyxCallProvider({
+        connectionId: config.telnyxConnectionId!, apiKey: config.telnyxApiKey!,
+        webhookUrl: `${config.publicBaseUrl}/webhooks/telnyx/status`,
+      })
+      : new TwilioCallProvider(config.twilioAccountSid, config.twilioAuthToken),
     callSessionStore: stores.callSessionStore,
     callUsageStore: stores.callUsageStore,
     outboundAgentCalls: config.outboundAgentCalls,

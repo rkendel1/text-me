@@ -18,6 +18,8 @@ import { ConversationService } from './services/conversation-service.js';
 import { FakeTelephonyProvider } from './telephony/fake-provider.js';
 import type { IncomingCall, ProviderResponse, TelephonyProvider } from './telephony/provider.js';
 import { TwilioProvider } from './telephony/twilio-provider.js';
+import { TelnyxProvider } from './telephony/telnyx-provider.js';
+import { telnyxHeadersFrom, telnyxPublicKeyFingerprint, verifyTelnyxWebhook } from './telephony/telnyx-verification.js';
 import { FakeConversationModel } from './conversation/fake-model.js';
 import type { ConversationModel } from './conversation/model.js';
 import { ConversationEngine } from './services/conversation-engine.js';
@@ -95,6 +97,10 @@ export interface AppOptions {
   /** Platform SMS provider; every message is sent from the sending account's own assistant line. */
   messagingProvider?: MessagingProvider;
   twilioAuthToken?: string;
+  /** Telnyx webhook signing public key (base64). Required to serve the Telnyx webhook routes. */
+  telnyxPublicKey?: string;
+  /** Which carrier inbound Telnyx webhooks resolve numbers against. Defaults to `telnyx`. Reserved for multi-carrier deployments; unused in this PR. */
+  telnyxProviderName?: string;
   /** Accounts, users, memberships, phone numbers, planes: the tenancy model. */
   tenancyStore?: TenancyStore;
   ownerChannel?: OwnerChannel;
@@ -121,7 +127,7 @@ export interface AppOptions {
   callUsageStore?: CallUsageStore;
   /** What usage costs. Defaults to the reference price book (see `src/billing/call-reference-rates.ts`). */
   priceBook?: PriceBook;
-  /** Places and ends calls at the telephony provider (Twilio in production). */
+  /** Places and ends calls at the telephony provider (Twilio by default; Telnyx when selected). */
   callProvider?: CallProvider;
   /** Let agents place outbound calls through `call.create`. Off unless a deployment turns it on. */
   outboundAgentCalls?: boolean;
@@ -226,6 +232,49 @@ function notInService(): string {
   return twiml.toString();
 }
 
+/**
+ * Telnyx call-control helpers for the webhook routes. The routes resolve the
+ * configured `CallProvider` down to its Telnyx adapter (Telnyx-only branch,
+ * guarded by `provider.name === 'telnyx'` at every call site): answering and
+ * declining a parked call are call-control commands, not webhook documents.
+ * The service exposes the adapter for exactly this through a narrow accessor
+ * (no cast through `options` internals): best effort always — the CallSession
+ * and conversation are already recorded, so a command failure is logged,
+ * never thrown.
+ */
+function telnyxCallControlOf(calls: CallSessionService): {
+  answerCallControl(id: string, opts?: { speak?: string }): Promise<void>;
+  endCall(id: string, opts: { mode: 'cancel' | 'complete' }): Promise<void>;
+} | null {
+  const provider = calls.provider;
+  if (provider?.name !== 'telnyx') return null;
+  const control = provider as unknown as {
+    answerCallControl?: (id: string, opts?: { speak?: string }) => Promise<void>;
+    endCall?: (id: string, opts: { mode: 'cancel' | 'complete' }) => Promise<void>;
+  };
+  if (typeof control.answerCallControl !== 'function' || typeof control.endCall !== 'function') return null;
+  return {
+    answerCallControl: (id, opts) => control.answerCallControl!(id, opts),
+    endCall: (id, opts) => control.endCall!(id, opts),
+  };
+}
+
+async function answerTelnyxCall(calls: CallSessionService, providerCallId: string, speak: string | undefined): Promise<void> {
+  const control = telnyxCallControlOf(calls);
+  if (!control) return;
+  await control.answerCallControl(providerCallId, ...(speak ? [{ speak }] as const : [])).catch((error) => {
+    console.error('[webhook]', JSON.stringify({ provider: 'telnyx', event: 'answer_failed', error: (error as Error).message?.slice(0, 200) }));
+  });
+}
+
+async function hangupTelnyxCall(calls: CallSessionService, providerCallId: string): Promise<void> {
+  const control = telnyxCallControlOf(calls);
+  if (!control) return;
+  await control.endCall(providerCallId, { mode: 'complete' }).catch((error) => {
+    console.error('[webhook]', JSON.stringify({ provider: 'telnyx', event: 'decline_failed', error: (error as Error).message?.slice(0, 200) }));
+  });
+}
+
 /** Turn an owner's control-plane shortcut into words that make sense to the caller. */
 function ownerVoiceReply(ownerName: string, instruction: string): string {
   const name = ownerName.trim() || 'the account owner';
@@ -294,12 +343,21 @@ function registerIncomingCallRoute(
         response.status(200).type(rejected.contentType).send(rejected.body);
         return;
       }
-      const parsed = provider.parseIncomingCall(request.body);
+      const rawBody = path.startsWith('/webhooks/telnyx/')
+        ? (request as Request & { telnyxEvent?: unknown }).telnyxEvent
+        : request.body;
+      const parsed = provider.parseIncomingCall(rawBody);
       const incomingCall = transform ? await transform(request, parsed) : parsed;
       // The called number is the only thing that says whose call this is. Unknown line: fail closed.
       const line = incomingCall.calledNumber ? await phoneNumbers.resolveLine(incomingCall.calledNumber) : null;
       if (!line) {
         console.warn('[webhook] call to a number no account owns', JSON.stringify({ provider: provider.name }));
+        // Telnyx webhooks carry no instruction document: acknowledge without one.
+        // Twilio fetches TwiML: tell the caller the number is not in service.
+        if (provider.name === 'telnyx') {
+          response.status(200).type('application/json; charset=utf-8').send('{}');
+          return;
+        }
         response.status(200).type('text/xml; charset=utf-8').send(notInService());
         return;
       }
@@ -319,6 +377,16 @@ function registerIncomingCallRoute(
       const settings = await configuration.get(conversation.accountId);
       if (!settings.calls.answerCalls && !agentOutbound) {
         // "Answer incoming calls" is off: no assistant. Take a voicemail if allowed, else ask them to text.
+        // Telnyx has no inline voicemail document in this PR: decline at the
+        // signaling level with a hangup command (best effort) and record it.
+        if (provider.name === 'telnyx') {
+          await service.answerCall(conversation.id, incomingCall.payload);
+          await calls.transition(callSession?.id ?? '', 'answered', { mode: 'lenient' }).catch(() => undefined);
+          await service.recordEvent(conversation.id, 'call.declined', { voicemail: false });
+          await hangupTelnyxCall(calls, incomingCall.providerCallId);
+          response.status(200).type('application/json; charset=utf-8').send('{}');
+          return;
+        }
         const twiml = new twilio.twiml.VoiceResponse();
         const owner = settings.assistant.ownerName || 'The person you called';
         if (settings.calls.voicemailFallback) {
@@ -343,6 +411,17 @@ function registerIncomingCallRoute(
       });
       await service.answerCall(conversation.id, incomingCall.payload);
       if (callSession) await calls.transition(callSession.id, 'answered', { mode: 'lenient' }).catch(() => undefined);
+      // Telnyx parks the call until answered via call control: answer now that
+      // the conversation and CallSession are recorded (best effort — the call
+      // stays recorded even if the answer command fails). Twilio is answered
+      // inline by the TwiML document itself, so this is Telnyx-only.
+      if (provider.name === 'telnyx') {
+        await answerTelnyxCall(
+          calls,
+          incomingCall.providerCallId,
+          agentOutbound ? outboundGreeting(settings.assistant.ownerName) : settings.assistant.greeting,
+        );
+      }
       if (providerResponse.spokenGreeting && !conversation.events.some((event) =>
         event.type === 'ai.response' && event.payload.callbackId === `${conversation.providerCallId}:greeting`)) {
         await service.recordEvent(conversation.id, 'ai.response', {
@@ -379,7 +458,10 @@ function registerStatusRoute(
 ): void {
   app.post(path, async (request, response, next) => {
     try {
-      const update = provider.parseStatusUpdate(request.body);
+      const rawBody = path.startsWith('/webhooks/telnyx/')
+        ? (request as Request & { telnyxEvent?: unknown }).telnyxEvent
+        : request.body;
+      const update = provider.parseStatusUpdate(rawBody);
       const traceId = requestTraceId(request);
       let session = await calls.findByProviderCall(update.providerCallId, update.provider);
       // A callback that beat our own record of the provider's id: the `callId` in the URL we gave the provider says whose it is.
@@ -524,7 +606,7 @@ export function createApp(options: AppOptions): express.Express {
     next();
   });
   const providers = createProviderMap(
-    options.providers ?? [new TwilioProvider(), new FakeTelephonyProvider()],
+    options.providers ?? [new TwilioProvider(), new TelnyxProvider(), new FakeTelephonyProvider()],
   );
   const messaging = options.messagingProvider ?? new FakeMessagingProvider();
   const ownerDevices = options.ownerDeviceService ?? new OwnerDeviceService();
@@ -560,11 +642,14 @@ export function createApp(options: AppOptions): express.Express {
       activeOutboundDestinations: (accountId) => callSessions.activeOutboundDestinations(accountId),
     }),
     // The URLs the provider is given are built here from our own configuration and the session's id; a request never supplies one.
+    // Telnyx needs only the status URL (Voice API webhooks carry every event to one URL); Twilio also needs the answer URL.
     dialUrls: (session, origin) => ({
       answerUrl: origin === 'owner_test'
         ? `${publicOrigin}/webhooks/twilio/voice/test?assistantLine=${encodeURIComponent(session.from ?? '')}&callId=${encodeURIComponent(session.id)}`
         : `${publicOrigin}/webhooks/twilio/voice/outbound?callId=${encodeURIComponent(session.id)}`,
-      statusUrl: `${publicOrigin}/webhooks/twilio/status?callId=${encodeURIComponent(session.id)}`,
+      statusUrl: callProvider.name === 'telnyx'
+        ? `${publicOrigin}/webhooks/telnyx/status?callId=${encodeURIComponent(session.id)}`
+        : `${publicOrigin}/webhooks/twilio/status?callId=${encodeURIComponent(session.id)}`,
     }),
   });
   phoneNumbers.bindCallSessions(callSessions);
@@ -987,6 +1072,39 @@ export function createApp(options: AppOptions): express.Express {
     response.status(status).json({ jsonrpc: '2.0', error: { code: status === 413 ? -32600 : -32700, message: status === 413 ? 'Request too large.' : 'Invalid request body.' }, id: null });
   });
 
+  if (options.telnyxPublicKey) {
+    // Telnyx signs the EXACT body bytes (Ed25519 over `<timestamp>|<raw>`).
+    // The global JSON parser below records those bytes on `request.rawBody`
+    // via its `verify` callback before parsing, so this middleware (which
+    // runs after it) verifies against the pristine bytes — never a
+    // re-serialization, which would break the signature. Missing/unverifiable
+    // → 403/400 before anything mutates.
+    app.use((request, _response, next) => {
+      if (!request.path.startsWith('/webhooks/telnyx/')) return next();
+      const raw = (request as Request & { rawBody?: string }).rawBody;
+      if (typeof raw !== 'string') {
+        next(new HttpError(400, 'Malformed webhook payload'));
+        return;
+      }
+      try {
+        const verified = verifyTelnyxWebhook({
+          rawBody: raw,
+          headers: telnyxHeadersFrom(request.headers as Record<string, string | string[] | undefined>),
+          publicKey: options.telnyxPublicKey!,
+        });
+        console.info('[webhook]', JSON.stringify({
+          provider: 'telnyx', eventType: verified.eventType, eventId: verified.eventId,
+          key: telnyxPublicKeyFingerprint(options.telnyxPublicKey!),
+        }));
+        (request as Request & { telnyxEvent?: unknown }).telnyxEvent = verified;
+      } catch (error) {
+        next(error);
+        return;
+      }
+      next();
+    });
+  }
+
   if (options.twilioAuthToken) {
     app.use((request, _response, next) => {
       if (!request.path.startsWith('/webhooks/twilio/')) return next();
@@ -1251,6 +1369,19 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
   registerStatusRoute(app, '/webhooks/twilio/status', twilioProvider, service, callSessions);
+
+  // Telnyx Voice API webhooks (Ed25519-verified above; `request.telnyxEvent`
+  // carries the verified envelope). One Voice API application delivers every
+  // event type to its primary URL with failover; the routes distinguish by
+  // `data.event_type` inside the adapters, so both mount the same handler
+  // shape as the Twilio pair: inbound ring vs lifecycle updates.
+  const telnyxProvider = providers.get('telnyx');
+  if (telnyxProvider) {
+    // Inbound ring: `call.initiated` (direction `incoming`).
+    registerIncomingCallRoute(app, '/webhooks/telnyx/voice', telnyxProvider, service, ownerConfiguration, phoneNumbers, callSessions);
+    // Lifecycle: `call.answered` / `call.bridged` / `call.hangup` + observations (null-status: recorded, not applied).
+    registerStatusRoute(app, '/webhooks/telnyx/status', telnyxProvider, service, callSessions);
+  }
 
   // A caller left a voicemail (only offered when the owner turned off answering calls).
   app.post('/webhooks/twilio/voicemail', async (request, response, next) => {

@@ -216,6 +216,11 @@ export class CallSessionService {
     return this.options.provider?.name ?? 'twilio';
   }
 
+  /** The carrier adapter this service dials through (the Telnyx webhook routes use it for call control). */
+  get provider(): CallProvider | undefined {
+    return this.options.provider;
+  }
+
   private log(level: 'info' | 'warn' | 'error', event: string, session: Pick<CallSessionRecord, 'id' | 'providerCallId' | 'traceId'> | null, fields: Record<string, unknown> = {}): void {
     this.logger.log(level, event, {
       callId: session?.id ?? null,
