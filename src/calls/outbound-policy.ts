@@ -13,7 +13,7 @@ export type OutboundOrigin =
   | 'agent'
   /** The owner pressed "test call", confirmed on their own phone. Human-initiated; the agent gate does not apply. */
   | 'owner_test'
-  /** The request arrived over a transport that cannot carry the idempotency key, deadline and trace id (MCP today). */
+  /** The request arrived over any transport other than the in-process one (MCP included). Placing a call is refused until that is a deliberate decision. */
   | 'untrusted_transport';
 
 export interface OutboundCallRequest {

@@ -6,7 +6,6 @@ import test from 'node:test';
 import pg from 'pg';
 
 import { appPortSessionFor } from '../src/appport/session.js';
-import { createCallMcpBridge } from '../src/appport/mcp.js';
 import { REFERENCE_RATES } from '../src/billing/call-reference-rates.js';
 import { CallCostLedger, FINALIZATION_MAX_ATTEMPTS, type LedgerCall } from '../src/calls/cost/ledger.js';
 import { StaticPriceBook, type PriceRate } from '../src/calls/cost/pricing.js';
@@ -19,7 +18,7 @@ import { PostgresCallUsageStore } from '../src/repositories/postgres-call-usage-
 import { TwilioCallProvider, type TwilioCallsClient } from '../src/telephony/twilio-call-provider.js';
 import { extractRealtimeUsage } from '../src/voice/realtime/usage.js';
 import type { RealtimeServerEvent } from '../src/voice/realtime/connector.js';
-import { createCallStack, tenant } from './support/calls.js';
+import { createCallStack, tenant, mcpClientFor } from './support/calls.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const postgresOnly = { skip: databaseUrl ? undefined : 'set TEST_DATABASE_URL to run against Postgres' };
@@ -397,7 +396,7 @@ test('call.get cost: unknown, active, final and unpriced states, identical over 
   let clock = at(0).getTime();
   const stack = createCallStack({ priceBook: book(), now: () => new Date(clock) });
   const make = async () => stack.adminA.create({ direction: 'outbound', to: freshNumber() }, { idempotencyKey: uniq('rp') });
-  const mcp = createCallMcpBridge(stack.application, appPortSessionFor(tenant('acct_a', 'member')));
+  const mcp = await mcpClientFor(stack.application, appPortSessionFor(tenant('acct_a', 'member')));
 
   const fresh = await make();
   const unknown = await stack.adminA.get({ callId: fresh.callId });
@@ -424,7 +423,7 @@ test('call.get cost: unknown, active, final and unpriced states, identical over 
   assert.doesNotMatch(text, /rate_card|rateId|provider_reported|reportedAmount|idempotency|providerCallId|CA[0-9a-f]{6}/i, 'no pricing internals, provider ids or keys');
 
   await assert.rejects(stack.adminB.get({ callId: fresh.callId }), (error: { code?: string }) => error.code === 'NOT_FOUND');
-  const foreign = createCallMcpBridge(stack.application, appPortSessionFor(tenant('acct_b', 'admin')));
+  const foreign = await mcpClientFor(stack.application, appPortSessionFor(tenant('acct_b', 'admin')));
   const refused = (await foreign.callTool('call_get', { callId: fresh.callId })).content[0].text;
   assert.match(refused, /^NOT_FOUND/);
   assert.doesNotMatch(refused, /cost|0\.14/);

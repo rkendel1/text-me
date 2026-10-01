@@ -7,7 +7,6 @@ import pg from 'pg';
 import request from 'supertest';
 
 import { appPortSessionFor } from '../src/appport/session.js';
-import { createCallMcpBridge } from '../src/appport/mcp.js';
 import { REFERENCE_RATES } from '../src/billing/call-reference-rates.js';
 import { CallCostLedger, type LedgerCall } from '../src/calls/cost/ledger.js';
 import { StaticPriceBook, type PriceRate } from '../src/calls/cost/pricing.js';
@@ -23,7 +22,7 @@ import { onboardTenant } from './support/tenant.js';
 import { TwilioCallProvider, type TwilioCallsClient } from '../src/telephony/twilio-call-provider.js';
 import { extractRealtimeUsage } from '../src/voice/realtime/usage.js';
 import { InMemoryConversationRepository } from './support/in-memory-repository.js';
-import { createCallStack, tenant } from './support/calls.js';
+import { createCallStack, tenant, mcpClientFor } from './support/calls.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const postgresOnly = { skip: databaseUrl ? undefined : 'set TEST_DATABASE_URL to run against Postgres' };
@@ -407,11 +406,11 @@ test('call.get carries the cost, only for the owning account, over AppPort and M
   assert.equal(Object.hasOwn(own, 'providerCallId'), false, 'still no provider ids');
 
   await assert.rejects(stack.adminB.get({ callId: created.callId }), (error: { code?: string }) => error.code === 'NOT_FOUND');
-  const foreign = createCallMcpBridge(stack.application, appPortSessionFor(tenant('acct_b', 'admin')));
+  const foreign = await mcpClientFor(stack.application, appPortSessionFor(tenant('acct_b', 'admin')));
   assert.match((await foreign.callTool('call_get', { callId: created.callId })).content[0].text, /^NOT_FOUND/);
   assert.ok(!(await foreign.callTool('call_get', { callId: created.callId })).content[0].text.includes('estimatedCost'));
 
-  const mcp = createCallMcpBridge(stack.application, appPortSessionFor(tenant('acct_a', 'member')));
+  const mcp = await mcpClientFor(stack.application, appPortSessionFor(tenant('acct_a', 'member')));
   assert.deepEqual(JSON.parse((await mcp.callTool('call_get', { callId: created.callId })).content[0].text).cost, own.cost, 'MCP projects the same representation');
   assert.equal((await stack.adminB.list()).items.length, 0);
   assert.equal(Object.hasOwn((await stack.adminA.list()).items[0], 'cost'), false, 'list is unchanged');

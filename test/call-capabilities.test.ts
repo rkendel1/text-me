@@ -6,10 +6,9 @@ import { createRequest, newRequestId } from '@appport/protocol';
 import { appPortSessionFor } from '../src/appport/session.js';
 import { CallCapabilityClient } from '../src/appport/call-client.js';
 import { MAX_WAIT_SECONDS } from '../src/appport/call-application.js';
-import { createCallMcpBridge } from '../src/appport/mcp.js';
 import { InMemoryCallSessionStore } from '../src/calls/store.js';
 import { FakeCallProvider } from '../src/calls/provider.js';
-import { createCallStack, LINE_A, tenant } from './support/calls.js';
+import { createCallStack, LINE_A, tenant, mcpClientFor } from './support/calls.js';
 
 const rejectsWith = (code: string) => (error: unknown) => (error as { code?: string }).code === code;
 const key = (() => { let n = 0; return (label = 'k') => `${label}-${Date.now().toString(36)}-${n++}`; })();
@@ -213,21 +212,21 @@ test('provider failures on end surface as errors without leaking provider detail
   assert.equal((await adminA.get({ callId: created.callId })).status, 'ending');
 });
 
-test('MCP projects the call capabilities, but cannot place a call: it cannot carry the request\'s metadata', async () => {
+test('MCP projects the call capabilities, but cannot place a call: the outbound policy refuses the transport', async () => {
   const { application, provider, calls, adminA } = createCallStack();
-  const admin = createCallMcpBridge(application, appPortSessionFor(tenant('acct_a', 'admin')));
-  const member = createCallMcpBridge(application, appPortSessionFor(tenant('acct_a', 'member')));
-  const other = createCallMcpBridge(application, appPortSessionFor(tenant('acct_b', 'admin')));
+  const admin = await mcpClientFor(application, appPortSessionFor(tenant('acct_a', 'admin')));
+  const member = await mcpClientFor(application, appPortSessionFor(tenant('acct_a', 'member')));
+  const other = await mcpClientFor(application, appPortSessionFor(tenant('acct_b', 'admin')));
 
-  assert.deepEqual(admin.listTools().map((tool) => tool.name).sort(), ['call_create', 'call_end', 'call_get', 'call_list']);
-  const create = admin.listTools().find((tool) => tool.name === 'call_create')!;
-  assert.deepEqual(create._appport.authorization, ['call.create']);
+  assert.deepEqual((await admin.listTools()).map((tool) => tool.name).sort(), ['call_create', 'call_end', 'call_get', 'call_list']);
+  const create = (await admin.listTools()).find((tool) => tool.name === 'call_create')!;
+  assert.deepEqual((create._meta as any)['dev.appport/capability'].authorization, ['call.create']);
 
   // Placing a call over MCP is refused before anything is created or dialed, whatever the session may do.
   const refused = await admin.callTool('call_create', { direction: 'outbound', to: '+15551230000' });
   assert.equal(refused.isError, true);
   assert.match(refused.content[0].text, /^FORBIDDEN/);
-  assert.match(refused.content[0].text, /idempotency key, timeout and trace id|transport/i);
+  assert.match(refused.content[0].text, /not available over this transport/i);
   assert.equal(provider.created.length, 0);
   assert.equal((await adminA.list()).items.length, 0, 'not even a durable session was left behind');
 
@@ -242,5 +241,5 @@ test('MCP projects the call capabilities, but cannot place a call: it cannot car
   await calls.transition(made.callId, 'answered');
   assert.equal(JSON.parse((await admin.callTool('call_end', { callId: made.callId, reason: 'via mcp' })).content[0].text).status, 'ending');
   assert.equal(provider.ended.length, 1);
-  assert.equal((await admin.callTool('no_such_tool', {})).isError, true);
+  await assert.rejects(admin.callTool('no_such_tool', {}), /Unknown tool/);
 });

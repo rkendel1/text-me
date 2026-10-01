@@ -210,7 +210,7 @@ export function createCallApplication(options: CallApplicationOptions): AppPortA
           const placed = await calls.placeOutbound(
             actorOf(context),
             { direction: 'outbound', from: input.from, to: input.to, objective: input.objective, providerCallId: input.providerCallId, conversationId: input.conversationId },
-            // Only the in-process path carries the idempotency key, deadline and trace id intact. Any other transport cannot place calls.
+            // Only the in-process transport may place a call; any other (MCP included) is refused by the outbound policy.
             { origin: context.metadata.transport === IN_PROCESS ? 'agent' : 'untrusted_transport' },
           );
           return { callId: placed.id, status: placed.status };
