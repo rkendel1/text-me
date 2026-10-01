@@ -20,7 +20,7 @@ flowchart LR
   end
   WEB -->|in-process| APP
   VR -->|transitions| SVC
-  MCPC --> MCP["@appport/mcp bridge (projection)"] --> APP
+  MCPC --> MCP["@appport/mcp server (projection)"] --> APP
   APP["AppPort application<br/>call.create / get / list / end"] --> SVC[CallSessionService]
   SVC --> TR["transitionCallSession()<br/>the only writer of status"]
   TR --> DB[("call_sessions<br/>call_provider_events")]
@@ -132,18 +132,11 @@ depend on which instance answered. The call application therefore disables it an
 **In-process.** `CallCapabilityClient` (`src/appport/call-client.ts`) calls `application.handleRequest` directly: no HTTP round trip, same
 validation, authorization and metadata. Owner **Stop** uses it (`call.end`, idempotency key `owner-stop:<conversation>`).
 
-**MCP.** `createCallMcpBridge` (`src/appport/mcp.ts`) is `@appport/mcp`'s own `createMcpBridge`, unchanged, restricted to `call.*`. It
-yields the tools `call_create`, `call_get`, `call_list`, `call_end` with the capabilities' own schemas and permissions, through the same
-dispatch. There is no JSON-RPC, transport or MCP implementation in this repository. **Not yet mounted on a network endpoint**: `@appport/mcp@1.0.2`
-ships no server or transport (it says "wire `listTools`/`callTool` into an MCP server").
-
-> **Known limitation — metadata over MCP.** `@appport/mcp@1.0.2`'s `callTool` builds its request from only `requestId`, `capability` and
-> `input`, so an idempotency key, timeout and trace id **cannot be carried over MCP** with the published package. The fix is small and is
-> prepared as [`upstream/appport-mcp-request-metadata.patch`](upstream/appport-mcp-request-metadata.patch) against
-> `rkendel1/appport` (`callTool(name, args, meta?)`, with a test that fails without it). Until it is released and adopted, **do not expose
-> outbound dialing over MCP**. This is enforced, not just documented: only the `in-process` transport may place a call; a request arriving with
-> `transport: mcp` (or anything else) is refused by the outbound policy (`transport_not_supported`) before anything is persisted or dialed.
-> The patch is prepared as a separate change and is not released.
+**MCP.** The `/mcp` endpoint is `@appport/mcp`'s own Streamable HTTP server over this same application, restricted to `call.*`; see
+[mcp.md](mcp.md). There is no JSON-RPC, transport or MCP implementation in this repository, and the old in-process bridge is retired. Over MCP the
+idempotency key, timeout and trace id now travel (`_meta`), but **outbound dialing over MCP stays refused**: only the `in-process` transport may
+place a call, and a request arriving with `transport: mcp` is refused by the outbound policy (`transport_not_supported`) before anything is
+persisted or dialed. Changing that is a separate, deliberate decision (see "Before autonomous outbound calling" in mcp.md).
 
 ## Outbound execution
 
@@ -256,5 +249,5 @@ for webhooks and the AppPort request's trace id for capabilities.
 ## Not built
 
 Deliberately left for later PRs: bulk, scheduled or campaign dialing, automated retries, caller-ID rotation, contact lists;  answering-machine detection; AI-disclosure, consent, calling-window and
-recording-consent policy; voicemail strategy; an MCP server transport; `call.answer`/`call.handoff`; an `operations.*`
+recording-consent policy; voicemail strategy; `call.answer`/`call.handoff`; an `operations.*`
 view of calls (core's operation reader has no per-tenant ownership hook, so calls are read through `call.get`).

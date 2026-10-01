@@ -1,4 +1,8 @@
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Session } from '@appport/protocol';
+import type { AppPortApplication } from '@appport/core';
+import { createCallMcpServer } from '../../src/appport/mcp.js';
 
 import { appPortSessionFor, telephonySessionFor } from '../../src/appport/session.js';
 import { CallCapabilityClient } from '../../src/appport/call-client.js';
@@ -87,5 +91,23 @@ export function providerEvent(providerCallId: string, rawStatus: string, status:
     provider: 'twilio', providerCallId, rawStatus, status,
     eventId: `${providerCallId}:${rawStatus}${extra.sequence ? `:${extra.sequence}` : ''}`,
     ...(extra.sequence ? { sequence: extra.sequence } : {}),
+  };
+}
+
+/**
+ * An MCP client connected, in memory, to `@appport/mcp`'s server over the application, running as `session`.
+ * (The network endpoint is covered by test/mcp-endpoint.test.ts; this is the same server without HTTP.)
+ */
+export async function mcpClientFor(application: AppPortApplication, session: Session | undefined) {
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await createCallMcpServer(application, async () => session).connect(serverSide);
+  const client = new Client({ name: 'test', version: '1.0.0' });
+  await client.connect(clientSide);
+  return {
+    client,
+    listTools: async () => (await client.listTools()).tools,
+    callTool: async (name: string, args: Record<string, unknown> = {}) => (await client.callTool({ name, arguments: args })) as {
+      isError?: boolean; content: Array<{ text: string }>; structuredContent?: Record<string, any>;
+    },
   };
 }

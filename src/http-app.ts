@@ -74,6 +74,8 @@ import { checkout, portal, verifyWebhook, type StripeBilling } from './billing/s
 import { createCallApplication } from './appport/call-application.js';
 import { CallCapabilityClient } from './appport/call-client.js';
 import { appPortSessionFor } from './appport/session.js';
+import { createCallMcpHandler } from './appport/mcp.js';
+import { errors as appPortErrors } from '@appport/protocol';
 import { isTerminal } from './calls/model.js';
 import { DefaultOutboundPolicy, type OutboundPolicy } from './calls/outbound-policy.js';
 import { FakeCallProvider, type CallProvider } from './calls/provider.js';
@@ -205,6 +207,10 @@ function createProviderMap(
 ): Map<string, TelephonyProvider> {
   return new Map(providers.map((provider) => [provider.name, provider]));
 }
+
+/** Where the MCP endpoint is mounted, and the largest request it will read. */
+const MCP_PATH = '/mcp';
+const MCP_MAX_BODY = '256kb';
 
 function bearerToken(request: Request): string | undefined {
   const authorization = request.header('Authorization') ?? '';
@@ -781,9 +787,11 @@ export function createApp(options: AppOptions): express.Express {
     }
   });
 
-  app.use(express.json({ verify: (request, _response, buffer) => {
+  // /mcp carries JSON-RPC and is parsed by the MCP SDK (malformed JSON is its parse error), not by this parser.
+  const jsonBody = express.json({ verify: (request, _response, buffer) => {
     (request as Request & { rawBody?: string }).rawBody = buffer.toString('utf8');
-  } }));
+  } });
+  app.use((request, response, next) => (request.path === MCP_PATH ? next() : jsonBody(request, response, next)));
   app.use(express.urlencoded({ extended: false }));
 
   const auth = new AuthService(options.authSessionStore ?? new InMemoryAuthSessionStore());
@@ -927,6 +935,57 @@ export function createApp(options: AppOptions): express.Express {
   };
   /** The authorized account for this request. Never from the body, a phone number or the deployment. */
   const accountOf = (request: Request): string => tenantOf(request).accountId;
+
+  // The MCP endpoint: `@appport/mcp`'s stateless Streamable HTTP handler over the call application. Credentials are
+  // the same bearer session every other API route takes; the member's account and role become the AppPort session,
+  // and AppPort's authorizer and the capability handlers decide everything else. Nothing is kept between requests.
+  const mcpHandler = createCallMcpHandler(callApplication, async (headers) => {
+    const authorization = [headers.authorization].flat()[0];
+    if (!authorization) return undefined;
+    const token = /^bearer\s+(\S+)\s*$/i.exec(authorization)?.[1];
+    const result = await auth.authenticate(token);
+    if (!result.ok) throw appPortErrors.unauthorized(authMessages[result.reason]);
+    const context = await tenancy.resolveContext(result.session.userId, result.session.accountId, result.session.id);
+    if (!context) throw appPortErrors.forbidden('You’re not a member of this account.');
+    return appPortSessionFor(context);
+  });
+  const mcpRateLimit = rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: 'draft-8', legacyHeaders: false });
+  app.all(MCP_PATH, mcpRateLimit, express.raw({ type: () => true, limit: MCP_MAX_BODY }), async (request, response, next) => {
+    try {
+      // Credentials travel in a header, never a cookie, so a page in a browser cannot ride one; still refuse a
+      // browser origin that is not ours (DNS rebinding). Clients that are not browsers send no Origin.
+      const origin = request.header('origin');
+      const own = new Set([publicOrigin, `${request.protocol}://${request.get('host')}`, `${(request.header('x-forwarded-proto') ?? request.protocol).split(',')[0].trim()}://${request.get('host')}`]);
+      if (origin && !own.has(origin)) {
+        response.status(403).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Origin not allowed.' }, id: null });
+        return;
+      }
+      const headers = new Headers();
+      for (const [name, value] of Object.entries(request.headers)) {
+        if (['content-length', 'transfer-encoding', 'connection', 'host'].includes(name)) continue;
+        if (Array.isArray(value)) value.forEach((item) => headers.append(name, item));
+        else if (value !== undefined) headers.set(name, value);
+      }
+      const aborted = new AbortController();
+      response.on('close', () => { if (!response.writableEnded) aborted.abort(); });
+      const method = request.method.toUpperCase();
+      const body = Buffer.isBuffer(request.body) && request.body.length > 0 ? request.body : undefined;
+      const upstream = await mcpHandler(new globalThis.Request(new URL(MCP_PATH, publicOrigin), {
+        method, headers, signal: aborted.signal, ...(method !== 'GET' && method !== 'HEAD' && body ? { body: body.toString('utf8') } : {}),
+      }));
+      response.status(upstream.status);
+      upstream.headers.forEach((value, name) => response.setHeader(name, value));
+      response.send(Buffer.from(await upstream.arrayBuffer()));
+    } catch (error) {
+      next(error);
+    }
+  });
+  // An oversized or unreadable body never reaches AppPort; say so in the protocol's own terms, with no detail.
+  app.use(MCP_PATH, (error: unknown, _request: Request, response: Response, next: NextFunction) => {
+    const status = (error as { status?: number } | undefined)?.status;
+    if (status !== 413 && status !== 400) return next(error);
+    response.status(status).json({ jsonrpc: '2.0', error: { code: status === 413 ? -32600 : -32700, message: status === 413 ? 'Request too large.' : 'Invalid request body.' }, id: null });
+  });
 
   if (options.twilioAuthToken) {
     app.use((request, _response, next) => {

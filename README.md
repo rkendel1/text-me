@@ -149,6 +149,11 @@ Twilio webhooks: `POST /webhooks/twilio/voice`, `/webhooks/twilio/status`,
 `/webhooks/twilio/sms`, `/webhooks/twilio/voice/continue`, and the media
 stream WebSocket at `/media-stream`.
 
+## MCP (external agents)
+
+`POST /mcp` serves the call capabilities (`call.create/get/list/end`) to MCP clients as an AppPort projection. Bearer-token auth, outbound
+placing refused. See [docs/mcp.md](docs/mcp.md).
+
 ## Mac Messages bridge (optional)
 
 An optional integration; nothing in the product depends on it. With it, the
